@@ -1,0 +1,29 @@
+# cann-llm 示例配置
+# 用法：cann-llm-server --config examples/config.example.toml
+# 环境变量覆盖：CANN_LLM_MODEL__MODEL_DIR / CANN_LLM_SERVER__PORT ...
+# 优先级：命令行 > 环境变量 > 本文件 > 内置默认值
+
+[model]
+# 模型目录（需含 omc / SubGraph_0.weight / embedding / tokenizer / json）
+model_dir = "/storage/Users/currentUser/work/llm/models/rebuilt"
+model_id  = "qwen2.5-1.5b"
+backend   = "cann"
+chat_template = "chatml"
+system_prompt = "You are a helpful assistant."
+
+max_tokens = 256
+temperature = 0.7
+top_k = 20
+top_p = 0.95
+repetition_penalty = 1.1
+max_prompt_tokens = 1800
+context_length = 2048
+
+[server]
+host = "127.0.0.1"
+port = 8000
+max_queue = 8
+queue_timeout_s = 120.0
+request_timeout_s = 600.0
+cors_allow_origin = "*"
+# api_key = "sk-xxx"     # 非空则要求 Authorization: Bearer sk-xxx
