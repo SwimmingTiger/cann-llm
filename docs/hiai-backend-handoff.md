@@ -501,3 +501,31 @@ GetOneTokenGeneration    —          GetOutputTokenCount   —
 3. 接进 `hiai.py` 的 `load()`/`generate()`，`supports_streaming` 依据 `SetOnSomeTokenGenerateDoneFunc`
 4. CLI + HTTP 端到端验证（长 prompt / 中文 / 连续多次）
 5. 测试与 git 提交
+
+---
+
+# ✅ 最终验证结果（Round 89，判据 #1 达成）
+
+三个 prompt 全部通过上面那条路径跑通，**输出用自研分词器 `decode()` 得到连贯文本**：
+
+| prompt | 字节 | 输入 token | 输出 token | 解码后的文本（截断）|
+|---|---|---|---|---|
+| `def add(a,b): return a+` | 23 | **9** ✓ | 60 | ``' b\n#def sub(a,b): return a-b\n#def mul(a,b): return a*b\n#def div(a,b): return a/b\n...'`` |
+| `def add(a, b): return a + b` | 26 | **11** ✓ | 60 | ``'\n#def subtract(a, b): return a - b\n#def multiply(a, b): return a * b\n...'`` |
+| `你好，请写一个加法函数` | 33 | **8** ✓ | 60 | ``'，输入两个数，返回它们的和。\n\n\ndef add(a, b):\n    return a + b\n\n# 示例使用\nresult = add(3, 5)\nprint("3 + 5 =", result)  # 输出: 3 + 5 = 8'`` |
+
+- **长 prompt**（此前必崩）✓ 正确输出
+- **中文 prompt**（此前必崩）✓ 正确输出中文 + 代码
+- **`in=1` / `ampie...` 胡话彻底消失** ✓✓
+- **`GetInputTokenCount` 与自研分词器编码长度逐一对上**（9/11/8）✓✓
+
+取输出必须用 **`GetAllTokenGeneration(ctx, int32*, n)`**（int32 数组）——
+`GetOneTokenGeneration` 只给一个 token，`GetAllGeneration` 返回 1（格式不符）。
+
+## 剩余工作（判据 #2–#4）
+
+1. 把上面 8 步搬进 `src/cann_llm/backends/hiai.py` 的 `load()` / `generate()`
+2. 过滤终止 token（`<|im_end|>` / `<|endoftext|>`）
+3. `supports_streaming`：用 `SetOnSomeTokenGenerateDoneFunc` + 轮询 `GetDecodeNum` 实现
+4. CLI（`-b hiai`）与 HTTP 服务端到端验证
+5. 测试 + 提交（判据 #4/#5 收尾）
