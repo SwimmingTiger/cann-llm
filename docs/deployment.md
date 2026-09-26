@@ -97,7 +97,8 @@ make server MODEL=<模型目录> PORT=8000 BACKEND=hiai
 后台启动 / 状态 / 停止用现成脚本：
 
 ```bash
-scripts/start_server.sh -d <模型目录> -b          # 后台 + 等就绪
+# 注意：-b 是【后端】，-B 才是【后台】！
+scripts/start_server.sh -d <模型目录> -b hiai -B   # 后台 + 等就绪
 scripts/start_server.sh --status
 scripts/start_server.sh --stop
 ```
