@@ -5,6 +5,30 @@
 
 ## [Unreleased]
 
+### Added — 解释器选择会打印路径，没兼容的会引导装「Python安装器」
+
+在上一条（libc 不兼容导致 segfault）基础上的补强，都是"把话说清楚"：
+
+1. **打印选中的解释器路径**：`start_chat.sh` 原本完全不打印 Python 信息，
+   `start_server.sh` 只打版本。现在两个都打
+   `✓ Python 3.12.8  ·  /data/service/hnp/bin/python3`；若是**自动改用了别的**
+   （默认 python3 不兼容），再补一句原因：
+   `（默认的 /…/.harmonybrew/bin/python3 与引擎 libc 不兼容，已自动改用）`。
+   注意这句只在**确实换成了兼容解释器**时才出现 —— 回退到不兼容那个时不该这么说。
+
+2. **一个兼容的都没有时：仍然回退，但把问题和安装建议讲清楚**（不是直接退出，
+   免得用户什么都干不了）：列出"已检查过的候选 + 各自为什么不行"，并提示
+   **到应用市场安装「Python安装器」**，或 `PYTHON=/path/to/python3` 指定。
+   之后后端仍会给出自己的清晰报错（不再是 core dump）。
+
+3. `PYTHON=` 显式指定时**不再硬拒**，而是照用 + 打兼容性警告。
+
+4. 候选列表可用 `CANN_LLM_PYTHON_CANDIDATES` 覆盖（默认
+   `python3 python /data/service/hnp/bin/python3`），装完安装器若不在这些位置可补充。
+
+顺带把 `die/ok/info/warn` 的定义挪到 `resolve_python` 之前（它要用 `die`），
+并去掉了重复定义。
+
 ### Fixed — 用第三方 Python（如 harmonybrew）启动会 segfault
 
 现象：`./scripts/start_chat.sh -d …` 在 brew 的 Python 下**直接 core dump**，

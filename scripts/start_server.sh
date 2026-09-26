@@ -10,6 +10,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# die/ok/info/warn 要在 resolve_python 之前定义好（它会用 die）
+die()  { printf '\033[31m错误\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m›\033[0m %s\n' "$*"; }
+ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m!\033[0m %s\n' "$*" >&2; }
+
 # 解释器选择：显式给了 PYTHON 就用它；否则在候选里挑第一个与 CANN NDK 库
 # **libc 兼容**的。本机系统 libc 是 musl、引擎按 musl 编；某些第三方 Python
 # （如 harmonybrew 的）是 glibc 构建 + libmusl_compat 垫片，加载引擎会段错误。
@@ -24,18 +31,58 @@ raise SystemExit(1 if "libmusl_compat" in maps else 0)
 PYEOF
 }
 
-resolve_python() {
-    if [[ -n "${PYTHON:-}" ]]; then printf '%s' "$PYTHON"; return; fi
-    local cand
-    for cand in python3 /data/service/hnp/bin/python3; do
-        if command -v "$cand" >/dev/null 2>&1 && py_libc_ok "$cand"; then
-            printf '%s' "$cand"; return
-        fi
-    done
-    printf '%s' python3          # 都不兼容就原样返回，交给后端报清楚
+# 解析结果放进全局（不用子 shell，否则带不出警告信息）
+#   PY       —— 选中的解释器
+#   PY_WARN  —— 非空表示"没找到兼容的，回退了"，内容是要提示给用户的话
+PY=""
+PY_WARN=""
+
+# 一个解释器为什么不能用（用户据此判断该装什么）
+py_reject_reason() {   # $1 = 解释器路径
+    if ! command -v "$1" >/dev/null 2>&1; then printf '找不到'; return; fi
+    if py_libc_ok "$1"; then printf ''; return; fi
+    printf 'glibc 构建（带 libmusl_compat 垫片），与按 musl 编译的引擎不兼容'
 }
 
-PY="$(resolve_python)"
+py_conflict_msg() {    # $1 = 选中的解释器；$2 = 已检查候选的说明
+    cat <<EOF
+$1 与 CANN NDK 库的 libc 不兼容，加载引擎时大概率会**直接段错误**（core dumped）。
+    本机系统 libc 是 musl，libcann_llm_engine.so 按 musl 编译；而 glibc 构建的
+    Python（靠 libmusl_compat 垫片运行）把 musl 版引擎加载进来就会崩。
+$2
+    → 请到 **应用市场** 安装「**Python安装器**」，装完重新运行本脚本；
+      或用 PYTHON=/path/to/python3 指定一个可用的解释器。
+EOF
+}
+
+resolve_python() {
+    # 显式指定：照用，但兼容性问题要提示出来
+    if [[ -n "${PYTHON:-}" ]]; then
+        command -v "$PYTHON" >/dev/null 2>&1 \
+            || die "PYTHON 指定的解释器不存在: $PYTHON"
+        PY="$PYTHON"
+        py_libc_ok "$PY" || PY_WARN="$(py_conflict_msg "$PY" "")"
+        return 0
+    fi
+
+    # 候选可配（装完「Python安装器」后若不在以下位置，可用它补充）
+    local cand first_seen="" tried=""
+    for cand in ${CANN_LLM_PYTHON_CANDIDATES:-python3 python /data/service/hnp/bin/python3}; do
+        command -v "$cand" >/dev/null 2>&1 || continue
+        [[ -n "$first_seen" ]] || first_seen="$(command -v "$cand")"
+        if py_libc_ok "$cand"; then PY="$cand"; return 0; fi
+        tried+="      · $(command -v "$cand")：$(py_reject_reason "$cand")"$'\n'
+    done
+
+    # 一个兼容的都没有：**仍然回退**（免得用户什么都干不了），但把问题和安装
+    # 建议说清楚 —— 真崩了用户也知道为什么、下一步该做什么。
+    PY="${first_seen:-python3}"
+    PY_WARN="$(py_conflict_msg "$PY" "    已检查过的候选：
+${tried}")"
+    return 0
+}
+
+resolve_python
 RUNDIR="${CANN_LLM_RUNDIR:-$ROOT/.run}"
 PIDFILE="$RUNDIR/server.pid"
 STATEFILE="$RUNDIR/server.state"       # 记录启动时的 host/port，供 --status/--stop 使用
@@ -49,11 +96,6 @@ API_KEY="${CANN_LLM_API_KEY:-}"
 BACKEND="${CANN_LLM_BACKEND:-}"
 BACKGROUND=0
 WAIT_SECS=90
-
-die()  { printf '\033[31m错误\033[0m %s\n' "$*" >&2; exit 1; }
-info() { printf '\033[36m›\033[0m %s\n' "$*"; }
-ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
-warn() { printf '\033[33m!\033[0m %s\n' "$*" >&2; }
 
 usage() {
     sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -207,7 +249,22 @@ command -v "$PY" >/dev/null 2>&1 || die "找不到 $PY；可用 PYTHON=/path/to/
 import sys
 raise SystemExit(0 if sys.version_info >= (3, 9) else 1)
 PY
-ok "$("$PY" -c 'import sys; print("Python", sys.version.split()[0])')"
+
+# 记录解释器选择结果：路径、版本，以及是否发生了"自动回退"
+PY_PATH="$(command -v "$PY" 2>/dev/null || printf '%s' "$PY")"
+PY_VER="$("$PY" -c 'import sys; print(sys.version.split()[0])' 2>/dev/null || echo '?')"
+PY_NOTE=""
+if [[ -z "${PYTHON:-}" ]] && command -v python3 >/dev/null 2>&1 \
+   && ! py_libc_ok python3 && [[ "$PY" != "python3" ]] && py_libc_ok "$PY"; then
+    PY_NOTE="  （默认的 $(command -v python3) 与引擎 libc 不兼容，已自动改用）"
+fi
+
+ok "Python $PY_VER  ·  $PY_PATH$PY_NOTE"
+# 没找到兼容解释器时已回退 —— 一定要把问题和安装建议说清楚
+if [[ -n "$PY_WARN" ]]; then
+    warn "解释器兼容性提示"
+    printf '%s\n\n' "$PY_WARN" >&2
+fi
 
 NDK_LIB="${CANN_LLM_LIB:-/system/lib64/ndk/libcann_llm_engine.so}"
 if [[ "${BACKEND:-cann}" == "cann" || -z "$BACKEND" ]]; then
