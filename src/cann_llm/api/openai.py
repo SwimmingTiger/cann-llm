@@ -28,12 +28,32 @@ class ChatCompletionRequest:
     messages: List[Message]
     stream: bool = False
     params: GenerationParams = field(default_factory=GenerationParams)
+    #: OpenAI 格式的工具声明（原样透传给模板）
+    tools: List[Dict[str, Any]] = field(default_factory=list)
+    tool_choice: Optional[str] = None
     # 记录被接受但未生效的字段，便于在响应头/日志里说明
     ignored: List[str] = field(default_factory=list)
     raw: Dict[str, Any] = field(default_factory=dict)
 
     #: 引擎一次只能产一路，n>1 直接拒绝
     n: int = 1
+
+    @property
+    def tool_names(self) -> List[str]:
+        out = []
+        for t in self.tools:
+            fn = t.get("function") if isinstance(t, dict) else None
+            if isinstance(fn, dict) and fn.get("name"):
+                out.append(str(fn["name"]))
+        return out
+
+    @property
+    def requires_tool_call(self) -> bool:
+        return self.tool_choice == "required"
+
+    @property
+    def forbids_tool_call(self) -> bool:
+        return self.tool_choice == "none"
 
 
 #: 永远拒绝：这些字段一旦被忽略，调用方会拿到"看起来正常但答案是错的"结果。
@@ -49,11 +69,10 @@ _ALWAYS_REJECT = {
 #: 即使只是普通聊天也会带上 tools，一律 400 会让这些客户端完全用不了。
 #: 需要「宁可报错也别给我假象」的场景，把 server.reject_unsupported 设成 true。
 _IGNORABLE = {
-    "tools": "暂不支持 function calling",
-    "functions": "暂不支持 function calling",
-    "tool_choice": "暂不支持 tools",
-    "function_call": "暂不支持 function calling",
-    "parallel_tool_calls": "暂不支持 tools",
+    # 注：tools 不在忽略之列了 —— 它是 agent 能力的入口，见 parse_chat_request。
+    # tool_choice 目前只支持 "auto" 的语义（模型自行决定），其余取值忽略。
+    "tool_choice": "仅支持 auto 语义（由模型自行决定是否调用）",
+    "function_call": "请改用 tools",
     "frequency_penalty": "引擎无对应能力",
     "presence_penalty": "引擎无对应能力",
     "response_format": "本服务不强制输出格式",
@@ -106,13 +125,25 @@ def parse_chat_request(body: Dict[str, Any], *, default_model: str = "",
     for i, m in enumerate(raw_msgs):
         if not isinstance(m, dict) or "role" not in m:
             raise InvalidRequestError(f"messages[{i}] 缺少 role")
-        messages.append(Message(role=str(m["role"]), content=_as_text(m.get("content"))))
+        messages.append(_parse_message(m, i))
     if not any(m.role != "system" for m in messages):
         raise InvalidRequestError("messages 至少需要一条非 system 消息")
 
     n = body.get("n", 1)
     if not isinstance(n, int) or n != 1:
         raise InvalidRequestError("本服务只支持 n=1（引擎一次只产一路）")
+
+    tools = _parse_tools(body.get("tools"))
+    tool_choice_raw = body.get("tool_choice")
+    tool_choice: Optional[str] = None
+    if isinstance(tool_choice_raw, str):
+        if tool_choice_raw not in ("auto", "none", "required"):
+            raise InvalidRequestError(
+                f"tool_choice 只支持 auto/none/required，收到 {tool_choice_raw!r}")
+        tool_choice = tool_choice_raw
+    elif isinstance(tool_choice_raw, dict):
+        # 指定具体函数：本服务不支持强制某一个，退化成 required
+        tool_choice = "required"
 
     if body.get("stream") and body.get("stream_options"):
         # 只支持 include_usage，其它忽略
@@ -123,6 +154,9 @@ def parse_chat_request(body: Dict[str, Any], *, default_model: str = "",
     ignored: List[str] = []
     for key, why in _IGNORABLE.items():
         if body.get(key) in (None, [], {}):
+            continue
+        # tool_choice="auto" 就是本服务的行为，不算被忽略
+        if key == "tool_choice" and body.get(key) == "auto":
             continue
         if strict:
             raise InvalidRequestError(f"字段 {key} 不支持：{why}")
@@ -135,10 +169,79 @@ def parse_chat_request(body: Dict[str, Any], *, default_model: str = "",
         messages=messages,
         stream=bool(body.get("stream", False)),
         params=params,
+        tools=tools,
+        tool_choice=tool_choice,
         ignored=ignored,
         raw=body,
         n=1,
     )
+
+
+def _parse_tools(raw: Any) -> List[Dict[str, Any]]:
+    """校验并归一化 OpenAI ``tools`` 数组。"""
+    if raw in (None, [], {}):
+        return []
+    if not isinstance(raw, list):
+        raise InvalidRequestError("tools 必须是数组")
+    out: List[Dict[str, Any]] = []
+    for i, t in enumerate(raw):
+        if not isinstance(t, dict):
+            raise InvalidRequestError(f"tools[{i}] 必须是对象")
+        fn = t.get("function")
+        if not isinstance(fn, dict) or not fn.get("name"):
+            raise InvalidRequestError(f"tools[{i}] 缺少 function.name")
+        if t.get("type", "function") != "function":
+            raise InvalidRequestError(f"tools[{i}].type 只支持 function")
+        params = fn.get("parameters")
+        if params is not None and not isinstance(params, dict):
+            raise InvalidRequestError(f"tools[{i}].function.parameters 必须是对象")
+        out.append({
+            "type": "function",
+            "function": {
+                "name": str(fn["name"]),
+                "description": str(fn.get("description") or ""),
+                "parameters": params or {"type": "object", "properties": {}},
+            },
+        })
+    return out
+
+
+def _parse_message(m: Dict[str, Any], index: int) -> Message:
+    """把一条 OpenAI 消息转成 :class:`Message`（含工具相关字段）。"""
+    from ..types import ToolCall
+
+    role = str(m["role"])
+    content = _as_text(m.get("content"))
+
+    calls: Tuple[ToolCall, ...] = ()
+    raw_calls = m.get("tool_calls")
+    if raw_calls:
+        if not isinstance(raw_calls, list):
+            raise InvalidRequestError(f"messages[{index}].tool_calls 必须是数组")
+        parsed = []
+        for tc in raw_calls:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            if not isinstance(fn, dict):
+                continue
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                # OpenAI 规范里 arguments 是 JSON 字符串
+                import json as _json
+                try:
+                    args = _json.loads(args) if args.strip() else {}
+                except _json.JSONDecodeError:
+                    args = {"__raw__": args}
+            if not isinstance(args, dict):
+                args = {"__raw__": args}
+            parsed.append(ToolCall(name=str(fn.get("name") or ""), arguments=args,
+                                   id=str(tc.get("id") or "")))
+        calls = tuple(parsed)
+
+    return Message(role=role, content=content, tool_calls=calls,
+                   tool_call_id=(str(m["tool_call_id"]) if m.get("tool_call_id") else None),
+                   name=(str(m["name"]) if m.get("name") else None))
 
 
 def _stop_list(body: Dict[str, Any]) -> Tuple[str, ...]:
@@ -249,21 +352,31 @@ def models_response(model_ids: Iterable[str], *, created: Optional[int] = None) 
 
 def chat_completion_response(*, req_id: str, model: str, text: str,
                              finish_reason: str, usage: Optional[Dict[str, int]] = None,
-                             created: Optional[int] = None) -> Dict[str, Any]:
-    """非流式 ``chat.completion``。"""
+                             created: Optional[int] = None,
+                             tool_calls: Optional[Sequence[Any]] = None,
+                             extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """非流式 ``chat.completion``。
+
+    :param tool_calls: 非空时按 OpenAI 规范放进 message（客户端需自行执行），
+        并把 ``content`` 置为 null、``finish_reason`` 置为 ``tool_calls``。
+    :param extra: 非标准扩展字段（以 ``x_`` 开头），客户端一般会忽略。
+    """
+    message: Dict[str, Any] = {"role": "assistant", "content": text or None}
+    if tool_calls:
+        message["tool_calls"] = [tc.to_openai() for tc in tool_calls]
+        message["content"] = text or None
+        finish_reason = "tool_calls"
     payload = {
         "id": req_id,
         "object": "chat.completion",
         "created": created if created is not None else now(),
         "model": model,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": text},
-            "finish_reason": finish_reason,
-        }],
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
     }
     if usage is not None:
         payload["usage"] = usage
+    if extra:
+        payload.update(extra)
     return payload
 
 
@@ -278,6 +391,24 @@ def chat_completion_chunk(*, req_id: str, model: str, created: int,
         "model": model,
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     }
+
+
+def tool_call_delta(index: int, *, call_id: Optional[str] = None,
+                    name: Optional[str] = None,
+                    arguments: Optional[str] = None) -> Dict[str, Any]:
+    """构造 ``delta.tool_calls`` 条目（OpenAI 流式工具调用的形状）。"""
+    entry: Dict[str, Any] = {"index": index}
+    if call_id is not None:
+        entry["id"] = call_id
+        entry["type"] = "function"
+    fn: Dict[str, Any] = {}
+    if name is not None:
+        fn["name"] = name
+    if arguments is not None:
+        fn["arguments"] = arguments
+    if fn:
+        entry["function"] = fn
+    return entry
 
 
 def completion_response(*, req_id: str, model: str, text: str, finish_reason: str,

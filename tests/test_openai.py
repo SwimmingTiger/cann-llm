@@ -74,21 +74,64 @@ class TestParseChat(unittest.TestCase):
 class TestUnsupportedFieldTiers(unittest.TestCase):
     """默认宽容（带 tools 的客户端要能用），但绝不静默给出错误结果。"""
 
-    def test_tools_accepted_and_reported_by_default(self):
+    def test_tools_are_parsed_not_ignored(self):
+        """tools 已是一等公民（agent 能力的入口），不再算「被忽略」。"""
         r = oa.parse_chat_request({
             "messages": [{"role": "user", "content": "x"}],
             "tools": [{"type": "function", "function": {"name": "f"}}],
             "tool_choice": "auto", "parallel_tool_calls": True,
         })
-        self.assertIn("tools", r.ignored)
-        self.assertIn("tool_choice", r.ignored)
-        self.assertIn("parallel_tool_calls", r.ignored)
+        self.assertEqual(r.tool_names, ["f"])
+        self.assertNotIn("tools", r.ignored)
+        # tool_choice="auto" 就是本服务的默认语义，不该报成 ignored
+        self.assertNotIn("tool_choice", r.ignored)
+        # parallel_tool_calls 也不再是「无对应能力」：agent 循环本来就支持
+        # 一步内执行多个工具调用，所以它不再出现在 ignored 里
+        self.assertNotIn("parallel_tool_calls", r.ignored)
 
-    def test_tools_rejected_in_strict_mode(self):
+    def test_invalid_tool_definition_rejected(self):
+        for bad in ([{}], [{"function": {}}], "not-a-list",
+                    [{"type": "retrieval", "function": {"name": "f"}}],
+                    [{"function": {"name": "f", "parameters": "x"}}]):
+            with self.assertRaises(InvalidRequestError, msg=str(bad)):
+                oa.parse_chat_request(
+                    {"messages": [{"role": "user", "content": "x"}], "tools": bad})
+
+    def test_tool_choice_values(self):
+        base = {"messages": [{"role": "user", "content": "x"}],
+                "tools": [{"function": {"name": "f"}}]}
+        self.assertFalse(oa.parse_chat_request(base).requires_tool_call)
+        self.assertTrue(oa.parse_chat_request(
+            {**base, "tool_choice": "required"}).requires_tool_call)
+        self.assertTrue(oa.parse_chat_request(
+            {**base, "tool_choice": "none"}).forbids_tool_call)
         with self.assertRaises(InvalidRequestError):
-            oa.parse_chat_request(
-                {"messages": [{"role": "user", "content": "x"}], "tools": [{}]},
-                strict=True)
+            oa.parse_chat_request({**base, "tool_choice": "sometimes"})
+
+    def test_assistant_tool_calls_and_tool_messages_round_trip(self):
+        """客户端回传的 assistant.tool_calls / role=tool 要能解析回来。"""
+        r = oa.parse_chat_request({"messages": [
+            {"role": "user", "content": "天气"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": "w", "arguments": '{"city": "Paris"}'}}]},
+            {"role": "tool", "tool_call_id": "call_1", "name": "w",
+             "content": '{"t": 18}'},
+        ]})
+        assistant = r.messages[1]
+        self.assertEqual(len(assistant.tool_calls), 1)
+        self.assertEqual(assistant.tool_calls[0].name, "w")
+        self.assertEqual(assistant.tool_calls[0].arguments, {"city": "Paris"})
+        self.assertEqual(assistant.tool_calls[0].id, "call_1")
+        self.assertEqual(r.messages[2].tool_call_id, "call_1")
+        self.assertEqual(r.messages[2].content, '{"t": 18}')
+
+    def test_malformed_tool_call_arguments_kept_raw(self):
+        r = oa.parse_chat_request({"messages": [
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c", "function": {"name": "w", "arguments": "{broken"}}]}]})
+        self.assertEqual(r.messages[0].tool_calls[0].arguments,
+                         {"__raw__": "{broken"})
 
     def test_logprobs_always_rejected(self):
         for strict in (False, True):
@@ -112,6 +155,27 @@ class TestUnsupportedFieldTiers(unittest.TestCase):
         self.assertIn("frequency_penalty", r.ignored)
         with self.assertRaises(InvalidRequestError):
             oa.parse_completion_request({"prompt": "x", "logprobs": 1}, strict=True)
+
+    def test_tool_call_response_shape(self):
+        from cann_llm.types import ToolCall
+        p = oa.chat_completion_response(
+            req_id="i", model="m", text="", finish_reason="stop",
+            tool_calls=[ToolCall("w", {"city": "Paris"}, id="call_1")])
+        ch = p["choices"][0]
+        self.assertEqual(ch["finish_reason"], "tool_calls")
+        self.assertIsNone(ch["message"]["content"])
+        tc = ch["message"]["tool_calls"][0]
+        self.assertEqual(tc["id"], "call_1")
+        self.assertEqual(tc["type"], "function")
+        self.assertEqual(tc["function"]["name"], "w")
+        self.assertEqual(json.loads(tc["function"]["arguments"]), {"city": "Paris"})
+
+    def test_tool_call_delta_shape(self):
+        d = oa.tool_call_delta(0, call_id="c1", name="w", arguments='{"a":')
+        self.assertEqual(d["index"], 0)
+        self.assertEqual(d["type"], "function")
+        self.assertEqual(d["function"]["name"], "w")
+        self.assertEqual(d["function"]["arguments"], '{"a":')
 
     def test_describe_ignored(self):
         self.assertEqual(oa.describe_ignored([]), "")

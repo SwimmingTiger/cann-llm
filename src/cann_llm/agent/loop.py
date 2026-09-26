@@ -179,6 +179,9 @@ class AgentConfig:
     max_result_chars: int = 4000
     #: 是否把工具调用过程也流给用户（作为提示，不含协议标记）
     announce_tool_calls: bool = True
+    #: 在工具说明后追加"该用就用、别向用户索要工具能给的信息"的强指令。
+    #: 实测对小模型是决定性的（同一问题 0/4 → 4/4），故默认开启。
+    force_tool_use: bool = True
 
 
 # ------------------------------------------------------------------ 主循环
@@ -337,8 +340,20 @@ class AgentLoop:
                     tool_calls=pending_calls, steps=steps, stats=last_stats,
                     messages=convo)
 
+    #: 追加在工具说明之后的强指令（针对小模型"向用户索要工具能提供的信息"的失败模式）
+    TOOL_USE_DIRECTIVE = (
+        "\n\nIMPORTANT: If the user's request can be answered by any of the tools above, "
+        "you MUST emit the tool call immediately. Never ask the user for information that "
+        "a tool can provide, and never answer from memory when a tool applies."
+    )
+
     def _render(self, messages: Sequence[Message],
                 tools: Optional[List[Dict[str, Any]]]) -> str:
+        if tools and self.config.force_tool_use:
+            tools = [dict(t) for t in tools]
+            # 把指令挂在最后一个工具的 description 上（模板会原样渲染）
+            fn = tools[-1].setdefault("function", {})
+            fn["description"] = (fn.get("description", "") or "") + self.TOOL_USE_DIRECTIVE
         rendered = self.template.render(messages, tools=tools or None)
         est = self.backend.count_prompt_tokens(rendered)
         if self.max_prompt_tokens > 0 and est > self.max_prompt_tokens:

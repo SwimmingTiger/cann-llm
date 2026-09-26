@@ -120,9 +120,15 @@ class TestServer(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body)["error"]["type"], "invalid_request_error")
 
-        # tools 默认被忽略而不是报错（否则现代客户端用不了），仍返回 200
-        status, body = _post(self.base + "/v1/chat/completions",
-                             {"messages": [{"role": "user", "content": "x"}], "tools": [{}]})
+        # 非法的 tool 定义要报错（tools 现在是正式解析的字段）
+        status, _ = _post(self.base + "/v1/chat/completions",
+                          {"messages": [{"role": "user", "content": "x"}], "tools": [{}]})
+        self.assertEqual(status, 400)
+
+        # 仍被忽略的字段（frequency_penalty）不报错
+        status, _ = _post(self.base + "/v1/chat/completions",
+                          {"messages": [{"role": "user", "content": "x"}],
+                           "frequency_penalty": 0.5})
         self.assertEqual(status, 200)
 
         # logprobs 这种「忽略就会给出错误结果」的字段任何时候都拒绝
@@ -248,11 +254,11 @@ class TestIgnoredFields(unittest.TestCase):
     def test_header_lists_ignored_fields(self):
         status, headers, _ = self._post_with_headers(
             {"messages": [{"role": "user", "content": "hi"}],
-             "tools": [{}], "tool_choice": "auto"})
+             "frequency_penalty": 0.5, "presence_penalty": 0.2})
         self.assertEqual(status, 200)
         got = headers.get("X-Cann-Llm-Ignored-Fields", "")
-        self.assertIn("tools", got)
-        self.assertIn("tool_choice", got)
+        self.assertIn("frequency_penalty", got)
+        self.assertIn("presence_penalty", got)
 
     def test_header_absent_when_nothing_ignored(self):
         _status, headers, _ = self._post_with_headers(
@@ -261,8 +267,10 @@ class TestIgnoredFields(unittest.TestCase):
 
     def test_streaming_carries_header(self):
         _status, headers, _ = self._post_with_headers(
-            {"messages": [{"role": "user", "content": "hi"}], "stream": True, "tools": [{}]})
-        self.assertIn("tools", headers.get("X-Cann-Llm-Ignored-Fields", ""))
+            {"messages": [{"role": "user", "content": "hi"}], "stream": True,
+             "frequency_penalty": 0.5})
+        self.assertIn("frequency_penalty",
+                      headers.get("X-Cann-Llm-Ignored-Fields", ""))
 
 
 class TestStrictMode(unittest.TestCase):
@@ -286,10 +294,10 @@ class TestStrictMode(unittest.TestCase):
         cls.httpd.shutdown()
         cls.httpd.server_close()
 
-    def test_tools_rejected(self):
+    def test_ignorable_field_rejected(self):
         status, body = _post(self.base + "/v1/chat/completions",
                              {"messages": [{"role": "user", "content": "x"}],
-                              "tools": [{}]})
+                              "frequency_penalty": 0.5})
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body)["error"]["type"], "invalid_request_error")
 

@@ -29,6 +29,15 @@ class ServerConfig:
     #: 默认宽容是有意的：多数现代客户端即使普通聊天也会带 tools，
     #: 一律报错会让它们完全用不了。想「宁可报错也别给我假象」就设 True。
     reject_unsupported: bool = False
+    #: 工具执行模式：
+    #:   "auto"（默认）—— 客户端声明的工具若本服务已注册，就由服务端执行并
+    #:                    返回最终答案（服务端即 agent）；否则按 OpenAI 标准
+    #:                    把 tool_calls 返回给客户端自行执行
+    #:   "off"         —— 永远按 OpenAI 标准返回 tool_calls
+    #:   "on"          —— 永远由服务端执行（未注册的工具会作为错误回给模型）
+    agent_tools: str = "auto"
+    #: agent 循环最多几轮
+    agent_max_steps: int = 4
 
 
 @dataclass(frozen=True)
@@ -39,7 +48,7 @@ class ModelConfig:
     model_id: str = "qwen2.5-1.5b"
     backend: str = "cann"
     chat_template: str = "chatml"
-    system_prompt: str = "You are a helpful assistant."
+    system_prompt: str = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
     max_tokens: int = 256
     temperature: float = 0.7
     top_k: int = 20
