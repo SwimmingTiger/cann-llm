@@ -287,3 +287,57 @@ __int64 HIAI_LLMEngine_Context_SetOnPrefillGenerateDoneFunc(void *ctx, void *cb)
 
 **已完成**：①②③ ✓（rc=0 实测）、分词器 ✓、⑥ 的签名 ✓。
 **仅剩**：⑥ 回调自身的参数形态 → ⑧⑨ 取 token → 接进 `hiai.py` → CLI/HTTP → 测试 → 提交。
+
+---
+
+## ★★★ Round 44–47：失败点的完整下钻（EngineExecutorImpl 内部调用链）
+
+### 调用链（已逐层反编译）
+
+```
+Executor_GenerateAsync(exec, ctx, prompt)          // 0xfdbec：仅做参数校验 + 组装，然后转发
+  └─ sub_118704(exec, ctx, params)                 // 0x118704：真正的异步入口
+       lock(exec+8)
+       if (!(exec+48 & 1))     → "isInit_.load()" → return 1        [测试 769]
+       if (!*(void**)(exec+200)) → "pipelineExecutor_" null → 1     [测试 771]
+       if (!ctx)               → "ctx" null → 1                     [测试 773]
+       (*vtable+240)(pipelineExecutor_, exec+176, exec+188)
+       if (exec[992]&1) sub_150794(pipelineExecutor_, ...)
+       v17 = sub_153B98(*(void**)(exec+200), ctx, params)   ← ★ 真正干活，失败在这里
+       if (v17) (*(vtable+232))(pipelineExecutor_)          ← ★ 触发 OnGenerateAsyncFailed 的路径
+       return sub_139400(v17)
+```
+
+### 已实测排除的原因（别再试）
+
+| 假设 | 实测结果 |
+|---|---|
+| `isInit_`(+48) 未置位 | ✗ **已置**（`+48=1`，`CreateFromJson` 之后就是 1）—— 直接读内存验证 |
+| 手动清 `+48` 再 `Init_Use_Option` | ✗ 更糟：`GenerateAsync` 立刻返回 1（首检失败）|
+| `Init_Use_Option` 初始化不全 | ✗ `CreateFromJson` **本身就完整初始化**（含 `+48`）；`Init_Use_Option` 走"已初始化"早退（返回 0 但无操作）|
+| `pipelineExecutor_` 为空 | ✗ 否则不触发回调；我们**触发了** |
+| Context 来源问题 | ✗ `CreateFromContextJson` 与 `Context_Create()`+全 setter **表现完全相同** |
+| 缺 `SetInitTokenLen`/`SetCallbackFreq`/`SetDoSampleFlag` | ✗ 都设了、都返回 0，仍失败 |
+| 回调未注册 | ✗ 四个注册均返回 0，且 fail 回调稳定触发 |
+
+### 关键内存布局（EngineExecutorImpl）
+
+| 偏移 | 含义 |
+|---|---|
+| `+8` | mutex |
+| `+48` | **`isInit_`**（`CreateFromJson` 置 1，`sub_1129B4` 第 393 行也置 1）|
+| `+50` | 另一个标志 —— **只在 `sub_1129B4` 第 360 行（真初始化路径）置 1**；实测始终为 0 |
+| `+51` | `SetJsonParam` 里置 1（`atomic_store`）|
+| `+200` | **`pipelineExecutor_`**（非空 ✓）|
+| `+992` | 某个可选分支开关 |
+
+### 回调
+
+- 注册签名：`(ctx, 函数指针)` —— 四个都一样，全部返回 0 ✓
+- **回调自身签名：`(void* ctx)`** —— 单参（实测第 2/3 参是垃圾 ✗）
+- **不带错误码** ✗
+
+### 下一步（唯一）
+
+反编译 **`sub_153B98`**(0x153B98) —— 它是 prefill/decode 的实现，**失败断言就在里面**。
+（x570 `~/re/sub153.txt`，脚本 `~/re/run10.sh`）
