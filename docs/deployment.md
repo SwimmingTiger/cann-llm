@@ -112,6 +112,7 @@ curl -s -X POST http://127.0.0.1:8000/v1/chat/completions \
 curl -sN -X POST http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"hiai","messages":[{"role":"user","content":"请写一个加法函数"}],"max_tokens":40,"stream":true}'
+```
 
 ---
 
