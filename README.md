@@ -64,7 +64,7 @@ scripts/start_chat.sh --list-tools                           # 看有哪些工�
 
 # 3) OpenAI 兼容推理服务 —— 一键脚本
 scripts/start_server.sh -d /path/to/model_dir                 # 前台
-scripts/start_server.sh -d /path/to/model_dir -b              # 后台，等就绪后返回
+scripts/start_server.sh -d /path/to/model_dir -B              # 后台，等就绪后返回
 scripts/start_server.sh --status                              # 看状态
 scripts/start_server.sh --stop                                # 停止
 
