@@ -1,6 +1,6 @@
 # cann-llm
 
-华为 **CANN LLM Engine**（鸿蒙 NPU）上的对话与 **OpenAI 兼容推理服务**。
+华为 **CANN LLM Engine**（鸿蒙 NPU）上的对话与 **OpenAI 兼容推理服务**，代码和文档均由DeepSeek Harness中的DeepSeek V4.1 Flash等模型生成。
 
 直接以 `ctypes` 调用系统自带的 NDK 库 `/system/lib64/ndk/libcann_llm_engine.so`，
 **不需要 HAP、不需要 root、核心零第三方依赖**。
