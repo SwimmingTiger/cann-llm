@@ -89,6 +89,44 @@ PY
 
 alive() { [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
+lan_ip() {
+    "$PY" - <<'LANPY' 2>/dev/null
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect(("8.8.8.8", 80))
+    print(s.getsockname()[0])
+except Exception:
+    pass
+finally:
+    s.close()
+LANPY
+}
+
+# 打印访问地址。**base_url 只到 /v1**，端点单独列，
+# 避免把端点路径误当成 base_url（客户端会再往后拼路径）。
+print_endpoints() {
+    local shown="$1" port="$2"
+    local base="http://$shown:$port/v1"
+    info "base_url（OpenAI 客户端填这个）:"
+    echo "      $base"
+    if [[ "$HOST" == "0.0.0.0" || -z "$HOST" ]]; then
+        local ip; ip="$(lan_ip)"
+        [[ -n "$ip" ]] && echo "      http://$ip:$port/v1      # 局域网其它机器访问"
+    fi
+    echo
+    info "端点:"
+    echo "      GET  $base/models"
+    echo "      POST $base/chat/completions"
+    echo "      POST $base/completions"
+    echo "      GET  http://$shown:$port/healthz            # 健康检查，无需鉴权"
+    echo "      GET  http://$shown:$port/                   # 端点索引（浏览器可直接打开）"
+    if [[ -n "$API_KEY" ]]; then
+        echo
+        info "鉴权: Authorization: Bearer <已设置>"
+    fi
+}
+
 load_state() {
     # 从状态文件恢复 host/port（用户不必在 --status 时再敲一遍）
     [[ -f "$STATEFILE" ]] || return 0
@@ -215,8 +253,8 @@ echo
 if [[ $BACKGROUND -eq 0 ]]; then
     rm -f "$PIDFILE" "$STATEFILE"
     info "前台启动（Ctrl-C 停止）"
-    info "  http://$SHOWN:$PORT/v1/chat/completions"
-    [[ -n "$API_KEY" ]] && info "  鉴权: Bearer <已设置>"
+    echo
+    print_endpoints "$SHOWN" "$PORT"
     echo
     exec "$PY" "${ARGS[@]}"
 fi
@@ -234,10 +272,7 @@ for _ in $(seq 1 "$WAIT_SECS"); do
         ok "已就绪 (pid $pid)"
         ok "$out"
         echo
-        info "OpenAI 兼容端点:"
-        echo "      http://$SHOWN:$PORT/v1/models"
-        echo "      http://$SHOWN:$PORT/v1/chat/completions"
-        [[ -n "$API_KEY" ]] && echo "      鉴权: Authorization: Bearer <已设置>"
+        print_endpoints "$SHOWN" "$PORT"
         echo
         info "日志: $LOGFILE"
         info "停止: $0 --stop    状态: $0 --status"

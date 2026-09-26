@@ -54,6 +54,13 @@ scripts/start_server.sh --stop                                # 停止
 # 不带参数也行：会自动在 models/<名字>/ 下找模型目录
 # 也可以用环境变量：export CANN_LLM_MODEL_DIR=/path/to/model_dir
 
+# 客户端 base_url 只到 /v1：
+#     OpenAI(base_url="http://127.0.0.1:8000/v1")     ✓
+#     OpenAI(base_url="http://127.0.0.1:8000")        ✗ 少了 /v1
+#     OpenAI(base_url="http://127.0.0.1:8000/v1/chat/completions")  ✗ 多了端点路径
+# 填错时服务端会返回带提示的 404（见 docs/openai-api.md「排错」）。
+# 浏览器打开 http://127.0.0.1:8000/ 可以直接看到全部端点。
+
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen2.5-1.5b","messages":[{"role":"user","content":"你好"}],"stream":true}'

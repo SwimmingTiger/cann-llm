@@ -444,11 +444,17 @@ def serve(cfg: AppConfig) -> int:
     httpd = LlmHttpServer((host, port), state)
     shown = "127.0.0.1" if host in ("", "0.0.0.0") else host
 
+    base = f"http://{shown}:{port}/v1"
     print(f"cann-llm {version.__version__}  ·  {cfg.model.model_id}  "
           f"({cfg.model.backend}/{cfg.model.chat_template})")
-    print(f"  监听 http://{shown}:{port}")
-    print(f"  OpenAI 兼容端点: /v1/models  /v1/chat/completions  /v1/completions")
-    print(f"  健康检查: /healthz    鉴权: {'开启' if cfg.server.api_key else '关闭'}")
+    print(f"  监听      : http://{shown}:{port}")
+    print(f"  base_url  : {base}      ← OpenAI 客户端的 base_url 填这个")
+    print(f"  端点      : GET {base}/models · POST {base}/chat/completions"
+          f" · POST {base}/completions")
+    print(f"  健康检查  : http://{shown}:{port}/healthz（无需鉴权）"
+          f"    鉴权: {'开启' if cfg.server.api_key else '关闭'}")
+    if host in ("", "0.0.0.0"):
+        print(f"  注意      : 绑定在 0.0.0.0，局域网其它机器请把 127.0.0.1 换成本机 IP")
 
     stop = threading.Event()
 
