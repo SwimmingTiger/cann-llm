@@ -394,9 +394,25 @@ class CannNdkBackend(EngineBackend):
         }
 
     def _finish_reason(self, stats: GenerationStats, params: GenerationParams) -> str:
-        """判断结束原因。
+        """推断结束原因（OpenAI 协议要求这个字段）。
 
-        引擎没有直接暴露「因何而停」，用输出长度是否顶到上限近似判断。
+        引擎**没有**任何暴露「因何而停」的接口 —— 逐个试过
+        GetStopReason / GetFinishReason / GetEndReason / GetGenerateState /
+        IsFinished 等，都不存在；它还把命中的 stop_sequence 从输出里剥掉了
+        （实测原始文本里不含 <|im_end|>）。唯一可用的证据是输出 token 数。
+
+        因此判断分两种：
+        * ``out_tokens < max_tokens`` —— **确定**不是被上限截断的
+          （引擎只会在「够到 max_gen_tokens」或「命中 stop_sequence」时停），
+          故为 stop。
+        * ``out_tokens == max_tokens`` —— 说不准：既可能是被上限截断，
+          也可能是模型恰好在第 N 个 token 自然结束。这里判为 length，
+          因为「该继续却被截断」比「刚好说完了」常见得多，而且把截断误报成
+          stop 会让调用方把半句话当成完整回答（更糟）。
+
+        边界情况确实存在：实测 max_tokens=3 时模型恰好说了 3 个 token
+        「谢谢！」，会被判成 length 并带 finish_reason=length 返回 ——
+        而它其实说完了。这个歧义无法消除，只能如实记录在这里。
         """
         if stats.completion_tokens and stats.completion_tokens >= params.max_tokens:
             return FINISH_LENGTH

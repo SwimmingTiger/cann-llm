@@ -38,6 +38,27 @@
 - `Makefile`、`examples/config.example.toml`
 - `docs/architecture.md`、`docs/cann-engine-notes.md`、`docs/openai-api.md`
 
+### Docs — 两处「启发式」的依据已查实
+
+用户要求核实：`_finish_reason` 的推断是什么、`StreamFilter` 删掉 `<tool_call>`
+是否合理。结论如下（已写进代码注释与文档）：
+
+- **`_finish_reason` 的依据**：引擎 `HMS_LLMEngineContext_*` **没有**任何
+  stop/finish reason 接口（逐个试过 GetStopReason / GetFinishReason /
+  GetEndReason / GetGenerateState / IsFinished 等，均不存在），且会把命中的
+  `stop_sequence` 从输出里剥掉（实测原始文本不含 `<|im_end|>`）。
+  唯一可用证据是 `GetOutputTokenCount()`：
+  `out_tokens < max_tokens` → 确定是 stop；
+  `out_tokens == max_tokens` → 说不准（可能是恰好在第 N 个 token 自然结束），
+  判为 length。边界歧义无法消除，已如实记录（实测 max_tokens=3 时模型恰好
+  说完「谢谢！」会被判成 length）。
+- **`StreamFilter` 是协议重编码，不是丢信息**：查了 DSH 的源码 —— 它用的
+  pi-ai（`dist/api/openai-completions.js`）在流式处理里**只认
+  `choice.delta.tool_calls`**，整个仓库没有对 `<tool_call>` 文本标记的解析。
+  不过滤的话调用方只会把那段当成普通文本，agent 循环直接断掉。
+  且只在客户端声明了 tools 时才过滤，不带 tools 的请求原样透传 ——
+  想要原始 Qwen 格式的调用方依然拿得到。
+
 ### Changed — 不扭曲模型行为
 
 用户指出的原则：**推理框架的职责是如实传递模型的行为，不替调用方判断输出

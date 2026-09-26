@@ -114,9 +114,19 @@ def _prefix_hold(text: str, tag: str) -> int:
 class StreamFilter:
     """把模型输出里的 ``<tool_call>…</tool_call>`` 段从流中剔除。
 
-    为什么需要它：工具调用是**内部协议**，用户不该看到。而流式场景下
-    我们是边收边发，只能在收到足够字符后才能判断"这是不是工具标记的开头"。
-    这里最多延迟 ``len('<tool_call>') - 1`` 个字符，实际约一个 token。
+    为什么需要它：``<tool_call>`` 是 Qwen 的**文本格式**，不是 OpenAI 协议。
+    实测 DSH 所用的 pi-ai（`dist/api/openai-completions.js`）在流式处理里
+    只认 ``choice.delta.tool_calls``，整个仓库搜不到任何对 ``<tool_call>``
+    文本标记的解析。也就是说：**不过滤的话调用方根本不会把这段当工具调用**，
+    它只会看到一段普通的 assistant 文本，agent 循环直接断掉。
+
+    所以这不是"删掉模型输出"，而是**按 OpenAI 协议做重新编码** ——
+    调用内容会完整地出现在 ``delta.tool_calls`` 里，信息没有丢失。
+    另外：只在客户端**声明了 tools** 时才过滤；不带 tools 的请求原样透传，
+    想拿原始 Qwen 格式的调用方依然拿得到。
+
+    流式场景下只能边收边判断，所以需要缓冲"半个开标签"：最多延迟
+    ``len('<tool_call>') - 1`` 个字符，实际约一个 token。
     """
 
     def __init__(self, open_tag: str = TOOL_CALL_OPEN,

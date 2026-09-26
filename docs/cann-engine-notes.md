@@ -197,6 +197,32 @@ token 容量（输入 + 输出之和）。实测三种表现：
 `GetInputTokenCount`，准确）；`count_prompt_tokens()` 只是给日志看的粗估
 （系数按实测标定为「字节 // 4」），**不作为任何限制依据**。
 
+## 9.1 引擎不告诉你「因何而停」
+
+`HMS_LLMEngineContext_*` 里**没有**任何 stop/finish reason 的接口。逐个试过：
+
+```
+GetStopReason  GetFinishReason  GetEndReason  GetGenerateState
+GetIsFinished  IsFinished       GetStatus     GetLastError  GetErrorCode
+```
+
+全部不存在。而且引擎会把命中的 `stop_sequence` 从输出里**剥掉** —— 实测
+`max_tokens=64` 让模型自然说完时，`GetAllGeneration` 拿到的是 `'谢谢！'`，
+不含 `<|im_end|>`；被截断时同样不含。所以没法从文本反推。
+
+唯一可用的证据是 `GetOutputTokenCount()`。由此推断：
+
+| 条件 | 判断 | 确定性 |
+|---|---|---|
+| `out_tokens < max_tokens` | `stop` | **确定**（引擎只会在「够到上限」或「命中停止符」时停） |
+| `out_tokens == max_tokens` | `length` | 不确定 —— 也可能是模型恰好在第 N 个 token 自然结束 |
+
+边界歧义无法消除。选 `length` 是因为「该继续却被截断」远比「刚好说完」常见，
+且把截断误报成 `stop` 会让调用方把半句话当成完整回答（后果更严重）。
+
+实测到的歧义例子：`max_tokens=3` 时模型恰好说 3 个 token「谢谢！」，
+会被判成 `length` 返回。
+
 ## 10. 其它环境事实
 
 * `hilog` 抓 CANN 域日志经常拿到 0 行，需要时用终端面板而不是管道

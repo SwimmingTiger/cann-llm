@@ -249,3 +249,36 @@ class TestNoContextLimit(unittest.TestCase):
         be = CannNdkBackend.__new__(CannNdkBackend)
         with self.assertRaises(InvalidRequestError):
             be._check_prompt("", GenerationParams())
+
+
+class TestFinishReason(unittest.TestCase):
+    """引擎没有「因何而停」的接口，只能从输出 token 数推断。
+
+    这里锁定两个分支的行为，包括那个无法消除的边界歧义。
+    """
+
+    def _be(self):
+        from cann_llm.backends.cann import CannNdkBackend
+        return CannNdkBackend.__new__(CannNdkBackend)
+
+    def test_below_limit_is_stop(self):
+        from cann_llm.types import GenerationParams, GenerationStats
+        be = self._be()
+        got = be._finish_reason(GenerationStats(completion_tokens=5),
+                                GenerationParams(max_tokens=64))
+        self.assertEqual(got, "stop")
+
+    def test_at_limit_is_length(self):
+        from cann_llm.types import GenerationParams, GenerationStats
+        be = self._be()
+        got = be._finish_reason(GenerationStats(completion_tokens=64),
+                                GenerationParams(max_tokens=64))
+        self.assertEqual(got, "length")
+
+    def test_ambiguous_case_is_documented(self):
+        """恰好在第 N 个 token 自然结束时会被判成 length —— 已知歧义。"""
+        from cann_llm.backends.cann import CannNdkBackend
+        import inspect
+        doc = inspect.getdoc(CannNdkBackend._finish_reason)
+        self.assertIn("说不准", doc)
+        self.assertIn("无法消除", doc)

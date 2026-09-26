@@ -21,6 +21,33 @@ token），所以走 prompt 路线是可行且正确的。
 模型: 北京现在的天气是多云有小雨，温度大约是18摄氏度。建议您携带雨具并注意保暖。
 ```
 
+### 为什么要把 `<tool_call>` 从流里过滤掉
+
+`<tool_call>` 是 **Qwen 的文本格式**，不是 OpenAI 协议。实测 DSH 所用的
+pi-ai（`node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js`）
+在流式处理里只认 `choice.delta.tool_calls`：
+
+```js
+if (choice?.delta?.tool_calls) {
+    for (const toolCall of choice.delta.tool_calls) {
+        const block = ensureToolCallBlock(toolCall);
+        ...
+```
+
+整个 DSH 仓库**搜不到任何对 `<tool_call>` 文本标记的解析**。也就是说：
+不过滤的话，调用方只会把这段当成普通的 assistant 文本，**agent 循环直接断掉**。
+
+所以这**不是"删掉模型输出"，而是按 OpenAI 协议重新编码** —— 调用内容完整地
+出现在 `delta.tool_calls` 里，信息没有丢失。
+
+另外两条边界，保证信息不会不可逆地丢失：
+
+* **只在客户端声明了 `tools` 时才过滤**。不带 tools 的请求原样透传，
+  想直接拿原始 Qwen 文本格式的调用方依然拿得到。
+* 未闭合的工具段（被 max_tokens 截断）会连同后续文本一起抑制，但服务端
+  仍会尝试解析它并把结果放进 `tool_calls`；解析不了就带 `ok=false` 回到
+  agent 循环，不会静默吞掉。
+
 ## 一次迭代做了什么
 
 ```
