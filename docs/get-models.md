@@ -102,7 +102,7 @@ python3 scripts/import_omc_package.py Qwen25-Coder-7B-Instruct-OMC-20251024.zip 
 启动：
 
 ```bash
-make server MODEL=models/qwen25_coder_7b_omc1024 BACKEND=hiai PORT=8000
+./scripts/start_server.sh -d models/qwen25_coder_7b_omc1024 -b hiai --port 8000
 ```
 
 ---

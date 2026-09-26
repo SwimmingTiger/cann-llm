@@ -12,9 +12,7 @@
 启动：
 
 ```bash
-cann-llm-server -d /path/to/model_dir --host 127.0.0.1 --port 8000 --api-key sk-xxx
-# 或
-PYTHONPATH=src python3 -m cann_llm.api.server -d /path/to/model_dir
+./scripts/start_server.sh -d /path/to/model_dir --host 127.0.0.1 --port 8000 --api-key sk-xxx
 ```
 
 ## 请求示例

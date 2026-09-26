@@ -303,7 +303,7 @@ scripts/start_chat.sh -d /path/to/model_dir --tools get_current_time,calculator
 scripts/start_chat.sh -d /path/to/model_dir --tools all -p "现在几点？"
 
 # 列出可用工具
-python3 -m cann_llm.cli.chat --list-tools
+scripts/start_chat.sh --list-tools
 ```
 
 交互中：`/tools` 看列表与启用情况，`/tools calculator` 切换。

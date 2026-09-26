@@ -65,39 +65,26 @@ executor / context JSON（`build_configs()`），**不需要**任何手工调参
 
 ### 步骤 2：放置代码
 
-**方式 A：直接跑源码（最简单，无需安装）**
+把整个仓库拷到设备上任意可写目录即可（**不需要安装、不需要编译**）。
+脚本自己会找到合适的解释器，并从仓库位置推算出源码路径。
 
-```bash
-# 把仓库拷到设备（任意可写目录）
-PYTHONPATH=/path/to/cann-llm/src \
-  /data/service/hnp/bin/python3 -m cann_llm.cli.chat -b hiai -d /path/to/models/qwen25_coder_7b_omc1024
-```
-
-**方式 B：pip 安装（推荐，提供两个命令）**
-
-```bash
-cd cann-llm
-/data/service/hnp/bin/python3 -m pip install .
-# → 得到 cann-llm-chat / cann-llm-server 两个命令
-cann-llm-server -b hiai -d /path/to/models/qwen25_coder_7b_omc1024 --port 8000
-```
-
-> 纯 Python → 也可以用 `pip wheel .` 在别处打好 wheel 再拷进来装。
+> 想装成 pip 包、或用 `make` / `python -m` 直接跑模块，属于维护者用法，
+> 见 [README 的「维护者」一节](../README.md#维护者)。
 
 ### 步骤 3：启动
 
 ```bash
-# 交互式对话（默认就是逐字流式）
-cann-llm-chat -b hiai -d <模型目录>
+# ① 交互式对话（默认就是逐字流式输出）
+./scripts/start_chat.sh -d <模型目录> -b hiai
 
-# OpenAI 兼容服务
-cann-llm-server -b hiai -d <模型目录> --port 8000
-
-# 用 Makefile（已支持 BACKEND）
-make server MODEL=<模型目录> PORT=8000 BACKEND=hiai
+# ② OpenAI 兼容推理服务
+./scripts/start_server.sh -d <模型目录> -b hiai --port 8000
 ```
 
-后台启动 / 状态 / 停止用现成脚本：
+就这两个脚本 —— 用户侧不需要其它启动方式（`make` / `python -m` / pip 安装的命令
+都属于维护者用法，见 [README 的「维护者」一节](../README.md#维护者)）。
+
+服务脚本还支持后台运行与运维：
 
 ```bash
 # 注意：-b 是【后端】，-B 才是【后台】！
@@ -123,7 +110,7 @@ curl -sN -X POST http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"hiai","messages":[{"role":"user","content":"请写一个加法函数"}],"max_tokens":40,"stream":true}'
 # 期望：多行 data: {"object":"chat.completion.chunk",...} 最后 data: [DONE] ✓
 
-# ③ 分词器自检（不加载模型，秒级）
+# ③ 分词器自检（不加载模型，秒级；维护者用）
 PYTHONPATH=src python3 -c "
 from cann_llm.backends.hiai_tokenizer import QwenTokenizer
 t = QwenTokenizer('<模型目录>/tokenizer.json')

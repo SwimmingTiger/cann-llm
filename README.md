@@ -43,11 +43,7 @@
 `import` 本包**不会**加载任何 `.so`；原生库只在 `backend.load()` 时加载，
 所以在非鸿蒙机器上仍可正常 `import`、跑测试、做协议层开发。
 
-想装成命令也行（可选，仍然没有编译）：
-
-```bash
-pip install -e .            # 提供 cann-llm-chat / cann-llm-server 两个命令
-```
+（安装/开发方式见文末「维护者」一节。）
 
 ## 快速开始
 
@@ -61,7 +57,7 @@ scripts/start_chat.sh -d /path/to/model_dir -p "你好"          # 单轮
 
 # 2.5) 工具调用（agent）
 scripts/start_chat.sh -d /path/to/model_dir --tools all      # 启用内置工具
-python3 -m cann_llm.cli.chat --list-tools                    # 看有哪些工具
+scripts/start_chat.sh --list-tools                           # 看有哪些工具
 
 # 3) OpenAI 兼容推理服务 —— 一键脚本
 scripts/start_server.sh -d /path/to/model_dir                 # 前台
@@ -84,14 +80,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"qwen2.5-1.5b","messages":[{"role":"user","content":"你好"}],"stream":true}'
 ```
 
-不用脚本、直接跑模块也可以：
-
-```bash
-PYTHONPATH=src python3 -m cann_llm.cli.chat -d /path/to/model_dir
-PYTHONPATH=src python3 -m cann_llm.api.server -d /path/to/model_dir --port 8000
-make chat MODEL=/path/to/model_dir
-make server MODEL=/path/to/model_dir PORT=8000
-```
+> 上手只需要上面两个脚本：`scripts/start_chat.sh` 与 `scripts/start_server.sh`。
+> 直接用模块、`make`、`pip install` 的方式属于**维护者/开发**用法，见文末「维护者」一节。
 
 `start_server.sh` 启动前会做预检：Python 版本、NDK 库、模型目录完整性、
 端口占用；后台模式还会轮询 `/healthz` 等到就绪才返回。
@@ -183,6 +173,34 @@ src/cann_llm/
 | `docs/cann-engine-notes.md` | **引擎笔记**：API 调用约定、回调签名、必须避开的崩溃点、上下文上限 |
 | `docs/agent.md` | 工具调用（function calling）的原理、用法与可靠性 |
 | `docs/openai-api.md` | 兼容范围、与官方的差异、排错 |
+
+## 维护者
+
+> 以下是**开发/排错**用法。普通用户只需要 `scripts/start_chat.sh` 与 `scripts/start_server.sh`。
+
+### 安装成 pip 包（可选，仍然没有编译）
+
+```bash
+pip install -e .            # 提供 cann-llm-chat / cann-llm-server 两个命令
+```
+
+### 直接用模块运行（不经过脚本）
+
+```bash
+PYTHONPATH=src python3 -m cann_llm.cli.chat -d /path/to/model_dir
+PYTHONPATH=src python3 -m cann_llm.api.server -d /path/to/model_dir --port 8000
+```
+
+### Makefile 快捷方式
+
+```bash
+make chat   MODEL=/path/to/model_dir                 # 交互式对话
+make server MODEL=/path/to/model_dir PORT=8000       # 启动服务
+make test                                            # 单元测试（stdlib unittest）
+make test-v                                          # 单元测试（详细输出）
+```
+
+`make` 的 `chat` / `server` 支持 `BACKEND=cann|hiai`（默认 `cann`）。
 
 ## 许可
 

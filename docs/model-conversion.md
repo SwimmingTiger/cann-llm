@@ -472,22 +472,20 @@ my-model/
 cd /path/to/cann-llm
 
 # ① 能加载吗
-python3 -m cann_llm.cli.chat --list-backends
+scripts/start_chat.sh --list-backends
 
 # ② 单个 prompt 能不能出正确结果（贪心，便于判断）
-PYTHONPATH=src python3 -m cann_llm.cli.chat \
-    -d /path/to/my-model -p "The capital of France is" --temp 0
+scripts/start_chat.sh -d /path/to/my-model -p "The capital of France is" --temp 0
 
 # ③ 长一点，看是否通顺（不只是短答案对）
-PYTHONPATH=src python3 -m cann_llm.cli.chat \
-    -d /path/to/my-model -p "Explain what a large language model is in three sentences." \
-    --temp 0 --maxtok 80
+scripts/start_chat.sh -d /path/to/my-model \
+    -p "Explain what a large language model is in three sentences." --temp 0 --maxtok 80
 
 # ④ 是不是逐字流式
 PYTHONPATH=src python3 scripts/stream_check.py -d /path/to/my-model
 
 # ⑤ 交互式跑一轮多轮对话
-PYTHONPATH=src python3 -m cann_llm.cli.chat -d /path/to/my-model
+scripts/start_chat.sh -d /path/to/my-model
 ```
 
 **本项目实测的期望结果**（`temp=0`）：
