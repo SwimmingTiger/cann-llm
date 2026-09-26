@@ -226,7 +226,7 @@ class CannNdkBackend(EngineBackend):
         # 这样 /v1/models 的元信息与"输入超出 KV 缓存"的提示文案才是对的。
         # 读不到就保持 0（= 未知）并如实呈现；**不猜默认值**，
         # 否则提示里会写一个属于别个模型的上限，反而误导。
-        if self.context_length is None:
+        if not self.context_length:        # None 或 0 都表示"未指定"
             self.context_length = self._read_context_length(self.model_dir) or 0
             self._info = ModelInfo(id=self.model_id, backend="cann",
                                    path=self.model_dir,

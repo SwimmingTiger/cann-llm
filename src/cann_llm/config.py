@@ -54,7 +54,10 @@ class ModelConfig:
     top_p: float = 0.95
     repetition_penalty: float = 1.1
     #: 上下文长度（用于 /v1/models 展示）
-    context_length: int = 2048
+    # 0 = 未指定，交给后端按【模型自己的配置】探测（kv_cache_max_len）。
+    # ★ 这里绝不能写死一个数字：它会覆盖模型真值，还会让"输入超出 KV 缓存（本模型 N token）"
+    #   这类提示写出属于别的模型的上限（实测踩过：默认 2048 覆盖了实际 4096）。
+    context_length: int = 0
 
     @property
     def resolved_id(self) -> str:
