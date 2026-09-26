@@ -594,3 +594,34 @@ if ev_fail.is_set():
 | 3 | CLI + HTTP 端到端 | ✅ 达成 |
 | 4 | 测试通过不回归（184 passed）| ✅ 达成 |
 | 5 | 提交到 git | ✅ 达成 |
+
+---
+
+## ⚠ 判据 #2（流式）—— 尝试过，导致 segfault，已回退
+
+**当前状态**：`supports_streaming` 保持 `False`。其余判据 #1/#3/#4/#5 全部达成。
+
+**尝试过的做法**（在 `generate()` 内）：
+
+1. 注册 `HIAI_LLMEngine_Context_SetOnSomeTokenGenerateDoneFunc(ctx, cb_some)`
+2. `cb_some` **在回调内部**读 Context（`GetAllTokenGenerationLen` + `GetAllTokenGeneration`）
+   —— 依据是"回调跑在引擎工作线程上，同线程读 Context 应无竞态"
+3. 把 `decode(全量)[已发出长度:]` 作为增量推入 `queue.Queue`，生成器边等 `Event` 边 `yield`
+
+**结果**：`supports_streaming = True` 生效、分词器就绪，随后 **Segmentation fault (core dumped)**。
+
+**推测原因（供新会话排查）**：
+
+- 该回调是从**引擎自己的工作线程**进入 Python 的；`ctypes.CFUNCTYPE` 回调在**外来线程**上
+  重入 Python/GIL 是已知的脆弱点（`OnAllTokensDone` 回调只做 `Event.set()` 尚可，
+  但 `_on_some` 里做了较多 Python 工作：ctypes 调用、列表切片、分词器 `decode`）
+- 也可能是 `SetOnSomeTokenGenerateDoneFunc` 的**回调签名/触发时机**与假设不符
+  （该 setter 的绑定在 `_HiaiBindings.SIGS` 里的签名 `(c_int, [c_void_p, c_void_p])` 需复核）
+
+**建议的安全做法**（未验证）：
+
+- 回调里**只**做最小动作（例如设一个 `ctypes.c_int` 标志或调用一次 `Event.set()`），
+  **不在回调里解码/读 Context**；增量由**另一个线程**在生成期间读取 —— 但注意
+  从**外部**轮询 Context 已验证会导致 `libc++abi Pure virtual function call` abort（见上文），
+  所以这条路需要重新设计（例如让回调把 token 数写进一块 `ctypes` 预分配内存，
+  由生成器只读那块内存，不碰 Context）
