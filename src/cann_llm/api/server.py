@@ -85,7 +85,6 @@ def build_state(cfg: AppConfig) -> AppState:
         "model_dir": mc.model_dir,
         "model_id": mc.model_id,
         "context_length": mc.context_length,
-        "max_prompt_tokens": mc.max_prompt_tokens,
         "default_params": GenerationParams(
             max_tokens=mc.max_tokens, temperature=mc.temperature, top_k=mc.top_k,
             top_p=mc.top_p, repetition_penalty=mc.repetition_penalty),

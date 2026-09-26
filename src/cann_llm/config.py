@@ -52,8 +52,6 @@ class ModelConfig:
     top_k: int = 20
     top_p: float = 0.95
     repetition_penalty: float = 1.1
-    #: 输入侧上限，超过即报 context_length_exceeded
-    max_prompt_tokens: int = 1800
     #: 上下文长度（用于 /v1/models 展示）
     context_length: int = 2048
 

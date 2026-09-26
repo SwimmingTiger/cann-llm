@@ -192,15 +192,13 @@ class AgentLoop:
     def __init__(self, backend: EngineBackend, template: ChatTemplate,
                  tools: ToolRegistry, *, config: Optional[AgentConfig] = None,
                  system_prompt: Optional[str] = None,
-                 params: Optional[GenerationParams] = None,
-                 max_prompt_tokens: int = 1800):
+                 params: Optional[GenerationParams] = None):
         self.backend = backend
         self.template = template
         self.tools = tools
         self.config = config or AgentConfig()
         self.system_prompt = system_prompt
         self.params = params or GenerationParams()
-        self.max_prompt_tokens = max_prompt_tokens
 
     # ---- 工具执行 ----
     def _execute(self, call: ToolCall) -> tuple[ToolResult, float]:
@@ -351,20 +349,14 @@ class AgentLoop:
 
     def _render(self, messages: Sequence[Message],
                 tools: Optional[List[Dict[str, Any]]]) -> str:
+        """渲染完整消息（**不做任何裁剪**）。
+
+        静默丢弃历史会让模型在调用方不知情的情况下换掉上下文。长度控制交给
+        调用方（CLI 用 /reset，服务端由客户端自己管理 messages）。
+        """
         if tools and self.config.force_tool_use:
             tools = [dict(t) for t in tools]
             # 把指令挂在最后一个工具的 description 上（模板会原样渲染）
             fn = tools[-1].setdefault("function", {})
             fn["description"] = (fn.get("description", "") or "") + self.TOOL_USE_DIRECTIVE
-        rendered = self.template.render(messages, tools=tools or None)
-        est = self.backend.count_prompt_tokens(rendered)
-        if self.max_prompt_tokens > 0 and est > self.max_prompt_tokens:
-            # 从最旧的 user 轮开始丢，保留 system 与最近的工具往返
-            trimmed = list(messages)
-            while len(trimmed) > 2:
-                idx = 1 if trimmed[0].role == "system" else 0
-                del trimmed[idx]
-                rendered = self.template.render(trimmed, tools=tools or None)
-                if self.backend.count_prompt_tokens(rendered) <= self.max_prompt_tokens:
-                    break
-        return rendered
+        return self.template.render(messages, tools=tools or None)

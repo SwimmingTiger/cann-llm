@@ -16,8 +16,7 @@ temperature = 0.7
 top_k = 20
 top_p = 0.95
 repetition_penalty = 1.1
-max_prompt_tokens = 1800
-context_length = 2048
+context_length = 2048   # 仅用于 /v1/models 展示；本服务不设输入长度上限
 
 [server]
 host = "127.0.0.1"

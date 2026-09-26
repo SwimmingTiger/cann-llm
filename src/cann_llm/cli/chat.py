@@ -68,7 +68,6 @@ def build_engine(cfg: AppConfig) -> EngineBackend:
         "model_dir": mc.model_dir,
         "model_id": mc.model_id,
         "context_length": mc.context_length,
-        "max_prompt_tokens": mc.max_prompt_tokens,
         "default_params": GenerationParams(
             max_tokens=mc.max_tokens, temperature=mc.temperature, top_k=mc.top_k,
             top_p=mc.top_p, repetition_penalty=mc.repetition_penalty),
@@ -123,7 +122,7 @@ def run_turn(engine: EngineBackend, cfg: AppConfig, state: CliState,
                            max_result_chars=cfg.agent.max_result_chars,
                            force_tool_use=cfg.agent.force_tool_use),
         system_prompt=state.system_prompt, params=state.params,
-        max_prompt_tokens=cfg.model.max_prompt_tokens)
+)
 
     final: Optional[Final] = None
     started = False

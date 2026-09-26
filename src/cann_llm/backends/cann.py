@@ -31,6 +31,7 @@ from typing import Dict, Iterator, Optional, Tuple
 
 from ..errors import (
     BackendUnavailableError,
+    ContextLengthExceededError,
     GenerationError,
     InvalidRequestError,
     ModelLoadError,
@@ -135,13 +136,11 @@ class CannNdkBackend(EngineBackend):
         model_id: str = "qwen2.5-1.5b",
         lib_path: str = CANN_NDK_LIB,
         context_length: int = 2048,
-        max_prompt_tokens: int = 1800,
         default_params: Optional[GenerationParams] = None,
     ):
         self.model_dir = os.path.abspath(model_dir) if model_dir else ""
         self.model_id = model_id
         self.context_length = context_length
-        self.max_prompt_tokens = max_prompt_tokens
         self.default_params = default_params or GenerationParams()
 
         self._ndk: Optional[_NdkBindings] = None
@@ -356,14 +355,18 @@ class CannNdkBackend(EngineBackend):
         )
 
     def _check_prompt(self, prompt: str, params: GenerationParams) -> None:
+        """只拦真正的输入错误，**不限制长度**。
+
+        本后端刻意不设上下文上限：引擎的 KV 缓存是 2048，超出后它不会报错，
+        而是静默产出垃圾（实测 in_tokens≈2086 时开始出现 '-' 之类的重复）。
+        这种"看起来成功但结果是错的"无法在客户端用任何启发式可靠预判
+        （没有 tokenize 接口，按字节估算误差可达 2.3 倍），所以交给调用方
+        自己观察输出、自己决定怎么控制长度。
+
+        详见 docs/cann-engine-notes.md 的「上下文上限」一节。
+        """
         if not prompt:
             raise InvalidRequestError("prompt 不能为空")
-        # 没有独立的 tokenize 接口，这里只能做保守的字符数预检；
-        # 真正的上限由引擎在 Generate 返回码里体现。
-        approx = len(prompt.encode("utf-8")) // 2
-        if approx > self.max_prompt_tokens * 2:
-            raise InvalidRequestError(
-                f"prompt 过长（约 {approx} token > 上限 {self.max_prompt_tokens}）")
 
     def _run(self, prompt: str, params: GenerationParams,
              sink) -> Dict[str, object]:
@@ -375,8 +378,18 @@ class CannNdkBackend(EngineBackend):
                                     prompt.encode("utf-8"))
         wall = time.time() - t0
         if status != 0:
+            # 非零返回最常见的原因是输入超出 KV 缓存（2048）。这属于客户端
+            # 错误（400 context_length_exceeded），不该报成 500 —— 否则调用方
+            # 会以为该重试。这里只是给错误分类，不阻断任何请求，所以用粗估
+            # 没关系（估歪了也只是状态码不同）。
+            if self.count_prompt_tokens(prompt) > self.context_length:
+                raise ContextLengthExceededError(
+                    f"引擎 Generate 返回 {status}，且输入约 "
+                    f"{self.count_prompt_tokens(prompt)} token，已超出模型上下文"
+                    f"（{self.context_length}，含输出）。请缩短输入后重试。")
             raise GenerationError(
-                f"引擎 Generate 返回 {status}（prompt 可能超长或含无法分词的字符）")
+                f"引擎 Generate 返回 {status}（输入不长，可能是无法分词的字符或"
+                f"引擎内部错误）。")
 
         in_tok = ctypes.c_ulong(0)
         out_tok = ctypes.c_ulong(0)
@@ -411,5 +424,13 @@ class CannNdkBackend(EngineBackend):
         return FINISH_STOP
 
     def count_prompt_tokens(self, text: str) -> int:
-        """粗略估算（无独立 tokenize 接口），仅供预检与日志。"""
-        return len(text.encode("utf-8")) // 2
+        """粗略估算 token 数，**仅供日志与展示，不作为任何限制的依据**。
+
+        引擎没有只分词不生成的接口。系数按实测标定：原先用「字节 // 2」，
+        实测对英文偏高约 2.3 倍（实际 1316 token 被估成 3011）；改用
+        「字节 // 4」后与实测基本吻合，中文也大致成立。
+
+        需要准确值时请用生成结果里的 ``GenerationStats.prompt_tokens``
+        （直接来自引擎的 GetInputTokenCount），不要用这个估算。
+        """
+        return len(text.encode("utf-8")) // 4

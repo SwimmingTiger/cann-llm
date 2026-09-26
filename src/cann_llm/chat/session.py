@@ -5,7 +5,6 @@
 
 本模块负责：
 * 维护消息列表；
-* 渲染时按 ``max_prompt_tokens`` 裁剪过老的历史（从最旧的 user/assistant 对开始丢）；
 * 流式生成并在结束后把回复写回历史。
 """
 
@@ -32,8 +31,6 @@ class ChatSession:
     template: ChatTemplate
     system_prompt: Optional[str] = None
     params: GenerationParams = field(default_factory=GenerationParams)
-    #: 渲染时的输入上限；超出就丢最旧的一轮
-    max_prompt_tokens: int = 1800
 
     messages: List[Message] = field(default_factory=list)
 
@@ -57,22 +54,14 @@ class ChatSession:
             msgs.insert(0, Message("system", self.system_prompt))
         return msgs
 
-    def _trim(self, msgs: List[Message]) -> List[Message]:
-        """从最旧的一轮开始丢，直到估算长度落回上限内。"""
-        if self.max_prompt_tokens <= 0:
-            return msgs
-        while len(msgs) > 1:
-            est = self.backend.count_prompt_tokens(
-                self.template.render(msgs, add_generation_prompt=True))
-            if est <= self.max_prompt_tokens:
-                break
-            # 保留 system，从第二条开始丢
-            drop = 1 if msgs[0].role == "system" else 0
-            del msgs[drop]
-        return msgs
-
     def render(self, add_generation_prompt: bool = True) -> str:
-        return self.template.render(self._trim(self._effective()),
+        """渲染完整历史。
+
+        **不做任何裁剪**：静默丢弃历史会让模型在调用方不知情的情况下换掉
+        上下文，产生的错误答案比报错更难排查。需要控制长度时由调用方自己
+        调用 :meth:`reset` 或自行丢弃早期消息。
+        """
+        return self.template.render(self._effective(),
                                     add_generation_prompt=add_generation_prompt)
 
     # ------------------------------------------------------------ 生成

@@ -38,6 +38,21 @@
 - `Makefile`、`examples/config.example.toml`
 - `docs/architecture.md`、`docs/cann-engine-notes.md`、`docs/openai-api.md`
 
+### Changed — 移除上下文长度限制
+
+- **后端不再对 prompt 长度设限**，也不再做历史裁剪。原先的 `max_prompt_tokens`
+  （默认 1800）会误拦请求：它按「字节 // 2」估算，实测对英文偏高约 2.3 倍
+  （实际 1316 token 估成 3011）。既然没有 tokenize 接口、无法可靠预判，
+  就不该给一个会误伤的上限 —— 改为让调用方观察模型输出自行控制。
+- `ChatSession` 与 `AgentLoop` 的静默历史裁剪一并移除：丢历史会让模型在
+  调用方不知情的情况下换掉上下文，比报错更难排查
+- `count_prompt_tokens()` 系数按实测标定为「字节 // 4」，且明确它**仅供
+  日志展示，不作为任何限制依据**；准确值用 `usage.prompt_tokens`
+- 引擎非零返回若输入确实超长，改判为 400 `context_length_exceeded`
+  （原来是 500，会让调用方误以为该重试）
+- 文档补充引擎的分层行为：≤2048 正常 / ~2086–3360 **成功但输出垃圾** /
+  很大则报错（见 `docs/cann-engine-notes.md` 第 9 节）
+
 ### Added — Agent（工具调用）
 
 - **prompt-based function calling**：模型用 Qwen 官方格式

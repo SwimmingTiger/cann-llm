@@ -104,18 +104,18 @@ class TestSession(unittest.TestCase):
         self.assertEqual(self.session.system_prompt, "NEW")
         self.assertEqual(self.session.messages, [])
 
-    def test_history_trimming_keeps_system(self):
+    def test_history_is_never_trimmed(self):
+        """历史一律完整保留 —— 静默丢弃会让模型换掉上下文，比报错更难排查。"""
         s = ChatSession(backend=self.backend, template=get_template("chatml"),
-                        system_prompt="SYS", max_prompt_tokens=25)
-        for i in range(6):
+                        system_prompt="SYS")
+        for i in range(30):
             s.messages.append(Message("user", f"question number {i} with several words"))
             s.messages.append(Message("assistant", f"answer number {i} with several words"))
         rendered = s.render()
         self.assertIn("SYS", rendered)
-        self.assertLess(s.backend.count_prompt_tokens(rendered), 60)
-        # 最旧的轮次应被裁掉
-        self.assertNotIn("question number 0", rendered)
-        self.assertIn("question number 5", rendered)
+        # 最旧的与最新的都在
+        self.assertIn("question number 0", rendered)
+        self.assertIn("question number 29", rendered)
 
 
 if __name__ == "__main__":
