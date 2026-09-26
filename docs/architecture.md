@@ -66,7 +66,7 @@ CANN 引擎一个 Executor 同时只能跑一路推理。这个约束被封装�
 * 排队上限 / 超时 / `BusyError`（→ HTTP 503）只有一处实现
 * 若某个后端本身支持并发，直接不套这层即可
 
-## 核心零依赖
+## 零第三方 Python 包依赖
 
 `pyproject.toml` 里 `dependencies = []`。HTTP 层用标准库 `http.server`，
 测试用 `unittest`。原因很实际：**目标运行环境（鸿蒙设备）上装不了
@@ -75,6 +75,16 @@ HTTP 层性能完全不是问题。
 
 `[project.optional-dependencies]` 里保留了 `fastapi` / `dev` 两组，
 需要时再装。
+
+> ⚠️ **"零依赖"只针对 Python 包。**
+> 运行本项目需要一个 Python **解释器**，而**鸿蒙 PC 不预装 Python** ——
+> 必须先从应用市场安装「**Python安装器**」
+> （`com.develop.opensource.ohdpc.python.launcherforpython312`），
+> 它会装到 `/data/service/hnp/bin/python3`。
+> 这是本项目唯一的第三方依赖，详见 README 的「依赖与构建」。
+>
+> 另外**不要用 glibc 构建的 Python**（pyenv / harmonybrew 那些）：本机 libc 是
+> musl、引擎按 musl 编译，glibc 的 Python 加载它会直接段错误。
 
 ## 数据流（一次 HTTP 流式请求）
 

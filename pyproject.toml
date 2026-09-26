@@ -17,7 +17,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# 核心零第三方依赖：HTTP 层用 stdlib，保证在设备上开箱即用
+# Python 包层面零依赖：HTTP 层用 stdlib、测试用 unittest。
+# ★ 但运行需要先有一个 Python 解释器，而鸿蒙 PC 不预装 ——
+#   要从应用市场装「Python安装器」，详见 README 的「依赖与构建」一节。
 dependencies = []
 
 [project.optional-dependencies]

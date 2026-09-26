@@ -19,17 +19,79 @@
 
 1. **引擎是系统的**：`/system/lib64/libhiai_llm_engine.so` 随 HarmonyOS 提供，
    内部还要用 NPU 驱动 —— **x86 / Docker / 桌面 Linux 上都没有** ✗
-2. **必须用系统自带的 musl Python 3.12**：
+2. **必须用 musl 构建的 Python 3.12**：
+   **鸿蒙 PC 不自带 Python**，需要先从应用市场安装「**Python安装器**」
+   （`com.develop.opensource.ohdpc.python.launcherforpython312`），
+   装好后落在：
 
    ```
    /data/service/hnp/python.org/python_3.12/bin/python3.12
    （或软链 /data/service/hnp/bin/python3）
    ```
 
-   **用 brew / glibc 的 Python 加载引擎会 segfault** ✗ —— 因为引擎依赖设备上的
-   musl 与 `libmusl_compat`（`cann.py` 里有 `_is_musl()` 检测就是为了这个）。
+   **用 brew / glibc 构建的 Python 加载引擎会 segfault** ✗ —— 原因见下面的
+   [「为什么 glibc 的 Python 不行」](#为什么-glibc-的-python-不行)。
+   `scripts/start_chat.sh` / `scripts/start_server.sh` 会自动把 hnp 的
+   Python 加到 `PATH` 末尾并选中它，无需手工配置。
 
+   > 它是**本项目唯一的第三方依赖**（Python 包层面仍然是零依赖）。
    > 设备上的 Python **自带 pip 24.3.1** ✓，可以直接 `pip install`。
+
+### 为什么 glibc 的 Python 不行
+
+**一句话**：这一个进程里只能有一个 `libc.so`，而引擎要的是 musl 那个。
+
+本机（鸿蒙）的系统 libc 是 **musl**：
+
+```
+/lib/ld-musl-aarch64.so.1      ← 系统动态加载器就是 musl 的
+/system/lib/libc.so            ← 引擎 NEEDED 的 libc.so 解析到它
+```
+
+引擎自己的依赖表（`readelf -d` 实测）：
+
+```
+NEEDED  libz.so · libhilog_ndk.z.so · libc++_shared.so · libc.so
+                                                         ↑ musl 版
+```
+
+而 brew 装出来的 Python 是 **glibc** 构建的 —— 它要的是 **glibc 版** `libc.so`，
+靠一个叫 `libmusl_compat.so` 的**转发层**在 musl 系统上跑起来：
+
+```
+brew python3 的 NEEDED：libmusl_compat.so · libintl.so.8 · libpython3.14.so.1.0 · libc.so
+                                                                                   ↑ glibc 版
+```
+
+`libmusl_compat.so` 做的是「**让 glibc 构建的程序在 musl 系统上跑**」——
+它提供 musl 那边缺失或名字不同的符号（实测导出 58 个，如 `aio_*`、`crypt`、
+`crypt_r`、`__res_state`）并转译到 glibc。**方向是单向的**：它让 glibc 程序
+去用 musl 系统，**并不能让 glibc 进程去加载一个 musl 库**。
+
+于是 `dlopen` 引擎时：
+
+| 步骤 | 实测结果 |
+|---|---|
+| `ctypes.CDLL("/system/lib64/libhiai_llm_engine.so")` | ✅ **成功**（不崩） |
+| 第一次调用引擎的函数（`Executor_CreateFromJson`） | ❌ **Segmentation fault** |
+
+**为什么第一步能过、第二步才崩**：`dlopen` 只做符号绑定，此时引擎还没真正
+用 libc；等它一执行到 `malloc` / `pthread_*` / `std::string` 分配，调用的就是
+**进程里那个 glibc 的 `libc.so`** ✗ —— 而引擎是按 musl 的 ABI 和结构体布局
+编译的，两边对不上，直接段错误。
+
+实测崩点（`python -X faulthandler`）：
+
+```
+Fatal Python error: Segmentation fault
+  File "…/src/cann_llm/backends/hiai.py", line 337 in load
+      self._exec = self._bind.lib.HIAI_LLMEngine_Executor_CreateFromJson(…)
+```
+
+> 所以脚本里的检测是**看 `/proc/self/maps` 里有没有 `libmusl_compat`** ——
+> 有就说明这个解释器是 glibc 构建的，直接跳过。这是一条**保守规则**：
+> 不是"一 `dlopen` 就崩"，而是"用它跑不通"。**宁可早跳过并说清原因，
+> 也不要让用户拿到一句没头没尾的 segfault。**
 
 ---
 

@@ -3,7 +3,8 @@
 华为 **CANN LLM Engine**（鸿蒙 NPU）上的对话与 **OpenAI 兼容推理服务**，代码和文档均由DeepSeek Harness中的DeepSeek V4.1 Flash等模型生成。
 
 直接以 `ctypes` 调用系统自带的 NDK 库 `/system/lib64/ndk/libcann_llm_engine.so`，
-**不需要 HAP、不需要 root、核心零第三方依赖**。
+**不需要 HAP、不需要 root；Python 包层面零依赖**（但鸿蒙 PC 需先装 Python 运行时，
+见[依赖与构建](#依赖与构建)）。
 
 > 📦 **模型还没准备好？两条路，任选一条：**
 >
@@ -28,7 +29,9 @@
   **`cann`** 走华为官方 NDK 接口（`/system/lib64/ndk/libcann_llm_engine.so`），
   **`hiai`** 走系统内部引擎（`/system/lib64/libhiai_llm_engine.so`）。
   用 `-b cann` / `-b hiai` 切换，**CLI、HTTP 服务、对话模板都不用改**
-- 📦 **零第三方依赖核心** —— HTTP 层基于 `http.server`，设备上开箱即用
+- 📦 **Python 包层面零依赖** —— HTTP 层基于标准库 `http.server`。
+  不过鸿蒙 PC **不自带 Python**，需先从应用市场装「Python安装器」，
+  见[依赖与构建](#依赖与构建)
 - 🧪 **可测** —— 分块聚合、对话模板、协议映射都有单元测试；`scripts/stream_check.py` 自检流式
 
 ## 依赖与构建
@@ -38,10 +41,26 @@
 | 项 | 情况 |
 |---|---|
 | 本项目源码 | 全部是 Python，无需 C/C++ 工具链、无需 `pip install` 即可运行 |
-| 第三方依赖 | **零**（HTTP 层用标准库 `http.server`，测试用 `unittest`） |
+| **Python 运行时** | ★ **这是唯一的第三方依赖，且鸿蒙 PC 不预装** —— 见下方说明 |
+| Python 包依赖 | **零**（HTTP 层用标准库 `http.server`，测试用 `unittest`，`pip install` 无外部包可拉） |
 | 原生库 | 运行期由 `ctypes` 加载**系统自带**的 `/system/lib64/ndk/libcann_llm_engine.so`（鸿蒙 NDK 提供，不是本项目编译的） |
 | 模型产物 | `.omc` + `SubGraph_0.weight` 由华为的 **OMG 离线转换工具**生成，属于离线步骤，不在本仓库内（见 `docs/cann-engine-notes.md`） |
 | Python 版本 | ≥ 3.9（用到 `tomllib`） |
+
+### 先装 Python 运行时（鸿蒙 PC 必做）
+
+**鸿蒙 PC 不自带 Python。** 必须先从应用市场安装「**Python安装器**」：
+
+> **Python安装器**（`com.develop.opensource.ohdpc.python.launcherforpython312`）
+> <https://appgallery.huawei.com/app/detail?id=com.develop.opensource.ohdpc.python.launcherforpython312>
+
+装好后它会落在 `/data/service/hnp/bin/python3`。**`scripts/start_chat.sh` /
+`scripts/start_server.sh` 会自动把它追加到 `PATH` 末尾并选中它**，无需手工配置。
+
+> ⚠️ **不要用 glibc 构建的 Python**（例如 pyenv / harmonybrew 装的那些）。
+> 本机系统 libc 是 musl，引擎按 musl 编译；glibc 的 Python 靠 `libmusl_compat`
+> 垫片运行，把 musl 版引擎加载进来会**直接段错误**。脚本在发现这类解释器时会
+> 逐个跳过并说明原因。
 
 `import` 本包**不会**加载任何 `.so`；原生库只在 `backend.load()` 时加载，
 所以在非鸿蒙机器上仍可正常 `import`、跑测试、做协议层开发。
