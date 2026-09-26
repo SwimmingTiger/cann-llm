@@ -266,7 +266,12 @@ class CannNdkBackend(EngineBackend):
 
         self._executor = self._ndk.executor_create(b"executor.json")
         if not self._executor:
-            raise ModelLoadError("Executor 创建失败（检查 executor.json 与模型文件）")
+            from ..enginelog import format_engine_log, recent_engine_log
+            extra = format_engine_log()
+            if not recent_engine_log():
+                extra = ("\n常见可能：当前终端没有访问 NPU 的权限（换一个系统终端试试）、"
+                         "executor.json 与模型文件不匹配" + extra)
+            raise ModelLoadError("Executor 创建失败。" + extra)
 
         self._callback_ref = self._ndk.callback_type(self._on_token)
         # 预建一个默认参数的 Context，尽早暴露配置问题

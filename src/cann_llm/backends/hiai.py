@@ -336,10 +336,15 @@ class HiaiBackend(EngineBackend):
         self._exec = self._bind.lib.HIAI_LLMEngine_Executor_CreateFromJson(
             json.dumps(executor_cfg).encode())
         if not self._exec:
-            raise ModelLoadError(
-                "Executor 创建失败。常见可能：\n"
-                "    · 当前终端没有访问 NPU 的权限（换一个系统终端试试）\n"
-                "    · 模型目录不完整 / executor JSON 有问题")
+            # ★ 加载失败也要附原始日志 —— 缺字段、参数不匹配这类问题都在
+            #   加载阶段暴露，这里才是最需要日志的地方。
+            from ..enginelog import format_engine_log, recent_engine_log
+            extra = format_engine_log()
+            if not recent_engine_log():
+                extra = ("\n常见可能：\n"
+                         "    · 当前终端没有访问 NPU 的权限（换一个系统终端试试）\n"
+                         "    · 模型目录不完整 / executor JSON 有问题" + extra)
+            raise ModelLoadError("Executor 创建失败。" + extra)
 
         # 注：本后端【不需要】自己分词 —— 输入/输出都是明文，
         # 引擎用模型配置里的 tokenizer 自己处理。
