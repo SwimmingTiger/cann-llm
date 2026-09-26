@@ -244,7 +244,12 @@ def _gen_failure_msg(rc, context_length: int) -> str:
       所以这里只能把权限列为**可能原因之一**，不断言。
     """
     from ..enginelog import format_engine_log, recent_engine_log
-    head = (f"引擎 GenerateAsync 返回 {rc}" if rc is not None else "引擎报告生成失败")
+    # ★ 措辞说明：
+    #   · 不说"引擎报告生成失败" —— "report"（通报）直译成"报告"读不通；
+    #   · 不提 GenerateAsync 的返回码 —— 实测它成功失败都是 0，没有信息量；
+    #   · 不说"生成失败" —— CLI 的前缀（"生成失败: " / "[失败] "）已经说了，
+    #     异常消息里只保留【引擎侧】的事实。
+    head = "引擎出错"
     # ★ 拿到引擎日志就【只用它】—— 那四条"可能原因"是我没依据时的兜底，
     #   有引擎原话时再列出来只会分散注意力。读不到才退回兜底文案。
     if recent_engine_log():
