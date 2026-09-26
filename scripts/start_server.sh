@@ -126,7 +126,7 @@ CONFIG="${CANN_LLM_CONFIG:-}"
 HOST="${CANN_LLM_HOST:-127.0.0.1}"
 PORT="${CANN_LLM_PORT:-8000}"
 API_KEY="${CANN_LLM_API_KEY:-}"
-BACKEND="${CANN_LLM_BACKEND:-}"
+BACKEND="${CANN_LLM_BACKEND:-hiai}"
 BACKGROUND=0
 WAIT_SECS=90
 
@@ -137,7 +137,9 @@ usage() {
 选项:
   -d, --model-dir DIR   模型目录（含 omc / SubGraph_0.weight / embedding / tokenizer / json）
   -c, --config FILE     TOML 配置文件（examples/config.example.toml）
-  -b, --backend NAME    后端（默认 cann）
+  -b, --backend NAME    后端：hiai | cann（默认 hiai）
+                        hiai = 系统内部引擎，更快、输出干净、支持停止序列（推荐）
+                        cann = 官方 NDK 后端
       --host HOST       监听地址（默认 127.0.0.1）
   -p, --port PORT       监听端口（默认 8000）
   -k, --api-key KEY     要求 Authorization: Bearer <KEY>
@@ -304,7 +306,8 @@ if [[ -n "$PY_WARN" ]]; then
 fi
 
 NDK_LIB="${CANN_LLM_LIB:-/system/lib64/ndk/libcann_llm_engine.so}"
-if [[ "${BACKEND:-cann}" == "cann" || -z "$BACKEND" ]]; then
+# 只有【显式】指定 cann 时才强制要求 NDK 库；auto 未定时不假定后端
+if [[ "$BACKEND" == "cann" ]]; then
     if [[ -f "$NDK_LIB" ]]; then
         ok "CANN NDK 库: $NDK_LIB"
     else

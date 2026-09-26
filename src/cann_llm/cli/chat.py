@@ -186,7 +186,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--model-id",
                     help="对外暴露的模型 id（默认取模型目录名）")
     ap.add_argument("-c", "--config", help="TOML 配置文件")
-    ap.add_argument("-b", "--backend", help=f"后端，可用：{', '.join(available_backends())}")
+    ap.add_argument(
+        "-b", "--backend", default="hiai",
+        help=f"后端，可用：{', '.join(available_backends())}（默认 hiai）")
     ap.add_argument("-t", "--template", help=f"对话模板，可用：{', '.join(available_templates())}")
     ap.add_argument("-s", "--system", help="system prompt")
     ap.add_argument("-p", "--prompt", help="单轮模式：生成一次后退出")

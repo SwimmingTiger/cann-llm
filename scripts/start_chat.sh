@@ -122,7 +122,9 @@ usage() {
 选项: 直接透传给 cann_llm.cli.chat，常用:
   -d, --model-dir DIR   模型目录（含 omc / SubGraph_0.weight / embedding / tokenizer / json）
   -c, --config FILE     TOML 配置文件
-  -b, --backend NAME    后端（默认 cann）
+  -b, --backend NAME    后端：hiai | cann（默认 hiai）
+                        hiai = 系统内部引擎，更快、输出干净、支持停止序列（推荐）
+                        cann = 官方 NDK 后端
   -t, --template NAME   对话模板（chatml / plain）
   -s, --system TEXT     system prompt
   -p, --prompt TEXT     单轮模式：生成一次后退出

@@ -555,7 +555,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-d", "--model-dir", help="模型目录")
     ap.add_argument("-c", "--config", help="TOML 配置文件")
-    ap.add_argument("-b", "--backend", help=f"后端，可用：{', '.join(available_backends())}")
+    ap.add_argument(
+        "-b", "--backend", default="hiai",
+        help=f"后端，可用：{', '.join(available_backends())}（默认 hiai）")
     ap.add_argument("--host", help="监听地址（默认 127.0.0.1）")
     ap.add_argument("--port", type=int, help="监听端口（默认 8000）")
     ap.add_argument("--api-key", help="非空则要求 Authorization: Bearer <key>")

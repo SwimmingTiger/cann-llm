@@ -21,12 +21,33 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-__all__ = ["build_package_files", "write_package_files", "is_packaged"]
+__all__ = ["build_package_files", "write_package_files", "is_packaged",
+           "detect_layout", "PACKAGED_MARKERS", "main"]
 
 
 def is_packaged(model_dir: str) -> bool:
     """目录里是否已有 ``api_config.json``。"""
     return os.path.isfile(os.path.join(model_dir, "api_config.json"))
+
+
+#: 带 ``api_config.json`` 的完整包（官方导出的那套）
+PACKAGED_MARKERS = ("api_config.json",)
+def detect_layout(model_dir: str) -> str:
+    """判断模型目录的布局。
+
+    :return: ``"packaged"``（带 api_config.json 的完整包）/ ``"incomplete"``（缺它，
+             用 :func:`write_package_files` 可补齐）/ ``"unknown"``
+    """
+    if not model_dir or not os.path.isdir(model_dir):
+        return "unknown"
+    names = set(os.listdir(model_dir))
+    if any(m in names for m in PACKAGED_MARKERS):
+        return "packaged"
+    if "executor.json" in names:
+        return "incomplete"
+    return "unknown"
+
+
 
 
 def _read_json(path: str) -> Dict[str, Any]:
@@ -148,3 +169,41 @@ def write_package_files(model_dir: str,
             fh.write("\n")
         written.append(name)
     return written
+
+
+def main(argv: "Optional[List[str]]" = None) -> int:
+    """命令行入口：``python -m cann_llm.modelpkg <模型目录> [...]``
+
+    为缺 ``api_config.json`` 的目录补齐打包配置（幂等；已存在则跳过，
+    加 ``--overwrite`` 强制重写）。
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="python -m cann_llm.modelpkg",
+        description="给模型目录补齐打包配置（api_config.json + <model>.json）")
+    ap.add_argument("dirs", nargs="+", help="模型目录")
+    ap.add_argument("--overwrite", action="store_true", help="已存在也重写")
+    args = ap.parse_args(argv)
+
+    rc = 0
+    for d in args.dirs:
+        if not os.path.isdir(d):
+            print(f"✗ {d}: 不是目录")
+            rc = 1
+            continue
+        if is_packaged(d) and not args.overwrite:
+            print(f"· {d}: 已有 api_config.json，跳过（--overwrite 可强制重写）")
+            continue
+        try:
+            written = write_package_files(d, overwrite=args.overwrite)
+        except (OSError, ValueError) as e:
+            print(f"✗ {d}: {e}")
+            rc = 1
+            continue
+        print(f"✓ {d}: 已写 {', '.join(written) if written else '（无需改动）'}")
+    return rc
+
+
+if __name__ == "__main__":            # pragma: no cover
+    raise SystemExit(main())
