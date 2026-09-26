@@ -54,3 +54,8 @@ python3 omg_convert.py --onnx repaired_split.onnx --out ./om_out \
 | `EMB_WEIGHTS` / `EMB_SCALES` | 导出时产生的 embedding 文件 |
 | `OMG_DIR` / `ASC_DIR` | DDK 的 `tools_omg` / `tools_ascendc` 目录 |
 | `NLAYERS` / `K_CHUNK` | 层数 / 切分块大小（也可用位置参数） |
+
+## 相关
+
+- `confirm_relu.py` / `check_quant_clamp.py` —— 判断量化产物有没有被钳位
+  （`quant_param_2` 写错的症状），见 [../docs/model-conversion.md](../docs/model-conversion.md) 附录 B

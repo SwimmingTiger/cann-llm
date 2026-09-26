@@ -1,36 +1,53 @@
 # 模型转换：从 HuggingFace 检查点到能上 NPU 的模型
 
-本文记录**实际跑通过**的完整链路，目标是让你能照着把任意一个受支持的模型
-转成 `cann-llm` 能加载的模型目录。
+本文记录**实际跑通过**的完整链路，目标是让你能照着把受支持的模型转成 `cann-llm`
+能加载的模型目录。
+
+> [!IMPORTANT]
+> **一句话版**：用 `DDK-tools-next-6.1.1.0` + `kirinx90-plugin-next-6.1.1.0`，
+> 配置里 `quant_param_2 = False`，**官方标准流程直接跑通，不需要任何绕行手段**。
+>
+> 本项目早期用 5.1.1.1 时踩过一个坑（量化把权重负半轴钳成 0，输出恒定垃圾），
+> 排查过程和绕行脚本保留在[附录 B](#附录-b权重被钳成-0早期版本踩过的坑) ——
+> **但那个坑的真正原因是配置项写错，不是工具版本**，详见附录 B 的 2×2 实测表。
 
 > 转换产物（`.omc` + `SubGraph_0.weight`）有数 GB，**不进本仓库**，需要自己转。
 
 ---
 
-## 0. 这条链路长什么样
+## 0. 流程总览
 
 ```
 HF 检查点 (model.safetensors)
   │
-  │  ① 导出       华为官方示例 npu_tuned_export/export_model_single_qwen2.py
+  │  ① dopt 三阶段量化   在 GPU 机器上跑（本机是 RTX 3080 Ti）
+  ▼
+fake_quant_weight.pth  +  dopt_config.json
+  │
+  │  ② 导出             官方示例 npu_tuned_export/export_model_single_qwen2.py
   ▼
 ONNX  +  外置的 embedding_weights / embedding_dequant_scale
   │
-  │  ② ★ 修复权重  rebuild_weights.py  ← 见第 3 节，这步不做就是垃圾输出
-  │  ③ 切分大矩阵  split_downproj_fixed.py
-  ▼
-修复后的 ONNX
-  │
-  │  ④ OMG 转换    omg_convert.py --weight-data-type FP16
+  │  ③ OMG 转换         官方 tools_omg（大 MatMul 由它内部自动分块）
   ▼
 <name>.omc  +  SubGraph_0.weight
   │
-  │  ⑤ 装配模型目录 executor.json / context.json / tokenizer.json / embedding
+  │  ④ 装配模型目录      executor.json / context.json / tokenizer.json / embedding
   ▼
 可推理的模型目录 → cann-llm
 ```
 
-**每一步都在第 3 节之后有对应脚本**（`scripts/model-conversion/`）。
+全流程只需官方工具，**不涉及任何自定义脚本改写计算图**。
+
+**实测耗时**（Qwen2.5-1.5B，RTX 3080 Ti）：
+
+| 步骤 | 耗时 |
+|---|---|
+| 量化 stage1 | ~2.8 min |
+| 量化 stage2 | ~20 s |
+| 量化 stage3 | ~2 min |
+| 导出 ONNX | ~2.4 min |
+| OMG 转换 | ~3 min |
 
 ---
 
@@ -38,11 +55,12 @@ ONNX  +  外置的 embedding_weights / embedding_dequant_scale
 
 | 项 | 说明 |
 |---|---|
-| **转换机** | 建议 Ubuntu x86_64（官方推荐；OMG 是 x86_64 二进制）。aarch64 上需要用 qemu 模拟，见 [附录 A](#附录-a在-aarch64-设备上直接转换) |
+| **转换机** | Ubuntu x86_64（官方推荐）。OMG 是 x86_64 二进制；aarch64 上要用 qemu 模拟，见[附录 A](#附录-a在-aarch64-设备上直接转换) |
+| **GPU** | 量化需要 CUDA 设备（官方 `run.sh` 里 `DEVICE=cuda`）。CPU 能否跑未验证 |
 | **DDK 工具** | DDK 工具包 + kirinx90 平台插件包 —— **下载地址见下面** |
 | **华为示例代码** | [`cannkit_samplecode_lm_engine_cpp`](https://gitcode.com/HarmonyOS_Samples/cannkit_samplecode_lm_engine_cpp) —— 量化与导出脚本都在里面 |
 | **HF 检查点** | 官方文档列出的受支持模型之一，例如 `Qwen2.5-1.5B-Instruct`（safetensors 格式） |
-| **Python** | 3.10，需要 `onnx` / `onnxruntime` / `numpy` / `safetensors` |
+| **Python** | 3.10（本项目用 `venv310`，torch 2.4.0+cu121），需要 `onnx` / `onnxruntime` / `numpy` / `safetensors` |
 | **磁盘** | 至少 20 GB（ONNX + 权重 + 中间产物） |
 
 ### DDK 工具从哪下载
@@ -53,62 +71,192 @@ ONNX  +  外置的 embedding_weights / embedding_dequant_scale
 `tools_omg`、`tools_ascendc`、`platform`）与各平台插件包（`kirinx90` /
 `kirin9020` / `kirin9030`），每项附 SHA256 校验码。
 
-> **插件包版本必须与 DDK 工具包一致**（都在同一张表里）。选 **`kirinx90`** ——
-> 本项目的目标平台就是 Kirin X90。
+> **插件包版本必须与 DDK 工具包一致**（都在同一张表里）。本项目平台是 Kirin X90，
+> 选 **`kirinx90`**。
 
 相关页面：
 
 | 页面 | 用途 |
 |---|---|
 | [开发准备](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-preparations) | **工具下载**、版本匹配、SHA256 |
-| [环境准备](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-llm-usage-environmental-preparation) | 量化流程总览、受支持模型列表与下载链接、`config.yaml` / `run.sh` 模板、目录结构 |
-| [三段式量化步骤](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-llm-three-stage-quantification) | `dopt` 量化的三个阶段 |
-| [LLM 大模型能力开放](https://developer.huawei.com/consumer/cn/doc/HarmonyOS-Guides/cannkit-llm-summary) | CANN Kit LLM 总览 |
+| [环境准备](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-llm-usage-environmental-preparation) | 量化流程、受支持模型列表与下载链接、`config.yaml` / `run.sh` 模板、目录结构 |
+| [三段式量化步骤](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-llm-three-stage-quantification) | dopt 量化的三个阶段 |
 
-> ⚠️ **本文的实测基于 `DDK-tools-next-5.1.1.1` + `kirinx90-plugin-next-5.1.1.1`。**
-> 官方页面上的版本会持续更新，新版本不保证第 3～5 节的绕行手段仍然必要或仍然
-> 适用（尤其第 3 节的量化钳位问题 —— 那是 `dopt` 的行为，如果新版修了，就
-> 不需要重建权重了）。**先按第 3 节的诊断脚本确认自己是否中招，再决定要不要绕。**
+**本文实测环境**（先核对 SHA256 再解压）：
 
-拿到两个 zip 之后：
+```
+DDK-tools-next-6.1.1.0.zip        87d7e3f186ad5c527a9385cea555559ea53c63b87dc483820523bcf7bf6f87e5  (264 MB)
+kirinx90-plugin-next-6.1.1.0.zip  0657efdddd2267949e83af2a382603b523d30b258d72e077a6975eb87d4f10b1  ( 26 MB)
+```
+
+解压与安装插件：
 
 ```bash
 mkdir -p ~/ddk && cd ~/ddk
-# 把 DDK 工具包与 kirinx90 插件包解压到此处
-unzip -q DDK-tools-next-*.zip
-unzip -q kirinx90-plugin-next-*.zip
+unzip -q DDK-tools-next-6.1.1.0.zip
+unzip -q kirinx90-plugin-next-6.1.1.0.zip
+
+# 插件包解压出 image/ddk_platform_plugin/kirinx90，要放进 tools/platform/
+mv DDK-tools-next-6.1.1.0/tools .
+cp -r image/ddk_platform_plugin/kirinx90 tools/platform/
+
+# 注意：omg 是包装脚本，解压后可能没有执行权限
+chmod +x tools/tools_omg/omg tools/tools_omg/master/omg
 
 python3 -m venv venv310 && source venv310/bin/activate
-pip install onnx onnxruntime numpy safetensors pyyaml
+pip install onnx onnxruntime numpy safetensors pyyaml torch --index-url ...   # 按你的 CUDA 版本装 torch
 ```
 
-校验一下下载完整性（SHA256 以上面「开发准备」页为准）：
-
-```bash
-sha256sum DDK-tools-next-*.zip kirinx90-plugin-next-*.zip
-```
-
-工具目录展开后长这样（**记住这几个路径，后面要用**）：
+装好后的目录结构：
 
 ```
-~/ddk/ddk/tools/
-├── tools_dopt/       # 量化 + 导出
-├── tools_omg/        # ONNX → .omc
-├── tools_ascendc/    # 算子编译（含 set_ascendc_env.sh）
-└── platform/kirinx90/
+tools/
+├── platform/
+│   └── kirinx90/          # 平台插件（从插件包拷进来）
+├── tools_dopt/            # 量化：dopt_pytorch_py3 / dopt_onnx_py3 / dopt_tf_py3
+├── tools_omg/             # ONNX → .omc
+└── tools_ascendc/         # 算子编译（含 set_ascendc_env.sh）
 ```
+
+> **6.1.1.0 的一处改动**：量化入口从 `dopt/dopt_llm/` 改名成了
+> **`dopt/dopt_lm/`**。如果你沿用旧版脚本，会报 `No module named dopt.dopt_llm`。
 
 ---
 
-## 2. 导出 ONNX
+## 2. dopt 三阶段量化
 
-导出由华为官方示例完成。先准备一份模型描述 YAML：
+### 2.1 准备 `config.yaml`
 
-`model_info_target.yaml`：
+放在工作目录（例如 `quant/`）下。**逐字照官方文档的模板改**：
+
+```yaml
+kd:
+  enable: False                 # false 走 PTQ，不做蒸馏
+  loss: mse
+  micro_batch_size: 2
+  gradient_accumulation_steps: 4
+  weight_decay: 0.0
+  warmup_steps: 10
+  num_epochs: 3
+  learning_rate: 1.0e-4
+  eval_step: 1
+  logging_step: 50
+  lr_scheduler_type: cosine
+  trainable_keys:
+    - quant_alpha
+    - norm
+  no_split_module_classes:
+    - Qwen2DecoderLayer
+    - Qwen3DecoderLayer
+    - GlmDecoderLayer
+    - LlamaDecoderLayer
+dataset:
+  train_files: wikitext2       # 或你自己的 dataset.json
+  train_samples: 256
+  ptq_samples: 128
+extra_training_config:
+  fp16: True
+cutoff_len: 128
+num_samples: 64
+quant_param_2: False           # ★★★ 见下
+embedding_separate: True
+lm_head_size:
+```
+
+> [!WARNING]
+> **`quant_param_2` 必须按目标平台设置，写错会导致模型输出恒定垃圾。**
+>
+> * **kirinx90 → `False`**
+> * kirin9020 → `True`
+>
+> 官方文档就是这么写的（`quant_param_2: False // kirinx90默认false，kirin9020平台默认为true`）。
+>
+> 本项目踩过这个坑：早期配置里写成了 `True`，量化产物里**所有权重的负半轴被钳成 0**，
+> 模型在 NPU 上能跑但输出恒定重复垃圾。完整的实测对照与排查方法见
+> [附录 B](#附录-b权重被钳成-0早期版本踩过的坑)。
+
+### 2.2 准备 `run.sh`
+
+```bash
+#!/bin/bash
+set -o pipefail
+cd "$(dirname "$0")"
+
+QLIBS=/path/to/ddk/tools/tools_dopt/dopt_pytorch_py3
+export WANDB_DISABLED=true
+export HF_DATASETS_OFFLINE=0
+export PYTHONPATH=${QLIBS}:$PYTHONPATH
+export DEVICE=cuda
+export CUDA_VISIBLE_DEVICES=0
+
+ROOT=.
+testcase='output_dir'
+mkdir -p ${ROOT}/${testcase}/train_output
+
+model_path='/path/to/Qwen2.5-1.5B-Instruct'
+dopt_config=./${testcase}/dopt_config.json
+EXTRA=""
+[ -f "$dopt_config" ] && EXTRA="--dopt-config $dopt_config"
+
+# 6.1.1.0：入口是 dopt_lm/opt_main.py（旧版是 dopt_llm，且要另一个 wrapper）
+python -u ${QLIBS}/dopt/dopt_lm/opt_main.py \
+    --model-path $model_path \
+    --optimize-config ${ROOT}/config.yaml \
+    --quant-stage $1 \
+    --group-size 128 --w-bits 4 --act-bits 16 --block-size 128 \
+    $EXTRA \
+    --output-dir ${ROOT}/${testcase}/train_output 2>&1 | tee ${ROOT}/${testcase}/train_output/logs-$1.log
+```
+
+> 首次运行若 `dopt_config.json` 不存在，`opt_main.py` 会**先生成一份然后退出**
+> （提示 `generate plugin quang config please set quant strategy firstly`）。
+> 检查/调整那份配置里的 `quant_strategy`，再重跑即可。
+
+### 2.3 跑三个阶段
+
+```bash
+./run.sh stage1 && ./run.sh stage2 && ./run.sh stage3
+```
+
+产物在 `output_dir/train_output/`：
+
+| 文件 | 说明 |
+|---|---|
+| `trained_quant_weight.pth` | stage1 产出 |
+| `fake_quant_weight.pth` | stage3 产出，**导出时用它** |
+| `quant_params_file` | stage3 产出，量化参数 |
+| `logs-stage*.log` | 各阶段日志 |
+
+### 2.4 先验一下权重没有被钳位（建议做，很便宜）
+
+```python
+import torch
+sd = torch.load('output_dir/train_output/fake_quant_weight.pth', map_location='cpu', weights_only=False)
+for k in ('state_dict','model','module'):
+    if isinstance(sd, dict) and k in sd and isinstance(sd[k], dict): sd = sd[k]; break
+tot = neg = n = allpos = 0
+for k, v in sd.items():
+    if not torch.is_tensor(v) or v.numel() < 10000 or not k.endswith('.weight'): continue
+    t = v.numel(); g = int((v < 0).sum().item())
+    tot += t; neg += g; n += 1
+    allpos += (g == 0)
+print(f"权重张量 {n} 个, 负值占比 {neg/max(tot,1)*100:.2f}%, 全非负 {allpos} 个")
+```
+
+**正常结果**：负值占比 ≈ **43%~44%**，全非负张量 **0 个**。
+
+若看到负值占比只有 **13% 左右、且几乎全部张量无负值**，说明被钳位了 ——
+回 2.1 检查 `quant_param_2`。
+
+---
+
+## 3. 导出 ONNX
+
+### 3.1 准备 `model_info_target.yaml`
 
 ```yaml
 embedding_config:
-  embedding_separate: True       # 把 embedding 表单独导出成文件
+  embedding_separate: True       # embedding 表单独导出成文件
   embedding_as_fp16: False
   mul_twice: False
 no_gemm: True
@@ -116,9 +264,9 @@ mock_as_s16: False
 
 model_arch: qwen2                # 模型架构（换模型时改这里）
 hf_model_path: /path/to/Qwen2.5-1.5B-Instruct
-config_file: ./output_dir/dopt_config.json
-quant_pth:   ./output_dir/train_output/fake_quant_weight.pth
-output_dir:  ./onnx_out
+config_file: /path/to/quant/output_dir/dopt_config.json
+quant_pth:   /path/to/quant/output_dir/train_output/fake_quant_weight.pth
+output_dir:  /path/to/quant/onnx_out
 
 onnx_output_model_name: qwen2_1p5b_w4
 onnx_opset: 12
@@ -129,192 +277,106 @@ seq_len:
   - 64                           # prefill 每轮喂的 token 数
 ```
 
-然后跑导出：
+> `config_file` / `quant_pth` / `output_dir` **建议写绝对路径**。相对路径的解析基准
+> 不是 yaml 所在目录。
+
+### 3.2 跑导出
 
 ```bash
-cd ~/ddk/cannkit_samplecode_lm_engine_cpp/CANN_LLM/CANN_LLM_Engine_Model/npu_tuned_export
-
-source ~/ddk/venv310/bin/activate
+cd /path/to/cannkit_samplecode_lm_engine_cpp/CANN_LLM/CANN_LLM_Engine_Model/npu_tuned_export
+source /path/to/venv310/bin/activate
 python export_model_single_qwen2.py /path/to/model_info_target.yaml
 ```
 
-产出（在 `output_dir` 下）：
+输出目录名会被自动加后缀（`onnx_out` → `onnx_out_embedding_out_no_output_pos/`），里面有：
 
-- `qwen2_1p5b_w4.onnx` —— 主图
-- `*_64_2048.embedding_weights` —— int8 量化后的 embedding 表
-- `*_64_2048.embedding_dequant_scale` —— 反量化 scale
+- `<name>.onnx` —— 主图
+- `<name>.pb` —— 外置权重（ONNX 的 external data）
+- `<name>_64_2048.embedding_weights` —— int8 量化后的 embedding 表
+- `<name>_64_2048.embedding_dequant_scale` —— 反量化 scale
 
-> **这两个 embedding 文件后面要复制进模型目录**，先记下路径。
-
-导出前会先跑 `dopt` 量化（`run.sh stage1/2/3`），产出
-`fake_quant_weight.pth`。**下一节要处理的就是它带来的问题。**
+**后两个文件后面要复制进模型目录**，记下路径。
 
 ---
 
-## 3. ★ 修复权重 —— 不做这步输出全是垃圾
-
-> 这是整条链路里最坑的一步，跳过它模型能跑但输出毫无意义。详细排查过程见
-> [cann-engine-notes 第 8 节](cann-engine-notes.md)。
-
-### 问题是什么
-
-`dopt` 的 W4 量化（`quant_strategy: "Quant_act_weight_eco"`）导出的
-`fake_quant_weight.pth`，**把所有权重的负半轴钳成了 0**。
-
-实测：871 个大张量里有 792 个**完全没有负值**；ONNX 权重负值占比 0.00%
-（HF 原权重是 50%）。也就是**一半的权重信息被抹掉了**。
-
-### 怎么判断自己中招了
+## 4. OMG 转换（ONNX → .omc）
 
 ```bash
-cd scripts/model-conversion
-python3 confirm_relu.py /path/to/qwen2_1p5b_w4.onnx
-```
+#!/bin/bash
+set +u
+OMG=/path/to/ddk/tools/tools_omg
+ASC=/path/to/ddk/tools/tools_ascendc
+MODEL=/path/to/quant/onnx_out_embedding_out_no_output_pos/qwen2_1p5b_w4.onnx
+OUT=/path/to/quant/om_out/qwen
 
-它会打印每个权重与 HF 原权重、以及 `ReLU(HF 权重)` 的相关系数。特征结果：
-
-```
-corr(ONNX, HF)        ≈ 0.79 ~ 0.84
-corr(ONNX, ReLU(HF))  ≈ 0.98          ← 就是这个特征
-ONNX 负值占比 0.00%   vs   HF 50%
-```
-
-### 修复
-
-从 HF 检查点把每个权重原样重建回去：
-
-```bash
-python3 rebuild_weights.py \
-    /path/to/qwen2_1p5b_w4.onnx \
-    /path/to/repaired.onnx \
-    /path/to/Qwen2.5-1.5B-Instruct          # 也可用环境变量 HF_MODEL
-```
-
-脚本处理三类权重：
-
-| 类型 | 映射 |
-|---|---|
-| 具名 initializer | `model.model.layers.N.X` → `model.layers.N.X` |
-| MatMul 节点权重 | 节点名 `model.layers.N.X` → `model.layers.N.X.weight`（转置） |
-| `lm_head` | 节点名 `lm_head` → `lm_head.weight`（转置，tied） |
-
-重建后权重是**未量化**的 float32。反正后面用 `--weight_data_type FP16`
-转换，量化这一步等于绕开了 —— 也就把坏掉的 fake-quant 从链路里彻底去掉。
-
-### 验证修复成功（强烈建议做）
-
-修复后的 ONNX 先用 ONNXRuntime 跑一遍，确认模型本身是对的：
-
-```bash
-# ORT 要求 ScatterND 的 indices 是 int64，CANN 导出的是 int32，先打补丁
-python3 patch_ort.py /path/to/repaired.onnx /path/to/repaired_ort.onnx
-
-# 跑数值检查
-ONNX_MODEL=/path/to/repaired_ort.onnx \
-EMB_WEIGHTS=/path/to/xxx.embedding_weights \
-EMB_SCALES=/path/to/xxx.embedding_dequant_scale \
-python3 ort_check.py
-```
-
-**判定标准**：输入 `"The capital of France is"`，若 ORT 给出的下一个 token 是
-`12095`（`" Paris"`），说明 ONNX + 权重是对的。
-
-- **ORT 正确、NPU 垃圾** → 问题在 OMG/引擎侧，继续往下查
-- **ORT 也是垃圾** → 图本身就不对，别浪费时间在 NPU 上
-
----
-
-## 4. 切分过大的矩阵
-
-OMG 不支持 `K` 过大（如 8960）的 `MatMul`，会直接报：
-
-```
-Node model.layers.0.mlp.down_proj type MatMul don't support!
-```
-
-把 `down_proj` 沿 K 切块再相加：
-
-```bash
-python3 split_downproj_fixed.py \
-    /path/to/repaired.onnx \
-    /path/to/repaired_split.onnx \
-    28 \        # 层数，可省略（默认 28，或用 NLAYERS）
-    2048        # 每块 K 大小，可省略（默认 2048，或用 K_CHUNK）
-```
-
-> **为什么用 `_fixed` 版本**：原始脚本把新节点 `append` 到图末尾，破坏了拓扑序
-> （layer 0 的子图排到了 2005/2117 号节点）；而且当 `K ≤ chunk` 只切出一块时，
-> 原输出名永远不会被产生（悬空引用）。这个版本就地插入并跳过单块情况。
-> OMG 内部会重排节点，所以顺序本身不影响结果，但悬空引用会让 IR 生成失败。
-
----
-
-## 5. OMG 转换（ONNX → .omc）
-
-```bash
-python3 omg_convert.py \
-    --onnx /path/to/repaired_split.onnx \
-    --out  /path/to/om_out/model \
-    --layers 28 --kv-len 2048 --hidden 1536 \
-    --weight-data-type FP16
-```
-
-先加 `--dry-run` 看一眼生成的命令再执行。脚本会按层数/KV 长度/隐藏维自动拼出
-`--input_shape` / `--input_type` / `--output_type`（官方示例里这些是写死的超长
-字符串，换模型就没法用）。
-
-**关键环境变量**（脚本已设置，手工跑时需要）：
-
-```bash
+export PATH=$ASC/bisheng/bin:$ASC/package:$PATH
+source $ASC/set_ascendc_env.sh >/dev/null 2>&1 || true
+export LD_LIBRARY_PATH=$OMG/master/lib64:/path/to/ddk/tools/platform/kirinx90/lib64:${LD_LIBRARY_PATH:-}
 export SOC_VERSION=kirinx90
-export PYTHONPATH=$OMG_DIR/../platform/kirinx90/ops/impl:$PYTHONPATH
-export TMPDIR=/some/writable/dir        # /tmp 只读时必需
+export PYTHONPATH=$OMG/../platform/kirinx90/ops/impl:${PYTHONPATH:-}
+export TMPDIR=/some/writable/dir          # /tmp 只读时必需
+mkdir -p "$TMPDIR" "$(dirname $OUT)"
+
+cd $OMG
+./omg --model $MODEL --framework 5 --output $OUT \
+  --input_shape="input_embed:1,-1,1536;attention_mask:1,1,-1,2048;position_ids:1,-1;past_key_in0:2048,2,1,128;...;new_kv_cache_pos:-1;embed_scales:1,-1,1" \
+  --dynamic_dims="1,1,1,1,1;64,64,64,64,64" \
+  --input_type="past_key_in0:FP16;past_value_in0:FP16;..." \
+  --output_type="lm_logits:FP32;past_key0:FP16;past_value0:FP16;..." \
+  --weight_data_type FP16 \
+  --save_weights_as_external_data=true \
+  --platform=kirinx90 \
+  --target=omc
 ```
 
-**务必注意 `--compress_conf` 与 `--weight_data_type` 二选一：**
+`--input_shape` / `--input_type` / `--output_type` 是三个**按层数展开的超长字符串**
+（28 层时分别约 1654 / 1099 / 946 字符）。手写容易错，用
+[`scripts/model-conversion/omg_convert.py`](../scripts/model-conversion/omg_convert.py)
+按 `--layers / --kv-len / --hidden` 自动生成：
 
-| | 说明 |
-|---|---|
-| `--compress_conf <dopt 参数>` | 走量化。但**切分过 down_proj 后不能再用** —— 改名后的节点找不到量化参数，会报 `Node:...down_proj has quant params, but not in the graph` |
-| `--weight_data_type FP16` | 不量化，权重按 FP16 存。**本项目推荐的路线**（配合第 3 节的权重重建） |
+```bash
+python3 scripts/model-conversion/omg_convert.py \
+    --onnx /path/to/quant/onnx_out_embedding_out_no_output_pos/qwen2_1p5b_w4.onnx \
+    --out  /path/to/quant/om_out/qwen \
+    --layers 28 --kv-len 2048 --hidden 1536 \
+    --weight-data-type FP16 --dry-run      # 先看一眼命令
+```
 
-产出：
+**关键环境变量**：`SOC_VERSION=kirinx90`、`PYTHONPATH` 指向
+`platform/kirinx90/ops/impl`、`LD_LIBRARY_PATH` 含 `tools_omg/master/lib64`
+（缺了会报 `RmsNorm ... infershape func failed`）。
+
+**成功标志**：
 
 ```
-om_out/model.omc              主图（几百 KB ~ 几 MB）
-om_out/SubGraph_0.weight      权重（数 GB）
+I/OMG_TOOL  main.cpp main(24)::"OMG generate offline model success."
+OMG_EXIT=0
 ```
 
-### 在 aarch64 设备上直接转换
+产出 `<OUT>/<name>.omc` + `<OUT>/SubGraph_0.weight`。
 
-如果不想开第二台机器，可以用 qemu 在设备上跑 x86_64 的 OMG。见
-[附录 A](#附录-a在-aarch64-设备上直接转换)。
+> **大 MatMul 不用管**：日志里会看到 `mlp.down_proj_0` / `q_proj_1` 这类名字 ——
+> OMG 自己按 K 把大矩阵拆成了分块。**不需要**手工切图。
+> （早期版本会直接报 `Node ... type MatMul don't support!`，见附录 B。）
 
 ---
 
-## 6. 装配模型目录
+## 5. 装配模型目录
 
-把转换产物和配置文件放成一个目录。`cann-llm` 加载的就是这个目录。
-
-### 目录结构
+### 5.1 目录结构
 
 ```
 my-model/
-├── executor.json                                  # 引擎配置（下面详述）
+├── executor.json                                  # 引擎配置
 ├── context.json                                   # 生成/采样配置
-├── tokenizer.json                                 # Qwen tokenizer
-├── <name>.omc                                     # 第 5 节的产物
-├── SubGraph_0.weight                              # 第 5 节的产物
-├── <name>_64_2048.embedding_weights               # 第 2 节导出时产出的
-└── <name>_64_2048.embedding_dequant_scale         # 同上
+├── tokenizer.json                                 # 从 HF 检查点复制
+├── <name>.omc                                     # 第 4 节产物
+├── SubGraph_0.weight                              # 第 4 节产物
+├── <name>_64_2048.embedding_weights               # 第 3 节产物
+└── <name>_64_2048.embedding_dequant_scale         # 第 3 节产物
 ```
 
-**embedding 那两个文件直接复用第 2 节导出时的产物**，名字要和
-`executor.json` 里写的一致。
-
-### `executor.json`
-
-`autoregressive.model_path` 指向 `.omc`，`weight_path` 指权重目录：
+### 5.2 `executor.json`
 
 ```json
 {
@@ -341,20 +403,16 @@ my-model/
     "embedding_input_type": "int8"
   },
   "tokenizer": { "type": "qwen", "path": "tokenizer.json" },
-  "autoregressive": {
-    "model_path": "rebuilt.omc",
-    "weight_path": "./"
-  }
+  "autoregressive": { "model_path": "qwen2_1p5b_w4.omc", "weight_path": "./" }
 }
 ```
 
 里面的数字要和你的模型对上（`num_hidden_layers` / `hidden_size` / `vocab_size` /
-`kv_cache_max_len`），否则引擎行为会很奇怪或直接崩。
+`kv_cache_max_len`），`embedding_*` 两个文件名要和实际文件一致。
 
-### `context.json`
+### 5.3 `context.json`
 
-生成参数。`max_gen_tokens` 与 `stop_sequence` 是**每次请求都会被覆盖**的
-（见 `backends/cann.py`），这里给的是默认值：
+生成参数。`max_gen_tokens` 与 `stop_sequence` 每次请求都会被覆盖，这里给的是默认值：
 
 ```json
 {
@@ -377,18 +435,17 @@ my-model/
 }
 ```
 
-> `callback_freq` 设成 `1` 才会**每生成一个 token 回调一次**（逐字流式的关键）。
-> 设成 2 则是每两个 token 回调一次。
+> `callback_freq: 1` 才会**每生成一个 token 回调一次**（逐字流式的关键）。
 
-### `tokenizer.json`
+### 5.4 `tokenizer.json`
 
-用 HF 检查点里的 `tokenizer.json`（就是 Qwen 的 BPE 词表）直接复制过去。
+直接从 HF 检查点复制。
 
 ---
 
-## 7. 验证
+## 6. 验证
 
-### 分层验证，从下往上
+分层验证，从下往上：
 
 ```bash
 cd /path/to/cann-llm
@@ -396,33 +453,45 @@ cd /path/to/cann-llm
 # ① 能加载吗
 python3 -m cann_llm.cli.chat --list-backends
 
-# ② 单个 prompt 能不能出正确结果
+# ② 单个 prompt 能不能出正确结果（贪心，便于判断）
 PYTHONPATH=src python3 -m cann_llm.cli.chat \
     -d /path/to/my-model -p "The capital of France is" --temp 0
 
-# ③ 是不是逐字流式（而不是最后一次性吐出）
+# ③ 长一点，看是否通顺（不只是短答案对）
+PYTHONPATH=src python3 -m cann_llm.cli.chat \
+    -d /path/to/my-model -p "Explain what a large language model is in three sentences." \
+    --temp 0 --maxtok 80
+
+# ④ 是不是逐字流式
 PYTHONPATH=src python3 scripts/stream_check.py -d /path/to/my-model
 
-# ④ 交互式跑一轮多轮对话
+# ⑤ 交互式跑一轮多轮对话
 PYTHONPATH=src python3 -m cann_llm.cli.chat -d /path/to/my-model
 ```
 
-`--temp 0`（贪心）时 `"The capital of France is"` 应该给出 `Paris` 开头。
-若输出是 `imentaryimentary…` 这类恒定重复，**回到第 3 节** —— 权重是坏的。
+**本项目实测的期望结果**（`temp=0`）：
+
+| 输入 | 输出 |
+|---|---|
+| `The capital of France is` | `Paris` |
+| `1+1=` | `2` |
+| `The sun rises in the` | `east.` |
+| 80 token 的长生成 | 通顺连贯的英文段落 |
+
+若输出是 `imentaryimentary…` 这类恒定重复，**回第 2.4 节**检查权重是否被钳位。
 
 ---
 
-## 8. 排错
+## 7. 排错
 
 | 现象 | 多半是 |
 |---|---|
-| 输出恒定垃圾、与 prompt 无关 | 权重被量化破坏 → 第 3 节 |
-| 输出重复同一个词 | 同上，或采样参数设成了贪心但权重坏 |
-| `Node ... type MatMul don't support!` | 大矩阵没切 → 第 4 节 |
-| `has quant params, but not in the graph` | 切分后还在用 `--compress_conf` → 改用 `--weight_data_type FP16` |
+| 输出恒定垃圾、与 prompt 无关 | 权重被钳位 → 第 2.1 节的 `quant_param_2`；见[附录 B](#附录-b权重被钳成-0早期版本踩过的坑) |
+| `No module named dopt.dopt_llm` | 6.1.1.0 改名成了 `dopt.dopt_lm`，改脚本 |
+| `./omg: 权限不够` | `chmod +x tools/tools_omg/omg tools/tools_omg/master/omg` |
 | `RmsNorm ... infershape func failed` | `LD_LIBRARY_PATH` 里缺 `tools_omg/master/lib64` |
-| `FATAL: kernel too old`（qemu 下） | 需要 `-r <内核版本>`，见附录 A |
-| ORT 报 `ScatterND` 类型错 | 先跑 `patch_ort.py` |
+| `Node ... type MatMul don't support!` | 旧版 OMG 不支持大 K 的 MatMul → 升级到 6.1.1.0，或见附录 B |
+| ONNX 导出报找不到 `.pb` | 外置权重路径问题；跑检查脚本时先 `cd` 到 onnx 所在目录 |
 | 引擎加载就崩 | `executor.json` 里的层数/隐藏维/词表大小与实际不符 |
 | 输出正常但上下文一长就变垃圾 | 超过 KV 缓存长度（`kv_cache_max_len`），见 [cann-engine-notes 第 9 节](cann-engine-notes.md) |
 
@@ -430,8 +499,7 @@ PYTHONPATH=src python3 -m cann_llm.cli.chat -d /path/to/my-model
 
 ## 附录 A：在 aarch64 设备上直接转换
 
-不借助第二台机器，用 `qemu-user` 在设备上跑 x86_64 的 OMG。已经实测可行，
-但有三个坑：
+不借助第二台机器，用 `qemu-user` 在设备上跑 x86_64 的 OMG。已实测可行，有三个坑：
 
 ```bash
 export GLIBC_TUNABLES=glibc.pthread.rseq=0    # 沙箱挡 rseq → SIGSYS
@@ -443,28 +511,97 @@ export TMPDIR=/writable/dir                    # /tmp 只读
 #    /tmp/ld-linux-x86-64-2.35.so.2，而 /tmp 只读
 qemu-x86_64-static -r "$(uname -r)" \
     "$OMG/master/x86_64-pc-linux-gnu-6.3.0/ld-linux-x86-64.so.2" \
-    --library-path "$OMG/master/lib64:$OMG/master/x86_64-pc-linux-gnu-6.3.0:$OMG/../platform/kirinx90/lib64" \
+    --library-path "$OMG/master/lib64:$OMG/master/x86_64-pc-linux-gnu-6.3.0:$OMG/platform/kirinx90/lib64" \
     ./master/omg <Args...>
 ```
 
-完整的、可对照的脚本参考 `scripts/model-conversion/` 与设备上
-`~/work/llm/ddk-tools/omg-convert.sh`。
+> 量化（`tools_dopt`）需要 CUDA，这一步在设备上做不了 —— 只能在有 GPU 的 x86_64
+> 机器上完成后把 ONNX 传过来。
 
 ---
 
-## 附录 B：换一个别的模型
+## 附录 B：权重被钳成 0（早期版本踩过的坑）
+
+> **结论先行**：这不是工具版本的 bug，而是**配置项 `quant_param_2` 写错**。
+> 用 6.1.1.0 但把 `quant_param_2` 写成 `True`，**一样会钳位**。
+
+### B.1 症状
+
+模型能在 NPU 上跑、引擎返回成功、有输出，但内容是**恒定重复的垃圾**
+（例如 `imentaryimentaryimentary…`），与 prompt 内容、长度都无关。
+CPU 上用同一份 HF 检查点跑 llama.cpp 则完全正常。
+
+### B.2 根因：2×2 实测
+
+同一台机器、同一份 HF 检查点、同一个 `dopt_config.json`，只改两个变量：
+
+| DDK 版本 | `quant_param_2` | `fake_quant_weight.pth` 负值占比 | 全非负的权重张量 |
+|---|---|---|---|
+| 5.1.1.1 | **True** | 13.17% | **196 / 198 (99%)** ✗ |
+| 5.1.1.1 | **False** | 43.98% | **0 / 198 (0%)** ✓ |
+| 6.1.1.0 | **True** | 13.17% | **196 / 198 (99%)** ✗ |
+| 6.1.1.0 | **False** | 43.98% | **0 / 198 (0%)** ✓ |
+
+两两数字**逐位相同** —— 决定因素是 `quant_param_2`，与版本无关。
+未量化的 HF 原权重负值占比是 43.24%，所以 43.98% 才是正常值。
+
+**正确取值**：kirinx90 → `False`；kirin9020 → `True`。官方文档写得很清楚，
+照抄就不会踩。
+
+### B.3 怎么判断自己中招了
+
+先跑 [2.4 节](#24-先验一下权重没有被钳位建议做很便宜)那段检查。若要追到 ONNX 层：
+
+```bash
+cd scripts/model-conversion
+python quant/negcheck.py <fake_quant_weight.pth>        # 简化版
+python3 confirm_relu.py <导出的 onnx>                    # 与 HF 逐权重比对
+```
+
+**钳位的特征信号**：
+
+```
+corr(ONNX 权重, HF 权重)        ≈ 0.79 ~ 0.84
+corr(ONNX 权重, ReLU(HF 权重))  ≈ 0.98        ← 这个特征最直接
+ONNX 权重负值占比 0.00%   vs   HF 的 50%
+```
+
+即：权重不是被量化误差弄坏的，而是**负半轴被整个钳掉**（等价于对权重做了一次 ReLU）。
+
+### B.4 绕行手段（已不推荐，仅作参考）
+
+**首选修法是改 `quant_param_2` 重跑量化** —— 不用绕。
+
+如果因为某些原因必须在钳位产物上继续（例如拿不到能重跑的机器），历史上用过两条
+绕行，脚本都收在 [`scripts/model-conversion/`](../scripts/model-conversion/)：
+
+1. **`rebuild_weights.py`** —— 从 HF 检查点把 ONNX 里每个权重原样重建回去
+   （量化等于被绕开，后面用 `--weight_data_type FP16` 不量化）。
+   脚本处理三类映射：具名 initializer、MatMul 节点权重（转置）、`lm_head`。
+
+2. **`split_downproj_fixed.py`** —— 旧版 OMG 不支持 K=8960 的 `MatMul`，
+   需要沿 K 切块再相加。**6.1.1.0 的 OMG 会自己分块，不需要这个。**
+
+配套的验证脚本：`patch_ort.py`（给 `ScatterND` 的 indices 插 `Cast`，ORT 才能加载
+CANN 导出的图）+ `ort_check.py`（在 ORT 里跑一遍，判断是"模型本身错"还是"仅 NPU 侧错"）。
+
+**注意**：这两条绕行都会改写计算图，其数值正确性无法由工具链自身保证 ——
+所以能用官方路径就别用它们。
+
+---
+
+## 附录 C：换一个别的模型
 
 链路本身与模型无关，需要改的只有：
 
-1. `model_info_target.yaml` 里的 `model_arch` / `hf_model_path` / `layers` /
-   `kv_cache_max_len`；
-2. `rebuild_weights.py` 里的权重名映射（`_hf_name()`）—— 目前按 Qwen2 的命名
-   规则写（`model.layers.N.X`）；
+1. `config.yaml` 里的 `no_split_module_classes` 与 `quant_param_2`（**按平台**）；
+2. `model_info_target.yaml` 里的 `model_arch` / `hf_model_path` / `layers` /
+   `kv_cache_max_len` / `onnx_output_model_name`；
 3. `executor.json` 里对应的数字与 `tokenizer` 类型；
-4. OMG 的 `--hidden` / `--layers` / `--kv-len`。
+4. OMG 的 `--layers` / `--kv-len` / `--hidden`。
 
-**前提是华为的导出脚本支持该架构**（`npu_tuned_export` 里支持的 `model_arch`
-有限）。官方目前列出受支持的模型（见 [环境准备](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-llm-usage-environmental-preparation)，
+**前提是华为的导出脚本支持该架构。** 官方目前列出受支持的模型（见
+[环境准备](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-llm-usage-environmental-preparation)，
 页面上直接给了下载链接）：
 
 | 模型 | 备注 |

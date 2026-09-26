@@ -8,9 +8,13 @@
 > ### 📖 还没有模型？先看 [模型转换指南](docs/model-conversion.md)
 >
 > 从 HuggingFace 检查点到能在 NPU 上跑的模型，**完整可照着做的步骤**：
-> 导出 ONNX → **修复被量化破坏的权重（不修就是垃圾输出）** → 切分大矩阵 →
-> OMG 转换 → 装配模型目录 → 验证。
-> 配套脚本在 [`scripts/model-conversion/`](scripts/model-conversion/)。
+> dopt 三阶段量化 → 导出 ONNX → OMG 转换 → 装配模型目录 → 验证。
+> **全程官方标准流程，不需任何自定义脚本改图。**
+>
+> ⚠️ 有一个配置项容易写错：`quant_param_2` 必须按平台设 ——
+> **kirinx90 用 `False`**。写成 `True` 会让量化把权重负半轴钳成 0，
+> 模型能跑但输出恒定垃圾（实测对照见[附录 B](docs/model-conversion.md)）。
+> 配套脚本与诊断工具在 [`scripts/model-conversion/`](scripts/model-conversion/)。
 
 ## 特性
 
