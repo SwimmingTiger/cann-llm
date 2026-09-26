@@ -84,11 +84,14 @@ class SerializedBackend(EngineBackend):
     """
 
     def __init__(self, inner: EngineBackend, max_queue: int = 8, timeout_s: float = 120.0):
+        """:param max_queue: **含正在运行那路在内的**最大并发请求数；
+        超出立即抛 :class:`~cann_llm.errors.BusyError`（避免请求无限堆积）。
+        """
         self._inner = inner
         self._max_queue = max(1, int(max_queue))
         self._timeout = float(timeout_s)
         self._lock = threading.Lock()
-        self._waiting = 0
+        self._in_flight = 0
         self._guard = threading.Lock()
 
     # ---- 透传 ----
@@ -116,18 +119,26 @@ class SerializedBackend(EngineBackend):
     # ---- 串行化 ----
     def generate(self, request: GenerationRequest) -> Iterator[GenerationChunk]:
         with self._guard:
-            if self._waiting >= self._max_queue:
-                raise BusyError(f"队列已满（max_queue={self._max_queue}），请稍后重试")
-            self._waiting += 1
-        acquired = self._lock.acquire(timeout=self._timeout)
-        with self._guard:
-            self._waiting -= 1
-        if not acquired:
-            raise BusyError(f"排队超过 {self._timeout:.0f}s，请稍后重试")
+            if self._in_flight >= self._max_queue:
+                raise BusyError(
+                    f"并发已达上限 {self._max_queue}，请稍后重试")
+            self._in_flight += 1
         try:
-            yield from self._inner.generate(request)
+            if not self._lock.acquire(timeout=self._timeout):
+                raise BusyError(f"排队超过 {self._timeout:.0f}s，请稍后重试")
+            try:
+                yield from self._inner.generate(request)
+            finally:
+                self._lock.release()
         finally:
-            self._lock.release()
+            with self._guard:
+                self._in_flight -= 1
+
+    @property
+    def in_flight(self) -> int:
+        """当前在途请求数（运行中 + 排队中）。"""
+        with self._guard:
+            return self._in_flight
 
 
 # ------------------------------------------------------------------ 注册表
