@@ -57,6 +57,32 @@ class FakeBackend(EngineBackend):
         return len(text.split())
 
 
+class ScriptedBackend(FakeBackend):
+    """按预设脚本依次返回回复 —— 用来模拟「先发起工具调用，再给出回答」。"""
+
+    name = "scripted"
+
+    def __init__(self, replies, **kwargs):
+        super().__init__("", **kwargs)
+        self.replies = list(replies)
+        self.call_count = 0
+        self.prompts: List[str] = []
+
+    def generate(self, request: GenerationRequest) -> Iterator[GenerationChunk]:
+        self.requests.append(request)
+        self.prompts.append(request.prompt)
+        idx = min(self.call_count, len(self.replies) - 1)
+        reply = self.replies[idx]
+        self.call_count += 1
+        if self.raise_on_generate is not None:
+            raise self.raise_on_generate
+        # 逐字符产出，顺便压测 StreamFilter
+        for i, ch in enumerate(reply):
+            yield GenerationChunk(text=ch, index=i)
+        yield GenerationChunk(index=len(reply), finish_reason=FINISH_STOP,
+                              stats=self.stats)
+
+
 class ExplodingBackend(FakeBackend):
     """生成中途抛异常，用于验证错误传播。"""
 
