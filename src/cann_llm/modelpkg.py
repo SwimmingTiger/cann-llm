@@ -66,7 +66,13 @@ def _gen_from_llm(llm: Dict[str, Any], model_dir: str,
         "topK": 20,
         "topP": 0.8,
         "temperature": 0.7,
-        "maxGenTokens": 5000,
+        # ★ maxGenTokens 受 max_io_tokens 约束：initTokenLen + maxGenTokens 不能超过它
+        #   （超了会让引擎内部的 MaskAndPosManager->SetInitTokenLen 失败 →
+        #    Generate 报 FAIL）。官方 7B: 2048+5000=7048 ≤ 32768 ✓；
+        #   自转 1.5B: max_io_tokens 只有 4096，取 5000 就会超。
+        "maxGenTokens": max(1, min(5000,
+                                   int(llm.get("max_io_tokens") or 32768)
+                                   - min(2048, kv))),
         "repetitionPenalty": 1.1,
         # ★ initTokenLen ≠ kv_cache_max_len：官方 7B 包是 kv=4096 / initTokenLen=2048。
         #   填成 kv 会让引擎内部的 MaskAndPosManager->SetInitTokenLen 失败。
@@ -99,11 +105,11 @@ def _model_json_from_llm(llm: Dict[str, Any]) -> Dict[str, Any]:
     out.setdefault("pad_token_id", 0)
     out.setdefault("max_window_layers", llm.get("num_hidden_layers", 0))
     out.setdefault("transformers_version", "4.44.0")
-    # 这几个是引擎的可选图优化开关，官方包里带
-    out.setdefault("enable_dynamic_kv_cache", True)
-    out.setdefault("enable_lm_head_opt", True)
-    out.setdefault("enable_lm_head_topk", True)
-    out.setdefault("is_kv_cache_merge", True)
+    # ★ 不要在这里"猜"引擎的图优化开关（enable_dynamic_kv_cache / enable_lm_head_opt /
+    #   enable_lm_head_topk / is_kv_cache_merge）：它们是**图编译期**决定的，
+    #   官方包之所以有，是因为官方模型的图就是按这些优化编的。
+    #   给自转模型硬加会与它的图不符 → Executor 创建失败（实测）。
+    #   原始 llm_config 里有就原样带上（上面的 dict(llm) 已经带过来了）。
     return out
 
 
