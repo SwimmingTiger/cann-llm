@@ -62,25 +62,35 @@ resolve_python() {
         return 0
     fi
 
-    # 候选：优先 PATH 里的 python3/python，其次在 hnp 包目录里**动态发现**
-    # （hnp = 鸿蒙的包服务，装的工具都落在 /data/service/hnp/bin，但那个目录
-    # 默认**不在 PATH 里** —— 用户常常要自己 export，所以上面主动补了 PATH）。
-    # 还可用 CANN_LLM_PYTHON_CANDIDATES 覆盖。
+    # 候选：就走 PATH 查 python3 / python，但要把**所有**同名解释器都枚举出来
+    # （type -a -p），而不是只取第一个 —— 否则把 hnp 目录追加到 PATH 末尾毫无
+    # 意义（command -v 只看第一个）。全枚举才能：用上末尾那个可用的，并把前面
+    # 那些为什么被跳过讲清楚。
+    # 不猜目录布局、不做 glob：装了就在 PATH 里，就能被发现。
+    # 需要额外位置时用 CANN_LLM_PYTHON_CANDIDATES="..." 覆盖。
     local candidates="${CANN_LLM_PYTHON_CANDIDATES:-python3 python}"
-    local g
-    for g in /data/service/hnp/bin/python3 \
-             /data/service/hnp/bin/python3.[0-9]* \
-             /data/service/hnp/python.org/python_*/bin/python3 \
-             /data/service/hnp/python.org/python_*/bin/python3.[0-9]*; do
-        [[ -x "$g" ]] && candidates+=" $g"
-    done
 
-    local cand first_seen="" tried=""
+    local cand p first_seen="" tried="" seen=""
+    local hits=()
     for cand in $candidates; do
-        command -v "$cand" >/dev/null 2>&1 || continue
-        [[ -n "$first_seen" ]] || first_seen="$(command -v "$cand")"
-        if py_libc_ok "$cand"; then PY="$cand"; return 0; fi
-        tried+="      · $(command -v "$cand")：$(py_reject_reason "$cand")"$'\n'
+        # 含 / 的当作显式路径；否则列出 PATH 里所有同名项（按 PATH 顺序）
+        if [[ "$cand" == */* ]]; then
+            hits=("$cand")
+        else
+            read -r -a hits <<< "$(type -a -p "$cand" 2>/dev/null | tr '\n' ' ')"
+        fi
+        for p in "${hits[@]:-}"; do
+            [[ -n "$p" ]] || continue
+            case "$seen" in *"|$p|"*) continue ;; esac   # python3 与 python 可能同一个
+            seen+="|$p|"
+            [[ -n "$first_seen" ]] || first_seen="$p"
+            if py_libc_ok "$p"; then
+                PY="$p"
+                PY_SKIPPED="$tried"      # 解释"为什么跳过了前面那些"
+                return 0
+            fi
+            tried+="      · $p：$(py_reject_reason "$p")"$'\n'
+        done
     done
 
     # 一个兼容的都没有：**仍然回退**（免得用户什么都干不了），但把问题和安装
@@ -92,12 +102,13 @@ ${tried}")"
 }
 
 # hnp（鸿蒙包服务）装的工具都落在 /data/service/hnp/bin，但那个目录**默认不在
-# PATH 里**（用户常要自己 export）。这里主动补上，这样 hnp 装的 Python 及它带的
-# 工具都能被找到 —— 包括"Python安装器"装完之后的解释器。
+# PATH 里**（用户常要自己 export）。这里主动补上 —— 但补在**末尾**，不动用户
+# 原有的优先顺序：用户自己的 python3 仍然先被看到，只有它不兼容时才会用到
+# hnp 里的。这样"为什么最终选了某个 python"才解释得清楚。
 if [[ -d /data/service/hnp/bin ]]; then
     case ":$PATH:" in
         *:/data/service/hnp/bin:*) ;;
-        *) PATH="/data/service/hnp/bin:$PATH"; export PATH ;;
+        *) PATH="$PATH:/data/service/hnp/bin"; export PATH ;;
     esac
 fi
 
@@ -141,21 +152,20 @@ done
 
 command -v "$PY" >/dev/null 2>&1 || die "找不到 $PY；可用 PYTHON=/path/to/python3 指定"
 
-# 记录解释器选择结果：路径、版本，以及是否发生了"自动回退"
+# 记录解释器选择结果：路径、版本，以及"为什么是它"
 PY_PATH="$(command -v "$PY" 2>/dev/null || printf '%s' "$PY")"
 PY_VER="$("$PY" -c 'import sys; print(sys.version.split()[0])' 2>/dev/null || echo '?')"
-PY_NOTE=""
-if [[ -z "${PYTHON:-}" ]] && command -v python3 >/dev/null 2>&1 \
-   && ! py_libc_ok python3 && [[ "$PY" != "python3" ]] && py_libc_ok "$PY"; then
-    PY_NOTE="  （默认的 $(command -v python3) 与引擎 libc 不兼容，已自动改用）"
-fi
-
 
 # 一律带 -X faulthandler：段错误时能打出 Python 栈，
 # 而不是只有一句 "segmentation fault (core dumped)"。
 PY_FLAGS=(-X faulthandler)
 
-ok "Python $PY_VER  ·  $PY_PATH$PY_NOTE"
+ok "Python $PY_VER  ·  $PY_PATH"
+# 如果跳过了更靠前的候选，说明原因 —— 否则用户会奇怪"为什么不用我的 python3"
+if [[ -n "${PY_SKIPPED:-}" ]]; then
+    info "为什么不是更靠前的那个："
+    printf '%s' "$PY_SKIPPED"
+fi
 # 没找到兼容解释器时已回退 —— 一定要把问题和安装建议说清楚
 if [[ -n "$PY_WARN" ]]; then
     printf '\033[33m!\033[0m \033[33m解释器兼容性提示\033[0m\n' >&2
