@@ -90,11 +90,14 @@ mv 96f1956fc3a9f6aee9528ffd817937fd1fbc463c889c144c0e24d300a197 \
 
 ```bash
 # 直接把 zip 交给导入脚本，它会解压并整理成后端认识的目录
-python3 scripts/import_omc_package.py Qwen25-Coder-7B-Instruct-OMC-20251024.zip --dest models/
+scripts/import_model.sh Qwen25-Coder-7B-Instruct-OMC-20251024.zip -d models/
 
 # 先看一眼会生成什么（不写盘）
-python3 scripts/import_omc_package.py Qwen25-Coder-7B-Instruct-OMC-20251024.zip --dry-run
+scripts/import_model.sh Qwen25-Coder-7B-Instruct-OMC-20251024.zip --dry-run
 ```
+
+> 忘了加 `.zip` 后缀也没关系 —— 脚本会直接告诉你该怎么改名。
+> 它只用标准库（zipfile / json），**任何 Python ≥3.9 都行**，不需要设备上那个解释器。
 
 产物形如 `models/qwen25_coder_7b_omc1024/`，含 `api_config.json`、`qwen7b.omc`、
 `qwen7b.json`、`tokenizer.json` 与权重（**约 4.3 GB**）。

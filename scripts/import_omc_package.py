@@ -22,7 +22,10 @@ OMC 模型包，解压出来是：
 
 用法::
 
-    python3 import_omc_package.py <解压后的目录> [--in-place] [--dry-run]
+    # 一般不用直接调它 —— 包装脚本更方便（还能处理缺 .zip 后缀等情况）：
+    scripts/import_model.sh <包.zip> -d /path/to/model_dir
+
+    python3 import_omc_package.py <解压后的目录> [--dry-run]
 
     # 或者直接从 zip 解出来并转换
     python3 import_omc_package.py <包.zip> --dest /path/to/model_dir
@@ -186,7 +189,7 @@ def main():
         die(f"不是目录: {d}")
     convert(d, args.dry_run)
     log(f"完成 → {d}")
-    log(f"试一下: cann-llm chat -d {d}")
+    log(f"试一下: scripts/start_chat.sh -d {d}")
     return 0
 
 

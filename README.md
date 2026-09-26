@@ -154,6 +154,7 @@ curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/jso
 scripts/
 ├── start_server.sh   一键启动推理服务（预检 + 前台/后台 + status/stop）
 ├── start_chat.sh     一键启动交互式对话（支持 --tools）
+├── import_model.sh   导入官方 OMC 模型包（解压 + 转换；预检 .zip 后缀）
 └── stream_check.py   流式输出自检
 
 src/cann_llm/

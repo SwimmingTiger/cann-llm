@@ -43,7 +43,11 @@
 拿到 zip 后转换：
 
 ```bash
-python3 scripts/import_omc_package.py <官方zip> -o /path/to/models
+# 导入官方包（解压 + 转成后端认识的目录）
+scripts/import_model.sh <官方zip> -d /path/to/models
+
+# 先看一眼会生成什么（不写盘）
+scripts/import_model.sh <官方zip> --dry-run
 ```
 
 产物目录（官方布局，`detect_layout` 认它为 `official`）：
