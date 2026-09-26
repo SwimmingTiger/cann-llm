@@ -30,15 +30,16 @@ import sys
 from typing import List
 
 
-def build_input_shape(nlayers: int, kv_len: int, hidden: int) -> str:
+def build_input_shape(nlayers: int, kv_len: int, hidden: int,
+                      kv_heads: int = 2, head_dim: int = 128) -> str:
     parts = [
         f"input_embed:1,-1,{hidden}",
         f"attention_mask:1,1,-1,{kv_len}",
         "position_ids:1,-1",
     ]
     for i in range(nlayers):
-        parts.append(f"past_key_in{i}:{kv_len},2,1,128")
-        parts.append(f"past_value_in{i}:{kv_len},2,1,128")
+        parts.append(f"past_key_in{i}:{kv_len},{kv_heads},1,{head_dim}")
+        parts.append(f"past_value_in{i}:{kv_len},{kv_heads},1,{head_dim}")
     parts += ["new_kv_cache_pos:-1", "embed_scales:1,-1,1"]
     return ";".join(parts)
 
@@ -66,6 +67,9 @@ def main() -> int:
     ap.add_argument("--layers", type=int, default=28, help="Transformer 层数（默认 28）")
     ap.add_argument("--kv-len", type=int, default=2048, help="KV 缓存长度（默认 2048）")
     ap.add_argument("--hidden", type=int, default=1536, help="hidden size（默认 1536）")
+    ap.add_argument("--kv-heads", type=int, default=2,
+                    help="KV 头数 num_key_value_heads（1.5B=2, 7B=4, Qwen3-8B=8）")
+    ap.add_argument("--head-dim", type=int, default=128, help="head 维度（默认 128）")
     ap.add_argument("--platform", default="kirinx90", help="平台（默认 kirinx90）")
     ap.add_argument("--compress-conf", default=None,
                     help="dopt 量化参数文件；给了就用量化，不给就走 FP16")
@@ -87,7 +91,7 @@ def main() -> int:
         "--model", os.path.abspath(args.onnx),
         "--framework", "5",
         "--output", os.path.abspath(args.out),
-        f"--input_shape={build_input_shape(args.layers, args.kv_len, args.hidden)}",
+        f"--input_shape={build_input_shape(args.layers, args.kv_len, args.hidden, args.kv_heads, args.head_dim)}",
         f"--dynamic_dims={args.dynamic_dims}",
         f"--input_type={build_past_type(args.layers, 'FP16')}",
         f"--output_type={build_output_type(args.layers, 'FP16')}",
