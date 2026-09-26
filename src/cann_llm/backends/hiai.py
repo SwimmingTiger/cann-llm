@@ -51,26 +51,29 @@ from .base import EngineBackend, register_backend
 HIAI_LIB = "/system/lib64/libhiai_llm_engine.so"
 
 #: 官方目录结构的特征文件
-OFFICIAL_MARKERS = ("api_config.json",)
-#: 我们自己的目录结构特征文件
-OURS_MARKERS = ("executor.json", "context.json")
+#: 带 ``api_config.json`` 的完整包（华为官方导出的那套）
+PACKAGED_MARKERS = ("api_config.json",)
+#: 只有引擎配置的自装配目录。
+#: ★ 注意：``executor.json`` / ``context.json`` **是华为引擎自己的格式**，
+#:   官方包里也带着它们 —— 它们不是"我们的发明"，所以这里不叫 "ours"。
+BARE_MARKERS = ("executor.json",)
 
 
 def detect_layout(model_dir: str) -> str:
     """判断模型目录是哪种结构。
 
-    :return: ``"official"``（官方包）/ ``"ours"``（我们的 executor.json+context.json）
-             / ``"unknown"``
+    :return: ``"packaged"``（带 api_config.json 的完整包）/ ``"bare"``（只有引擎配置，
+             靠自带的 executor.json 提供 llm_config）/ ``"unknown"``
     """
     if not model_dir or not os.path.isdir(model_dir):
         return "unknown"
     names = set(os.listdir(model_dir))
     # 官方标记优先：官方包里可能**同时**存在我们格式的文件（转换脚本留下的），
     # 但只要有 api_config.json，它本质上就是官方结构。
-    if any(m in names for m in OFFICIAL_MARKERS):
-        return "official"
-    if all(m in names for m in OURS_MARKERS):
-        return "ours"
+    if any(m in names for m in PACKAGED_MARKERS):
+        return "packaged"
+    if any(m in names for m in BARE_MARKERS):
+        return "bare"
     return "unknown"
 
 
@@ -110,14 +113,52 @@ def build_configs(model_dir: str) -> "tuple[Dict[str, Any], Dict[str, Any]]":
     返回 ``(executor_dict, context_dict)``；调用方负责 ``json.dumps`` 后传给引擎。
     """
     f = _find_official_files(model_dir)
-    if not f["model_json"] or not f["api"]:
-        raise ModelLoadError(
-            f"官方结构目录里缺配置文件：model_json={f['model_json']!r} api={f['api']!r}"
-        )
-    with open(os.path.join(model_dir, f["model_json"]), encoding="utf-8") as fh:
-        model_cfg: Dict[str, Any] = json.load(fh)
-    with open(os.path.join(model_dir, f["api"]), encoding="utf-8") as fh:
-        api: Dict[str, Any] = json.load(fh)
+    layout = detect_layout(model_dir)
+
+    if f["api"]:
+        # packaged：<model>.json 提供 llm_config，api_config.json 提供运行参数
+        with open(os.path.join(model_dir, f["model_json"]), encoding="utf-8") as fh:
+            model_cfg: Dict[str, Any] = json.load(fh)
+        with open(os.path.join(model_dir, f["api"]), encoding="utf-8") as fh:
+            api: Dict[str, Any] = json.load(fh)
+    else:
+        # bare：没有 api_config.json —— 参数从目录内容推断，不报错。
+        #   llm_config 直接取自带的 executor.json（那本来就是华为引擎的配置格式）。
+        exec_path = os.path.join(model_dir, "executor.json")
+        if not os.path.isfile(exec_path):
+            raise ModelLoadError(
+                f"{model_dir} 里没有 api_config.json，也没有可用的 executor.json，"
+                f"无法确定引擎配置（检测到布局 {layout!r}）")
+        with open(exec_path, encoding="utf-8") as fh:
+            ex = json.load(fh)
+        model_cfg = dict(ex.get("llm_config") or {})
+        # tokenizer：目录里有 tokenizer.json 就用它；Qwen 系 tokenizerType = 4
+        # 逐字段对齐 api_config.json 的语义（官方包去掉它就会失败，说明这些都不是可有可无的）
+        api = {
+            "tokenizerPath": f["tokenizer"] or "tokenizer.json",
+            "tokenizerType": 4,          # Qwen
+            "modelPath": f["omc"],
+            "weightDir": "./",
+            "inferType": 0,
+            "modelType": 0,
+            "isAsync": True,
+            "callbackFreq": 2,
+            "pfxInitTokenLen": 6,        # 官方 Qwen 包的值；缺它 Generate 内部会失败
+            "pmtCacheOperation": "",
+            "prefixPrompt": "",
+            "loraCfgPath": "",
+            # ★ initTokenLen ≠ kv_cache_max_len：官方 7B 包是 kv=4096 而 initTokenLen=2048。
+            #   拿 kv 当它用会得到 4096 → prefill 图吃不下 → Generate 内部 SetInitTokenLen 失败。
+            "initTokenLen": min(2048, model_cfg.get("kv_cache_max_len") or 2048),
+            "maxGenTokens": 5000,
+            "stopSeq": ["<|im_end|>", "<|endoftext|>"],
+            "sampleFlag": True,
+            "seed": 99,
+            "topK": 20,
+            "topP": 0.8,
+            "temperature": 0.7,
+            "repetitionPenalty": 1.1,
+        }
 
     # ---- executor：官方模型字段 + 官方路径字段，全部塞进 llm_config（超集）----
     llm = dict(model_cfg)
@@ -296,10 +337,10 @@ class HiaiBackend(EngineBackend):
             return self._info
 
         layout = detect_layout(self.model_dir)
-        if layout != "official":
+        if layout == "unknown":
             raise ModelLoadError(
-                f"{self.model_dir} 不是官方结构（需要 <model>.json + api_config.json）；"
-                f"检测到 {layout!r} —— 用 cann 后端试试")
+                f"{self.model_dir} 里找不到引擎配置（需要 executor.json，"
+                f"或官方包里的 api_config.json + <model>.json）")
 
         executor_cfg, context_cfg = build_configs(self.model_dir)
         self._bind = _HiaiBindings(self._lib_path)
