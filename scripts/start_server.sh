@@ -252,10 +252,12 @@ SHOWN="$HOST"; [[ "$HOST" == "0.0.0.0" || -z "$HOST" ]] && SHOWN="127.0.0.1"
 echo
 if [[ $BACKGROUND -eq 0 ]]; then
     rm -f "$PIDFILE" "$STATEFILE"
-    info "前台启动（Ctrl-C 停止）"
+    info "前台启动（Ctrl-C 停止），正在加载模型…"
     echo
-    print_endpoints "$SHOWN" "$PORT"
-    echo
+    # 这里**不**打印监听地址与端点：此刻还没 bind，打印出来是"提前宣称"。
+    # serve() 会在 LlmHttpServer 绑定成功之后自己打印一次完整横幅
+    # （cann-llm x.y.z · <模型> / 监听 / base_url / 端点 / 鉴权），
+    # 在这里再打印一遍就会重复，所以前台分支完全交给它。
     exec "$PY" "${ARGS[@]}"
 fi
 

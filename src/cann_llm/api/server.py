@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import signal
@@ -578,7 +579,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if sover:
         cfg = cfg.merged(server=sover)
 
-    return serve(cfg)
+    try:
+        return serve(cfg)
+    except OSError as e:
+        # 绑定失败要说清楚"还没开始监听" —— 别让人以为服务起来了。
+        host, port = cfg.server.host, cfg.server.port
+        if e.errno == errno.EADDRINUSE:
+            msg = (f"端口 {port} 已被占用（{host}）。"
+                   f"换一个端口（--port），或先停掉占用它的进程。")
+        elif e.errno == errno.EACCES:
+            msg = f"没有权限绑定 {host}:{port}（1024 以下的端口通常需要特权）。"
+        elif e.errno == errno.EADDRNOTAVAIL:
+            msg = f"地址 {host} 不是本机可用的地址（--host 指定错了？）。"
+        else:
+            msg = f"绑定 {host}:{port} 失败：{e}"
+        print(f"启动失败：{msg}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
