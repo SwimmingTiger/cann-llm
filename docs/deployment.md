@@ -125,7 +125,7 @@ curl -sN -X POST http://127.0.0.1:8000/v1/chat/completions \
 | `BackendUnavailableError: … 未加载` | 设备上没有该引擎库，或 `CANN_LLM_LIB`（cann）/ `CANN_LLM_HIAI_LIB`（hiai）指错了 |
 | `缺少 api_config.json（或 <model>.json）` | 模型目录是旧格式 ✗ → 补一次即可：`python -m cann_llm.modelpkg <模型目录>` |
 | 输出成段胡话（`ampie...`） | **极可能是 prompt 没套对话模板**：裸 prompt（如只有“你好”）没有 `<\|im_start\|>` 结构，模型会跑偏。CLI / HTTP 会自动套模板，正常使用不会出现；直接调后端 API 时请自行套模板 |
-| **`引擎初始化失败：当前终端没有访问 NPU 的权限`** | 这个终端拿不到 `/dev/npu*`（例如 MKCode 的终端跑在 `u:r:develop_tools_hap:s0` 域）→ **换一个有 NPU 权限的终端**（系统终端应用）再跑。注意：此时代码往往连 Executor 都建不出来，所以别去查 `executor.json`——那不是原因 |
+| 推理失败，且换终端后就好 / 换终端后依旧 | **无法自动判断是不是权限问题** —— 实测 `/dev/npu*` 的 `stat`/`open` 在**有权限与没权限的终端上都失败**（errno 13），没有区分度，所以本项目不做这种预检、也不替引擎断言原因。失败时给出的是可能原因列表：当前终端没有访问 NPU 的权限 / 输入超出 KV 缓存 / 无法分词的字符 / 引擎内部错误。**要确认是不是权限问题，唯一的办法是换一个系统终端实际跑一次** |
 | **满屏 `Unknown class perfgenius_interface`** | 引擎为给 NPU 设温控会 `dlopen` 华为的 perfgenius 客户端，它连带加载 `libselinux`，而系统的 SELinux 策略里 `perfgenius_interface` 这个 class 在解析阶段不可见 → 解析器把警告写到 stderr。**不是本项目的错误，也不影响功能**。确实嫌吵就在命令末尾加 `2>/dev/null`：<br>`./scripts/start_chat.sh -d … 2>/dev/null`<br>⚠️ `2>/dev/null` 会屏蔽**所有** stderr（含真正的报错），只在确认其它一切正常时用 |
 
 > 关于那条 SELinux 警告的完整调查（含它为什么会出现、以及"用 stub 屏蔽它"为什么不划算——会连温控一起屏蔽）见
