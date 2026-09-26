@@ -38,23 +38,54 @@ ONNX  +  外置的 embedding_weights / embedding_dequant_scale
 
 | 项 | 说明 |
 |---|---|
-| **转换机** | 建议 x86_64 Linux。OMG 是 x86_64 二进制；aarch64 上需要用 qemu 模拟，见 [附录 A](#附录-a在-aarch64-设备上直接转换) |
-| **DDK 工具** | `DDK-tools-next-5.1.1.1.zip`（约 235 MB）+ `kirinx90-plugin-next-5.1.1.1.zip` |
-| **华为示例代码** | `cannkit_samplecode_lm_engine_cpp` —— 导出脚本在里面 |
-| **HF 检查点** | 例如 `Qwen2.5-1.5B-Instruct`（要 safetensors 格式） |
+| **转换机** | 建议 Ubuntu x86_64（官方推荐；OMG 是 x86_64 二进制）。aarch64 上需要用 qemu 模拟，见 [附录 A](#附录-a在-aarch64-设备上直接转换) |
+| **DDK 工具** | DDK 工具包 + kirinx90 平台插件包 —— **下载地址见下面** |
+| **华为示例代码** | [`cannkit_samplecode_lm_engine_cpp`](https://gitcode.com/HarmonyOS_Samples/cannkit_samplecode_lm_engine_cpp) —— 量化与导出脚本都在里面 |
+| **HF 检查点** | 官方文档列出的受支持模型之一，例如 `Qwen2.5-1.5B-Instruct`（safetensors 格式） |
 | **Python** | 3.10，需要 `onnx` / `onnxruntime` / `numpy` / `safetensors` |
 | **磁盘** | 至少 20 GB（ONNX + 权重 + 中间产物） |
 
-DDK 工具的下载地址会过期（带签名），需要到华为开发者联盟重新领取。拿到之后：
+### DDK 工具从哪下载
+
+**→ [开发准备（CANN Kit）](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-preparations)**
+
+该页有 Tools 下载表格，列出当前版本的 **DDK 工具包**（含 `tools_dopt`、
+`tools_omg`、`tools_ascendc`、`platform`）与各平台插件包（`kirinx90` /
+`kirin9020` / `kirin9030`），每项附 SHA256 校验码。
+
+> **插件包版本必须与 DDK 工具包一致**（都在同一张表里）。选 **`kirinx90`** ——
+> 本项目的目标平台就是 Kirin X90。
+
+相关页面：
+
+| 页面 | 用途 |
+|---|---|
+| [开发准备](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-preparations) | **工具下载**、版本匹配、SHA256 |
+| [环境准备](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-llm-usage-environmental-preparation) | 量化流程总览、受支持模型列表与下载链接、`config.yaml` / `run.sh` 模板、目录结构 |
+| [三段式量化步骤](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-llm-three-stage-quantification) | `dopt` 量化的三个阶段 |
+| [LLM 大模型能力开放](https://developer.huawei.com/consumer/cn/doc/HarmonyOS-Guides/cannkit-llm-summary) | CANN Kit LLM 总览 |
+
+> ⚠️ **本文的实测基于 `DDK-tools-next-5.1.1.1` + `kirinx90-plugin-next-5.1.1.1`。**
+> 官方页面上的版本会持续更新，新版本不保证第 3～5 节的绕行手段仍然必要或仍然
+> 适用（尤其第 3 节的量化钳位问题 —— 那是 `dopt` 的行为，如果新版修了，就
+> 不需要重建权重了）。**先按第 3 节的诊断脚本确认自己是否中招，再决定要不要绕。**
+
+拿到两个 zip 之后：
 
 ```bash
 mkdir -p ~/ddk && cd ~/ddk
-# 把两个 zip 放进来后：
-unzip -q DDK-tools-next-5.1.1.1.zip
-unzip -q kirinx90-plugin-next-5.1.1.1.zip
+# 把 DDK 工具包与 kirinx90 插件包解压到此处
+unzip -q DDK-tools-next-*.zip
+unzip -q kirinx90-plugin-next-*.zip
 
 python3 -m venv venv310 && source venv310/bin/activate
 pip install onnx onnxruntime numpy safetensors pyyaml
+```
+
+校验一下下载完整性（SHA256 以上面「开发准备」页为准）：
+
+```bash
+sha256sum DDK-tools-next-*.zip kirinx90-plugin-next-*.zip
 ```
 
 工具目录展开后长这样（**记住这几个路径，后面要用**）：
@@ -433,4 +464,15 @@ qemu-x86_64-static -r "$(uname -r)" \
 4. OMG 的 `--hidden` / `--layers` / `--kv-len`。
 
 **前提是华为的导出脚本支持该架构**（`npu_tuned_export` 里支持的 `model_arch`
-有限）。不支持的话这条链路走不通，得回头找华为的工具链。
+有限）。官方目前列出受支持的模型（见 [环境准备](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-llm-usage-environmental-preparation)，
+页面上直接给了下载链接）：
+
+| 模型 | 备注 |
+|---|---|
+| Qwen2.5-1.5B | **本项目实测用的就是这个** |
+| DeepSeek-R1-Distill-Qwen-1.5B | |
+| GLM-1.5B | |
+| Qwen2.5-7B-Instruct | 参数量大得多，本设备未必跑得动 |
+| Qwen3-8B | 同上 |
+
+不在这个列表里的架构，这条链路基本走不通 —— 得先确认华为的导出脚本支持它。
