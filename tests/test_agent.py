@@ -259,14 +259,25 @@ class TestAgentLoop(unittest.TestCase):
         _, events = run([many, "完"], make_registry(calls))
         self.assertEqual(len(calls), 6)
 
-    def test_result_truncated(self):
+    def test_tool_result_is_never_truncated(self):
+        """工具返回多少就给模型多少 —— 截断会销毁调用方的数据。"""
+        big = "x" * 10000
         reg = ToolRegistry()
-        reg.register("big", "大结果", {"type": "object"})(lambda: "x" * 10000)
-        _, events = run(['<tool_call>{"name":"big","arguments":{}}</tool_call>', "ok"],
-                        reg, max_result_chars=100)
+        reg.register("big", "大结果", {"type": "object"})(lambda: big)
+        backend, events = run(['<tool_call>{"name":"big","arguments":{}}</tool_call>', "ok"], reg)
+
         done = [e for e in events if isinstance(e, ToolCallDone)][0]
-        self.assertLess(len(done.result.content), 200)
-        self.assertIn("已截断", done.result.content)
+        # 调用方拿到的必须是完整的
+        self.assertEqual(done.result.content, big)
+        # 进 prompt 的也必须完整
+        prompt = backend.prompts[1]
+        self.assertIn(big, prompt)
+        self.assertNotIn("已截断", prompt)
+
+    def test_no_result_limit_knob(self):
+        self.assertFalse(hasattr(AgentConfig(), "max_result_chars"))
+        from cann_llm.config import AgentSettings
+        self.assertFalse(hasattr(AgentSettings(), "max_result_chars"))
 
     def test_tool_timeout(self):
         reg = make_registry([])

@@ -38,6 +38,17 @@
 - `Makefile`、`examples/config.example.toml`
 - `docs/architecture.md`、`docs/cann-engine-notes.md`、`docs/openai-api.md`
 
+### Changed — 移除工具结果截断
+
+`max_result_chars`（默认 4000）会把工具返回值截断后再交给模型和调用方。
+问题在于截断发生在结果返回给调用方**之前**，所以它同时做了两件事：构造 prompt
+（可讨论）与**销毁调用方的数据**（没有理由）。
+
+实测：工具返回 12000 字符时，模型与调用方都只拿到 4018 字符，完整数据不可取回。
+
+现在完全不截断：工具返回多少，模型就看到多少，调用方也拿到多少。
+需要控制长度请在工具实现里自己分块/摘要/返回引用。
+
 ### Changed — 关闭「裸 JSON 兜底」
 
 `parse_tool_calls` 原先默认把**不带 `<tool_call>` 标签**的裸 JSON 也当成工具

@@ -66,8 +66,6 @@ class AgentSettings:
 
     #: 最多迭代几轮（含最后一轮强制收尾）
     max_steps: int = 4
-    #: 工具结果回填时的截断长度
-    max_result_chars: int = 4000
     #: 在工具说明后追加「该用就用」的强指令。默认关闭 —— 它会往 prompt 里
     #: 塞调用方没写的指令，属于改变模型行为；实测对小模型很有效，想要就显式打开。
     force_tool_use: bool = False

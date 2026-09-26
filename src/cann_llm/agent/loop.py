@@ -183,8 +183,6 @@ class StreamFilter:
 class AgentConfig:
     #: 最多迭代几轮（含最后一轮强制收尾）
     max_steps: int = 4
-    #: 工具结果回填时截断长度，避免撑爆上下文
-    max_result_chars: int = 4000
     #: 是否把工具调用过程也流给用户（作为提示，不含协议标记）
     announce_tool_calls: bool = True
     #: 在工具说明后追加"该用就用、别向用户索要工具能给的信息"的强指令。
@@ -247,9 +245,10 @@ class AgentLoop:
             content += ("\n请修正参数后重新调用同一个工具；"
                         "在拿到成功结果之前不要凭猜测作答。")
 
-        limit = self.config.max_result_chars
-        if len(content) > limit:
-            content = content[:limit] + f"…（已截断，原长 {len(content)} 字符）"
+        # 工具返回多少就用多少，不截断。
+        # 截断既会让调用方拿不回自己工具返回的数据（这是数据销毁，不是
+        # 构造 prompt），又是在替调用方决定模型能看到多少信息。要控制就
+        # 由调用方自己在工具里分块/摘要。
         return ToolResult(call.id, call.name, content, ok=ok), (time.time() - t0) * 1000
 
     @staticmethod
