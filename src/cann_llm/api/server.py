@@ -75,6 +75,7 @@ class AppState:
         return GenerationParams(
             max_tokens=mc.max_tokens, temperature=mc.temperature, top_k=mc.top_k,
             top_p=mc.top_p, repetition_penalty=mc.repetition_penalty,
+            seed=mc.seed,
             stop=tuple(self.template.stop_strings()))
 
 
@@ -88,7 +89,8 @@ def build_state(cfg: AppConfig) -> AppState:
         "context_length": mc.context_length,
         "default_params": GenerationParams(
             max_tokens=mc.max_tokens, temperature=mc.temperature, top_k=mc.top_k,
-            top_p=mc.top_p, repetition_penalty=mc.repetition_penalty),
+            top_p=mc.top_p, repetition_penalty=mc.repetition_penalty,
+            seed=mc.seed),
     }
     if mc.backend == "cann":
         kw["lib_path"] = os.environ.get("CANN_LLM_LIB", version.CANN_NDK_LIB)

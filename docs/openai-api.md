@@ -67,8 +67,35 @@ for chunk in client.chat.completions.create(
 | `stream` | SSE；`data: [DONE]` 结束 |
 | `stream_options.include_usage` | 末尾额外发一帧 `choices: []` 且带 `usage` 的块 |
 | `max_tokens` / `max_completion_tokens` | 后者优先 |
-| `temperature` / `top_p` / `stop` / `seed` | 直接映射 |
+| `temperature` | 默认 **0.7**（不是 0）—— 不传也是采样，同一提示每次回答不同 |
+| `top_p` / `stop` | 直接映射 |
+| `seed` | 见下方「关于 seed 的实际限制」⚠️ |
 | `n` | 只支持 `1` |
+
+### 关于 `seed` 的实际限制 ⚠️
+
+按 OpenAI 的约定，`seed` 是「尽力而为」的可复现性提示；本引擎这边的限制比它更硬，
+**是实测出来的**（不是推测）：
+
+引擎的随机数流是**进程级、只播种一次**的 —— `Context_SetSeed` 对该进程**第一次**
+采样生效；之后随机数流继续往下走，再设同一个 seed 也**不会**重置。
+
+| 场景 | 实测结果 |
+|---|---|
+| 新进程（CLI）同一 seed 跑两次 | ✅ 输出完全相同 |
+| 新进程（CLI）不同 seed | ✅ 输出不同 |
+| 长驻服务（同一进程）同一 seed 连打 4 次 | ❌ **4 次输出各不相同** |
+
+所以：
+
+* **CLI / 单次调用**：`--seed <n>` 可以复现（每次都是新进程）
+* **长驻服务**：`seed` **不能**保证复现；同样输入会得到不同回答
+
+要"固定回答"，可靠的做法是把 `temperature` 设成 `0`（贪心解码，实测两次完全相同，
+与服务进程是否长驻无关）。
+
+> 引擎没有导出任何随机数重置接口（`nm -D` 里找不到 `random` / `rng` / `reset` 之类），
+> 所以这条限制目前无法在应用层绕过。
 
 ### 扩展字段（OpenAI 没有，本服务支持）
 

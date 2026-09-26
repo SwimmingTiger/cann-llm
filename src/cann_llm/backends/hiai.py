@@ -37,6 +37,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import random
 import time
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -214,8 +215,24 @@ class _HiaiBindings:
         "HIAI_LLMEngine_Context_SetOnGenerateAsyncFailed": (
             ctypes.c_int, [ctypes.c_void_p, ctypes.c_void_p]),
         "HIAI_LLMEngine_Context_Create": (ctypes.c_void_p, []),
-        "HIAI_LLMEngine_Context_SetMaxGenTokens": (
-            ctypes.c_int, [ctypes.c_void_p, ctypes.c_int]),
+        # ---- 采样参数：**按请求**下发（引擎为每个 Context 导出了这些 setter）----
+        # ★ 签名不是猜的：probe 用「设进去再读回来」逐条验证过（见 _probe_sampler*.py）。
+        #   · 浮点参数是 **float(32 位)**，不是 double —— 传 c_double 会被读成 0.0
+        #     （aarch64 上 c_double 走 d0、c_float 走 s0，即 d0 的低半；
+        #      0.5 的 double 位模式低 32 位恰好是 0x00000000）
+        #   · 整数/布尔参数走通用寄存器
+        #   · 这些 Get*/Set* 都是 (ctx, T*) / (ctx, T) 且返回 0 表示成功
+        "HIAI_LLMEngine_Context_SetTemperature": (ctypes.c_int, [ctypes.c_void_p, ctypes.c_float]),
+        "HIAI_LLMEngine_Context_SetTopP": (ctypes.c_int, [ctypes.c_void_p, ctypes.c_float]),
+        "HIAI_LLMEngine_Context_SetTopK": (ctypes.c_int, [ctypes.c_void_p, ctypes.c_int]),
+        "HIAI_LLMEngine_Context_SetSeed": (ctypes.c_int, [ctypes.c_void_p, ctypes.c_int]),
+        # ★ 实测默认值：do_sample=0、greedy=0、seed=99、topK=100
+        #   —— 采样【默认是关的】，所以同一提示每次都得到完全相同的输出。
+        #   每次请求都要显式打开采样并换一个种子。
+        "HIAI_LLMEngine_Context_SetDoSampleFlag": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_ubyte]),
+        "HIAI_LLMEngine_Context_SetSampleGreedy": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_ubyte]),
     }
 
     def __init__(self, lib_path: Optional[str] = None):
@@ -423,6 +440,32 @@ class HiaiBackend(EngineBackend):
         # ★ 服务每个请求都会显式设 initTokenLen / maxGenTokens
         maxgen = int(getattr(p, "max_tokens", 0) or 128)
         self._bind.lib.HIAI_LLMEngine_Context_SetMaxGenTokens(ctx, maxgen)
+
+        # ---- 采样参数：**必须每个请求显式下发** ----
+        # 每个请求都是全新的 Context，其采样默认值来自 executor，实测是：
+        #     do_sample = 0（★ 采样关着）、greedy = 0、seed = 99、topK = 100
+        # 于是同一提示每次都会得到【完全一样】的输出。这里逐项下发，
+        # 让 temperature / top_k / top_p / seed 真正生效。
+        # （签名见 _SIGS 处的说明：浮点是 float32，不是 double。）
+        lib = self._bind.lib
+        greedy = bool(getattr(p, "greedy", False))
+        lib.HIAI_LLMEngine_Context_SetDoSampleFlag(ctx, 0 if greedy else 1)
+        lib.HIAI_LLMEngine_Context_SetSampleGreedy(ctx, 1 if greedy else 0)
+        if not greedy:
+            lib.HIAI_LLMEngine_Context_SetTemperature(
+                ctx, float(getattr(p, "temperature", 0.7) or 0.7))
+            topk = int(getattr(p, "top_k", 0) or 0)
+            if topk > 0:
+                lib.HIAI_LLMEngine_Context_SetTopK(ctx, topk)
+            topp = float(getattr(p, "top_p", 0.0) or 0.0)
+            if 0.0 < topp <= 1.0:
+                lib.HIAI_LLMEngine_Context_SetTopP(ctx, topp)
+            # 种子：调用方显式给了就用它（可复现）；没给就【每次换一个】——
+            # 这正是"每次返回相同结果"的解药。固定 99 是引擎的默认值，别沿用。
+            seed = getattr(p, "seed", None)
+            if seed is None:
+                seed = random.randrange(1, 2 ** 31 - 1)
+            lib.HIAI_LLMEngine_Context_SetSeed(ctx, int(seed) & 0x7FFFFFFF)
 
         # ★★ 必须注册回调：流水线在完成时通过 std::function 回调，
         #    未注册时引擎调用空的 std::function → libc++abi "Pure virtual function called!" 直接 abort。

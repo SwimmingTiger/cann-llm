@@ -899,3 +899,72 @@ Unknown class perfgenius_interface
 
 **接受现状**。用户侧若确实嫌吵，可在命令末尾加 `2>/dev/null`，
 但要知道它会屏蔽**所有** stderr（含真正的报错）。
+
+---
+
+## ★ 采样参数：每个 Context 都能设，而且**默认是关的**
+
+### 症状
+
+同一提示每次都得到**完全相同**的输出。
+
+### 两个原因（都实测）
+
+1. **采样默认关着**。新建 Context 的实测默认值是：
+
+   ```
+   GetDoSampleFlag = 0     ← ★ 采样关 = 等价于贪心
+   GetSampleGreedy = 0
+   GetSeed         = 99    ← 引擎写死的种子
+   GetTopK         = 100
+   ```
+
+   所以必须**每个请求显式**下发 `SetDoSampleFlag(1)` + `SetSeed(...)` +
+   `SetTemperature/TopK/TopP` —— 光靠 executor 的 JSON 字段不够，
+   因为每个请求新建的 Context 不会带上后来改的值。
+
+2. 原来的实现把 sampler 写进 executor JSON 就完事了，没有按请求下发。
+
+### 签名（**不是猜的**：用「设进去再读回来」逐条验证）
+
+```
+int Context_SetTemperature(ctx, float)      // ★ float32，不是 double
+int Context_SetTopP(ctx, float)             // ★ float32
+int Context_SetTopK(ctx, int)
+int Context_SetSeed(ctx, int)
+int Context_SetDoSampleFlag(ctx, uint8)
+int Context_SetSampleGreedy(ctx, uint8)
+```
+
+对应的 `Get*` 都是 `(ctx, T*)` 出参形式，返回 0 表示成功。
+
+### ★ 坑一：浮点参数必须用 `c_float`
+
+`SetTemperature(ctx, c_double(0.5))` 之后读回的是 **0.0**。
+
+原因：aarch64 上 `c_double` 走 `d0`、`c_float` 走 `s0`（即 `d0` 的低半），
+而 0.5 的 IEEE754 double 位模式是 `0x3FE0000000000000`，**低 32 位正好是 0**
+→ 引擎按 float 读 `s0` 就得到 `0.0f`。
+
+改成 `c_float` 后 0.5 / 0.25 / 0.7 / 1.0 全部往返成功。
+
+### ★ 坑二：getter 写回的是 **1 字节**
+
+`GetDoSampleFlag(ctx, byref(c_int(-1)))` 得到 **-255**（`0xFFFFFF01`）——
+它只写了 1 个字节，高 3 字节留的是哨兵值。用 `c_ubyte` / `c_bool`，
+或者把缓冲区先清零。
+
+### ★★ 重要限制：`seed` 的作用范围是**进程级**
+
+`SetSeed` 对该进程的**第一次**采样生效；之后随机数流继续往下走，
+再设同一个 seed **不会**重置：
+
+| 场景 | 实测结果 |
+|---|---|
+| 新进程（CLI）同一 seed 跑两次 | ✅ 输出完全相同 |
+| 新进程（CLI）不同 seed | ✅ 输出不同 |
+| 长驻服务（同一进程）同一 seed 连打 4 次 | ❌ **4 次各不相同** |
+
+引擎没有导出任何随机数重置接口（`nm -D` 里找不到 `random` / `rng` / `reset`），
+所以长驻服务里想"固定回答"只能把 `temperature` 设 0（贪心解码，
+实测与服务是否长驻无关）。

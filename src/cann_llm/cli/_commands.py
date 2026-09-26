@@ -9,6 +9,14 @@ from ..config import AppConfig
 from ..tools import default_registry
 from .state import CliState
 
+def _seed_or_none(text: str):
+    """``/seed 42`` → 42；``/seed random``（或 none / 随机）→ None（每次换一个）。"""
+    t = text.strip().lower()
+    if t in ("random", "rand", "none", "off", "随机", "无"):
+        return None
+    return int(t)
+
+
 #: /temp /topk ... 到 GenerationParams 字段的映射
 _PARAM_FIELDS = {
     "temp": ("temperature", float),
@@ -17,6 +25,9 @@ _PARAM_FIELDS = {
     "rep": ("repetition_penalty", float),
     "maxtok": ("max_tokens", int),
     "max-tokens": ("max_tokens", int),      # 与 CLI 参数名统一
+    # seed 不给则每次请求换一个（同一提示每次回答不同）；
+    # /seed 42 固定下来可复现；/seed random 再变回每次随机。
+    "seed": ("seed", _seed_or_none),
 }
 
 
@@ -24,9 +35,10 @@ def _show_params(state: CliState) -> None:
     p = state.params
     mode = "贪心" if p.greedy else "采样"
     tools = ", ".join(state.tool_names) if state.tool_names else "关闭"
+    seed = "随机(每次不同)" if p.seed is None else str(p.seed)
     print(f"  temperature={p.temperature}  top-k={p.top_k}  top-p={p.top_p}  "
           f"repetition_penalty={p.repetition_penalty}  max_tokens={p.max_tokens}  "
-          f"({mode})\n  流式={'on' if state.stream else 'off'}  工具={tools}")
+          f"seed={seed}  ({mode})\n  流式={'on' if state.stream else 'off'}  工具={tools}")
 
 
 def _list_tools(state: CliState) -> None:

@@ -53,6 +53,10 @@ class ModelConfig:
     top_k: int = 20
     top_p: float = 0.95
     repetition_penalty: float = 1.1
+    #: 采样随机种子。留空（None）= **每次请求换一个随机种子** ——
+    #: 这样同一提示每次的回答才会不一样。设成固定值则输出可复现。
+    #  （引擎自己的默认是写死 seed=99 且采样关闭，会让每次结果完全相同。）
+    seed: Optional[int] = None
     #: 上下文长度（用于 /v1/models 展示）
     # 0 = 未指定，交给后端按【模型自己的配置】探测（kv_cache_max_len）。
     # ★ 这里绝不能写死一个数字：它会覆盖模型真值，还会让"输入超出 KV 缓存（本模型 N token）"

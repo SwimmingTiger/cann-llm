@@ -50,6 +50,7 @@ HELP = """\
   /topp <f>              top-p（推荐 0.95）
   /rep <f>               重复惩罚（推荐 1.1）
   /max-tokens <n>        单轮最大生成 token 数（/maxtok 亦可）
+  /seed <n>              固定采样种子（输出可复现）；/seed random 恢复每次随机
   /stream on|off         开关逐字输出
   /params                查看当前采样参数
   /stats                 上一轮耗时与用量
@@ -199,6 +200,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--topk", type=int, help="top-k")
     ap.add_argument("--topp", type=float, help="top-p")
     ap.add_argument("--rep", type=float, help="重复惩罚")
+    ap.add_argument("--seed", type=int,
+                    help="采样随机种子；不给则每次请求换一个（这样同一提示每次回答不同）。"
+                         "给了固定值则输出可复现")
     ap.add_argument("--max-tokens", "--maxtok", type=int, dest="maxtok",
                     help="单轮最大生成 token 数")
     ap.add_argument("--no-stream", action="store_true", help="关闭逐字输出")
@@ -227,7 +231,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                      ("chat_template", args.template), ("system_prompt", args.system),
                      ("max_tokens", args.maxtok), ("temperature", args.temp),
                      ("top_k", args.topk), ("top_p", args.topp),
-                     ("repetition_penalty", args.rep)):
+                     ("repetition_penalty", args.rep), ("seed", args.seed)):
         if val is not None:
             over[key] = val
     if over:
@@ -253,6 +257,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             max_tokens=cfg.model.max_tokens, temperature=cfg.model.temperature,
             top_k=cfg.model.top_k, top_p=cfg.model.top_p,
             repetition_penalty=cfg.model.repetition_penalty,
+            seed=cfg.model.seed,
             stop=tuple(template.stop_strings())),
         system_prompt=cfg.model.system_prompt,
         tool_names=registry.names(),
