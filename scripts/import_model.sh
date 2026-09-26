@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # 导入官方 OMC 模型包 —— 把下载到的 zip 变成能直接启动的模型目录。
 #
 #   scripts/import_model.sh <包.zip>                    # 解压到同名目录并转换
@@ -7,9 +7,9 @@
 #   scripts/import_model.sh <包.zip> --dry-run           # 只看会生成什么，不写盘
 #
 # 下载官方模型包的网页点击步骤见 docs/get-models.md。
-set -euo pipefail
+set -eu
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 die()  { printf '\033[31m错误\033[0m %s\n' "$*" >&2; exit 1; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
@@ -17,7 +17,7 @@ info() { printf '\033[36m›\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!\033[0m %s\n' "$*" >&2; }
 
 usage() {
-  sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
   cat <<'EOF'
 
 选项:
@@ -51,13 +51,13 @@ done
 PY="${PYTHON:-}"
 if [ -z "$PY" ]; then
   for c in python3 python; do
-    p="$(command -v "$c" 2>/dev/null || true)"
+    p=$(command -v "$c" 2>/dev/null || true)
     [ -n "$p" ] || continue
     "$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)' 2>/dev/null && { PY="$p"; break; }
   done
 fi
 [ -n "$PY" ] || die "找不到 Python ≥3.9。可用 PYTHON=/path/to/python3 指定。"
-ok "Python: $($PY -c 'import sys;print("%d.%d.%d"%sys.version_info[:3])')  ·  $PY"
+ok "Python: $("$PY" -c 'import sys;print("%d.%d.%d"%sys.version_info[:3])')  ·  $PY"
 
 # ---------------------------------------------------------------- 输入检查
 [ -e "$SRC" ] || die "找不到: $SRC"
@@ -85,12 +85,13 @@ else
 fi
 
 # ---------------------------------------------------------------- 转换
-ARGS=("$SRC")
-[ -n "$DEST" ] && ARGS+=(--dest "$DEST")
-[ -n "$DRY" ]  && ARGS+=("$DRY")
+# POSIX sh 没有数组：直接用位置参数累积，最后原样传给 Python。
+set -- "$SRC"
+[ -n "$DEST" ] && set -- "$@" --dest "$DEST"
+[ -n "$DRY" ]  && set -- "$@" "$DRY"
 
-info "运行: import_omc_package.py ${ARGS[*]}"
-PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" "$PY" "$ROOT/scripts/import_omc_package.py" "${ARGS[@]}"
+info "运行: import_omc_package.py $*"
+PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" "$PY" "$ROOT/scripts/import_omc_package.py" "$@"
 
 TARGET="${DEST:-$SRC}"
 if [ -z "$DRY" ] && [ -d "$TARGET" ]; then
