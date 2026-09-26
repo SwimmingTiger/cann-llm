@@ -236,6 +236,18 @@ class _HiaiBindings:
             fn.argtypes = args
 
 
+def _gen_failure_msg(rc, context_length: int) -> str:
+    """生成失败时的统一文案 —— 先判最常见、也最容易被误判的一种：没有 NPU 权限。"""
+    from ..npucheck import npu_unavailable_reason
+    npu = npu_unavailable_reason()
+    head = (f"引擎 GenerateAsync 返回 {rc}" if rc is not None else "引擎报告生成失败")
+    if npu:
+        return (f"{head}：{npu}\n"
+                f"    （这通常不是模型或参数问题 —— 换一个有 NPU 权限的终端再试）")
+    return (f"{head}（{_ctx_desc(context_length)}。其它可能：输入超出 KV 缓存、"
+            f"含无法分词的字符、引擎内部错误）")
+
+
 def _ctx_desc(n: int) -> str:
     """把 KV 上限渲染成人读的说法；0 表示未知，别假装知道。"""
     return (f"本模型 KV 缓存 {n} token" if n else
@@ -308,7 +320,13 @@ class HiaiBackend(EngineBackend):
         self._exec = self._bind.lib.HIAI_LLMEngine_Executor_CreateFromJson(
             json.dumps(executor_cfg).encode())
         if not self._exec:
-            raise ModelLoadError("Executor 创建失败（检查合成的 executor JSON）")
+            from ..npucheck import npu_unavailable_reason
+            npu = npu_unavailable_reason()
+            if npu:
+                # 没有 NPU 权限时连 Executor 都建不出来 —— 别让用户去查 JSON
+                raise ModelLoadError(f"引擎初始化失败：{npu}")
+            raise ModelLoadError(
+                "Executor 创建失败（检查合成的 executor JSON，或模型目录是否完整）")
 
         # 注：本后端【不需要】自己分词 —— 输入/输出都是明文，
         # 引擎用模型配置里的 tokenizer 自己处理。
@@ -475,16 +493,15 @@ class HiaiBackend(EngineBackend):
                     yield GenerationChunk(text=_q.get(), index=_idx)
                     _idx += 1
                 if _ev_fail.is_set():
-                    raise GenerationError("引擎报告生成失败（OnGenerateAsyncFailed）")
+                    raise GenerationError(_gen_failure_msg(None, self._context_length))
             while not _q.empty():
                 yield GenerationChunk(text=_q.get(), index=_idx)
                 _idx += 1
             if _ev_fail.is_set():
-                raise GenerationError("引擎报告生成失败（OnGenerateAsyncFailed）")
+                raise GenerationError(_gen_failure_msg(None, self._context_length))
             _emitted = _st["emitted"]
         else:
-            raise GenerationError(
-                f"引擎 GenerateAsync 返回 {rc}（{_ctx_desc(self._context_length)}）")
+            raise GenerationError(_gen_failure_msg(rc, self._context_length))
 
         stats = self._read_stats(len(_emitted))
         yield GenerationChunk(index=_idx, finish_reason="stop", stats=stats)

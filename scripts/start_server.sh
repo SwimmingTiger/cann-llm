@@ -306,6 +306,14 @@ if [[ -n "$PY_WARN" ]]; then
     printf '%s\n\n' "$PY_WARN" >&2
 fi
 
+# NPU 访问权限预检：有些终端（如 MKCode 的）拿不到 /dev/npu* —— 早点说清楚。
+# 只警告不阻断：设备节点可能因环境而异，真失败时后端还会再报一次更明确的错。
+_npu="$(PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" "$PY" -c "from cann_llm.npucheck import npu_unavailable_reason as f; print(f() or '')" 2>/dev/null || true)"
+if [[ -n "$_npu" ]]; then
+    warn "NPU 访问权限"
+    printf '%s\n\n' "$_npu" >&2
+fi
+
 # 引擎库按【后端】选：两个后端用的是不同的库
 if [[ "$BACKEND" == "cann" ]]; then
     ENGINE_LIB="${CANN_LLM_LIB:-/system/lib64/ndk/libcann_llm_engine.so}"

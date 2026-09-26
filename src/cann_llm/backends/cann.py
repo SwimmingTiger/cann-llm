@@ -31,6 +31,7 @@ import warnings
 import time
 from typing import Dict, Iterator, Optional, Tuple
 
+from ..npucheck import npu_unavailable_reason as _npu_unavailable_reason
 from ..errors import (
     BackendUnavailableError,
     GenerationError,
@@ -254,6 +255,10 @@ class CannNdkBackend(EngineBackend):
 
         self._executor = self._ndk.executor_create(b"executor.json")
         if not self._executor:
+            from ..npucheck import npu_unavailable_reason
+            npu = npu_unavailable_reason()
+            if npu:
+                raise ModelLoadError(f"引擎初始化失败：{npu}")
             raise ModelLoadError("Executor 创建失败（检查 executor.json 与模型文件）")
 
         self._callback_ref = self._ndk.callback_type(self._on_token)
@@ -452,7 +457,8 @@ class CannNdkBackend(EngineBackend):
             raise GenerationError(
                 f"引擎 Generate 返回 {status}。无法从返回码判断具体原因，"
                 f"常见可能：输入超出 KV 缓存（{_ctx_desc(self.context_length)}）、"
-                f"含无法分词的字符、引擎内部错误。")
+                f"含无法分词的字符、引擎内部错误。"
+                + (f"\n{_npu_unavailable_reason()}" if _npu_unavailable_reason() else ""))
 
         in_tok = ctypes.c_ulong(0)
         out_tok = ctypes.c_ulong(0)
