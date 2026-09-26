@@ -321,6 +321,8 @@ class AgentLoop:
 
             if last_step or not parsed.tool_calls:
                 final_text = "".join(visible_parts).strip()
+                # 写回历史，供上层做多轮对话
+                convo.append(Message("assistant", final_text))
                 break
 
             calls = parsed.tool_calls[:self.config.max_calls_per_step]

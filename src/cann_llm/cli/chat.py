@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""交互式对话命令行（逐字流式输出）。
+"""交互式对话命令行（逐字流式输出，支持工具调用）。
 
     python3 -m cann_llm.cli.chat -d /path/to/model_dir
-    cann-llm-chat -d /path/to/model_dir --temp 0 --topk 1
-    cann-llm-chat -p "你好"                  # 单轮模式
-    cann-llm-chat --list-backends
+    cann-llm-chat -d /path/to/model_dir --tools all
+    cann-llm-chat -p "现在几点？" --tools get_current_time
+    cann-llm-chat --list-tools
 
 交互命令见 ``/help``。
 """
@@ -19,20 +19,32 @@ import time
 from typing import Optional, Sequence
 
 from .. import version
+from ..agent.loop import (
+    AgentConfig,
+    AgentLoop,
+    Final,
+    StepStarted,
+    TextDelta,
+    ToolCallDone,
+    ToolCallReady,
+)
 from ..backends import available_backends, create_backend
 from ..backends.base import EngineBackend
-from ..chat.session import ChatSession
-from ..chat.template import available_templates, get_template
+from ..chat.template import Message, available_templates, get_template
 from ..config import AppConfig, load_config
-from ._commands import handle_command
 from ..errors import CannLlmError
+from ..tools import ToolRegistry, default_registry
 from ..types import GenerationParams
+from ._commands import handle_command
+from .state import CliState
 
 HELP = """\
 可用命令:
   /help                  显示本帮助
   /reset                 清空对话历史
   /system <文本>         设置 system prompt（并清空历史）
+  /tools                 列出工具及启用情况
+  /tools <名字>…         切换工具的启用状态（all / none）
   /temp <f>              采样温度（0 = 贪心；推荐 0.7）
   /topk <n>              top-k（推荐 20）
   /topp <f>              top-p（推荐 0.95）
@@ -62,44 +74,105 @@ def build_engine(cfg: AppConfig) -> EngineBackend:
             top_p=mc.top_p, repetition_penalty=mc.repetition_penalty),
     }
     if mc.backend == "cann":
-        from ..backends.cann import CANN_NDK_LIB   # noqa: F401  (可用 --lib 覆盖)
         kw["lib_path"] = os.environ.get("CANN_LLM_LIB", version.CANN_NDK_LIB)
     backend = create_backend(mc.backend, **kw)
     backend.load()
     return backend
 
 
-def print_params(params: GenerationParams, stream: bool) -> None:
-    mode = "贪心" if params.greedy else "采样"
-    print(f"  temperature={params.temperature}  top-k={params.top_k}  top-p={params.top_p}  "
-          f"repetition_penalty={params.repetition_penalty}  "
-          f"max_tokens={params.max_tokens}  ({mode})  流式={'on' if stream else 'off'}")
+def resolve_tools(spec: Optional[str], *, allow_dangerous: bool = False) -> ToolRegistry:
+    """解析 ``--tools`` 的取值。
+
+    ``all`` / ``safe`` → 全部非 dangerous 工具；``none`` / 空 → 空集合；
+    否则按逗号或空格分隔的工具名。
+    """
+    reg = default_registry()
+    spec = (spec or "").strip()
+    if not spec or spec == "none":
+        return reg.select([])
+    if spec in ("all", "safe"):
+        return reg.select()
+    names = [x for x in spec.replace(",", " ").split() if x]
+    return reg.select(names, include_dangerous=allow_dangerous)
 
 
-def _stream_reply(session: ChatSession, text: str, stream: bool) -> None:
-    """跑一轮并输出。"""
-    if stream:
-        sys.stdout.write("bot> ")
-        sys.stdout.flush()
-        for chunk in session.ask(text):
-            if chunk.text:
-                sys.stdout.write(chunk.text)
+def print_params(state: CliState) -> None:
+    p = state.params
+    mode = "贪心" if p.greedy else "采样"
+    tools = ", ".join(state.tool_names) if state.tool_names else "关闭"
+    print(f"  temperature={p.temperature}  top-k={p.top_k}  top-p={p.top_p}  "
+          f"repetition_penalty={p.repetition_penalty}  max_tokens={p.max_tokens}  "
+          f"({mode})  流式={'on' if state.stream else 'off'}")
+    print(f"  工具: {tools}")
+
+
+def _short(value, limit: int = 80) -> str:
+    text = value if isinstance(value, str) else str(value)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def run_turn(engine: EngineBackend, cfg: AppConfig, state: CliState,
+             text: str, registry: ToolRegistry) -> None:
+    """跑一轮：交给 agent 循环，把过程打到终端。"""
+    state.messages.append(Message("user", text))
+    loop = AgentLoop(
+        engine, get_template(cfg.model.chat_template), registry,
+        config=AgentConfig(max_steps=cfg.server.agent_max_steps),
+        system_prompt=state.system_prompt, params=state.params,
+        max_prompt_tokens=cfg.model.max_prompt_tokens)
+
+    final: Optional[Final] = None
+    started = False
+    tool_count = 0
+    for ev in loop.run(state.messages, stream=state.stream):
+        if isinstance(ev, StepStarted):
+            if ev.step > 1:
+                print(f"  [第 {ev.step}/{ev.max_steps} 轮]")
+        elif isinstance(ev, TextDelta):
+            if not started:
+                sys.stdout.write("bot> ")
                 sys.stdout.flush()
+                started = True
+            sys.stdout.write(ev.text)
+            sys.stdout.flush()
+        elif isinstance(ev, ToolCallReady):
+            tool_count += 1
+            print(f"  → 调用 {ev.call.name}({_short(ev.call.arguments)})")
+        elif isinstance(ev, ToolCallDone):
+            mark = "✓" if ev.result.ok else "✗"
+            print(f"    {mark} {ev.duration_ms:.0f}ms  {_short(ev.result.content, 120)}")
+        elif isinstance(ev, Final):
+            final = ev
+
+    if started:
         print()
-    else:
-        reply = session.ask_sync(text)
-        print(f"bot> {reply}")
-    st = session.last_stats
-    if st is not None:
-        print(f"  [in {st.prompt_tokens} tok · out {st.completion_tokens} tok · "
-              f"prefill {st.prefill_ms:.0f} ms · decode {st.decode_ms:.0f} ms "
-              f"({st.tokens_per_second:.1f} tok/s)]", file=sys.stderr)
+    elif final is not None and final.text:
+        print(f"bot> {final.text}")
+
+    if final is None:
+        return
+    # 历史里不含 system（每次渲染时由 AgentLoop 注入）
+    state.messages = [m for m in final.messages if m.role != "system"]
+    state.last_stats = final.stats
+    state.last_finish_reason = final.finish_reason
+    state.last_steps = final.steps
+
+    if final.stats:
+        if tool_count:
+            print(f"  [{tool_count} 次工具调用 · {final.steps} 轮 · "
+                  f"{final.stats.tokens_per_second:.1f} tok/s]")
+        else:
+            print(f"  [in {final.stats.prompt_tokens} tok · out {final.stats.completion_tokens} "
+                  f"tok · prefill {final.stats.prefill_ms:.0f} ms · "
+                  f"decode {final.stats.decode_ms:.0f} ms "
+                  f"({final.stats.tokens_per_second:.1f} tok/s)]", file=sys.stderr)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         prog="cann-llm-chat",
-        description="华为 CANN LLM Engine 交互式对话（逐字流式）",
+        description="华为 CANN LLM Engine 交互式对话（逐字流式 + 工具调用）",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-d", "--model-dir", help="模型目录")
     ap.add_argument("-c", "--config", help="TOML 配置文件")
@@ -107,6 +180,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("-t", "--template", help=f"对话模板，可用：{', '.join(available_templates())}")
     ap.add_argument("-s", "--system", help="system prompt")
     ap.add_argument("-p", "--prompt", help="单轮模式：生成一次后退出")
+    ap.add_argument("--tools", help="启用的工具：all / none / 逗号分隔的名字")
+    ap.add_argument("--allow-dangerous-tools", action="store_true",
+                    help="允许启用标记为 dangerous 的工具（自行评估风险）")
     ap.add_argument("--temp", type=float, help="采样温度，0=贪心")
     ap.add_argument("--topk", type=int, help="top-k")
     ap.add_argument("--topp", type=float, help="top-p")
@@ -114,12 +190,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--maxtok", type=int, help="单轮最大生成 token 数")
     ap.add_argument("--no-stream", action="store_true", help="关闭逐字输出")
     ap.add_argument("--list-backends", action="store_true", help="列出可用后端后退出")
+    ap.add_argument("--list-tools", action="store_true", help="列出可用工具后退出")
     ap.add_argument("-V", "--version", action="version", version=f"cann-llm {version.__version__}")
     args = ap.parse_args(argv)
 
     if args.list_backends:
         print("后端:", ", ".join(available_backends()) or "(无)")
         print("模板:", ", ".join(available_templates()))
+        return 0
+    if args.list_tools:
+        reg = default_registry()
+        for name in reg.names():
+            tool = reg.get(name)
+            flag = " [dangerous]" if tool.dangerous else ""
+            print(f"{name}{flag}: {tool.description.splitlines()[0]}")
         return 0
 
     # 配置合并：命令行 > 环境变量 > 文件 > 默认值
@@ -135,29 +219,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if over:
         cfg = cfg.merged(model=over)
 
-    stream = not args.no_stream
+    try:
+        registry = resolve_tools(args.tools, allow_dangerous=args.allow_dangerous_tools)
+    except (KeyError, PermissionError) as e:
+        print(f"工具配置有误: {e}", file=sys.stderr)
+        return 2
 
     try:
         t0 = time.time()
-        backend = build_engine(cfg)
+        engine = build_engine(cfg)
         load_s = time.time() - t0
     except CannLlmError as e:
         print(f"启动失败: {e}", file=sys.stderr)
         return 1
 
     template = get_template(cfg.model.chat_template)
-    params = GenerationParams(max_tokens=cfg.model.max_tokens,
-                              temperature=cfg.model.temperature,
-                              top_k=cfg.model.top_k, top_p=cfg.model.top_p,
-                              repetition_penalty=cfg.model.repetition_penalty,
-                              stop=tuple(template.stop_strings()))
-    session = ChatSession(backend=backend, template=template,
-                          system_prompt=cfg.model.system_prompt, params=params,
-                          max_prompt_tokens=cfg.model.max_prompt_tokens)
+    state = CliState(
+        params=GenerationParams(
+            max_tokens=cfg.model.max_tokens, temperature=cfg.model.temperature,
+            top_k=cfg.model.top_k, top_p=cfg.model.top_p,
+            repetition_penalty=cfg.model.repetition_penalty,
+            stop=tuple(template.stop_strings())),
+        system_prompt=cfg.model.system_prompt,
+        tool_names=registry.names(),
+        stream=not args.no_stream,
+        model_id=cfg.model.model_id, backend=cfg.model.backend)
 
     if args.prompt:                     # 单轮模式
-        _stream_reply(session, args.prompt, stream)
-        backend.close()
+        try:
+            run_turn(engine, cfg, state, args.prompt, registry)
+        except CannLlmError as e:
+            print(f"生成失败: {e}", file=sys.stderr)
+            return 1
+        engine.close()
         return 0
 
     try:
@@ -167,7 +261,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print(f"cann-llm {version.__version__}  ·  {cfg.model.model_id}"
           f"  ·  {cfg.model.backend}  ·  加载 {load_s:.1f}s")
-    print_params(params, stream)
+    print_params(state)
     print("输入 /help 看命令，/quit 退出。\n")
 
     while True:
@@ -180,19 +274,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             continue
 
         if line.startswith("/"):
-            stream, quit_now = handle_command(line, session, cfg, stream)
-            if quit_now:
+            if handle_command(line, state, cfg):
                 break
+            # 命令可能改了工具集，重新落到注册表
+            try:
+                registry = resolve_tools(",".join(state.tool_names) or "none",
+                                         allow_dangerous=args.allow_dangerous_tools)
+            except (KeyError, PermissionError):
+                registry = resolve_tools("none")
             continue
 
         try:
-            _stream_reply(session, line, stream)
+            run_turn(engine, cfg, state, line, registry)
         except CannLlmError as e:
             print(f"  [失败] {e}")
         except Exception as e:  # noqa: BLE001
             print(f"  [错误] {type(e).__name__}: {e}")
 
-    backend.close()
+    engine.close()
     return 0
 
 
