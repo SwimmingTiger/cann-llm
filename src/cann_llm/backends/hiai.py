@@ -210,11 +210,6 @@ class _HiaiBindings:
             ctypes.c_int, [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]),
         "HIAI_LLMEngine_Context_SetPrefixPrompt": (
             ctypes.c_int, [ctypes.c_void_p, ctypes.c_char_p]),
-        "HIAI_LLMEngine_Context_GetOneGenerationLen": (
-            ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]),
-        "HIAI_LLMEngine_Context_GetOneGeneration": (
-            ctypes.c_int, [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]),
-        "HIAI_LLMEngine_Executor_Destroy": (ctypes.c_int, [ctypes.POINTER(ctypes.c_void_p)]),
         # 流式所需（签名照已验证脚本 scripts/streaming_reference.py）
         "HIAI_LLMEngine_Context_SetOnSomeTokenGenerateDoneFunc": (
             ctypes.c_int, [ctypes.c_void_p, ctypes.c_void_p]),
@@ -378,6 +373,17 @@ class HiaiBackend(EngineBackend):
         if not ctx:
             raise GenerationError("Context 创建失败")
         self._ctx = ctx
+        try:
+            yield from self._generate_with(ctx, request, p)
+        finally:
+            # Context 每请求一个，用完即销毁（引擎的 Destroy 收指针的指针）
+            self._bind.lib.HIAI_LLMEngine_Context_Destroy(
+                ctypes.byref(ctypes.c_void_p(ctx)))
+            self._ctx = None
+
+    def _generate_with(self, ctx, request, p) -> Iterator[GenerationChunk]:
+        """把一个请求跑完（Context 的生命周期由 generate() 管）。"""
+        assert self._bind is not None
 
         # ★ 服务每个请求都会显式设 initTokenLen / maxGenTokens
         maxgen = int(getattr(p, "max_tokens", 0) or 128)
