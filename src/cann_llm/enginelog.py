@@ -33,7 +33,9 @@ _TAGS = ("AI_INFRA", "HIAI_DDK_MSG")
 _LINE = re.compile(
     r"^\s*\S+\s+\S+\s+(?P<pid>\d+)\s+(?P<tid>\d+)\s+(?P<lvl>[EWID])\s+"
     r"\S*/(?P<tag>[A-Z_]+):\s*(?P<body>.*)$")
-_QUOTED = re.compile(r'"([^"]{6,300})"')
+#: 抠出双引号里的内容。★ 不限长度：之前写 {6,300} 会静默丢掉
+#: 短于 6 或长于 300 的消息，那也是一种过滤。
+_QUOTED = re.compile(r'"([^"]*)"')
 
 
 def hilog_available() -> bool:

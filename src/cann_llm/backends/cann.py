@@ -82,6 +82,15 @@ def interpreter_libc_conflict() -> Optional[str]:
 from ..version import CANN_NDK_LIB
 from .base import EngineBackend, register_backend
 
+def _cann_log_suffix() -> str:
+    """失败时附上引擎原话；有原话就不要再列"可能原因"。"""
+    from ..enginelog import format_engine_errors, recent_engine_errors
+    if recent_engine_errors():
+        return format_engine_errors()
+    return ("\n    · 当前终端没有访问 NPU 的权限（换一个系统终端试试）"
+            + format_engine_errors())
+
+
 def _ctx_desc(n: int) -> str:
     """把 KV 上限渲染成人读的说法；0 表示未知，别假装知道。"""
     return (f"本模型 {n} token，含输出" if n else
@@ -453,8 +462,7 @@ class CannNdkBackend(EngineBackend):
                 f"引擎 Generate 返回 {status}。无法从返回码判断具体原因，"
                 f"常见可能：输入超出 KV 缓存（{_ctx_desc(self.context_length)}）、"
                 f"含无法分词的字符、引擎内部错误。"
-                + "\n    · 当前终端没有访问 NPU 的权限（换一个系统终端试试）"
-                + __import__("cann_llm.enginelog", fromlist=["x"]).format_engine_errors())
+                + _cann_log_suffix())
 
         in_tok = ctypes.c_ulong(0)
         out_tok = ctypes.c_ulong(0)
