@@ -241,6 +241,6 @@ OpenAI 客户端的 base_url 只应到 /v1，例如 http://127.0.0.1:8000/v1
 | `503 server_busy` | 并发超过 `server.max_queue`（引擎一次只跑一路），稍后重试 |
 | `400 invalid_request_error` | 参数问题，`error.message` 里有具体原因 |
 | `503 backend_unavailable` | 不在鸿蒙环境 / 找不到 NDK 库 |
-| `500 generation_failed` | 引擎返回非零。服务端只如实报告返回码，不替它断言原因（可能：输入超出 KV 缓存 2048 / 含无法分词的字符 / 引擎内部错误） |
+| `500 generation_failed` | 引擎返回非零。服务端只如实报告返回码，不替它断言原因（可能：输入超出**该模型**的 KV 缓存上限 / 含无法分词的字符 / 引擎内部错误） |
 
 服务端日志里也会带上同样的提示（404/405 会打印原因），方便对着日志排查。

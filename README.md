@@ -131,7 +131,12 @@ curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/jso
 真实 token 数看响应里的 `usage.prompt_tokens`（直接来自引擎的 `GetInputTokenCount`，准确）；
 `count_prompt_tokens()` 只是给日志看的粗估，不作为任何依据。
 
-引擎的实测行为（KV 缓存 2048 token，含输出）：
+**KV 缓存上限不是引擎的固定值，而是模型自己的属性** —— 它在转换/量化时由
+`kv_cache_max_len` 决定，并**固化进模型的张量形状**（`past_key_in{i}` 的第 0 维）。
+所以不同模型不一样：本项目用于这组实测的 1.5B 示例模型是 **2048**，
+官方 Qwen2.5-Coder-7B OMC 包则是 **4096**。
+
+下面这组实测数据来自 **2048** 那个模型（口径是 **输入 + 输出之和**，不是输入上限）：
 
 | 输入规模 | 行为 |
 |---|---|

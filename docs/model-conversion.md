@@ -292,7 +292,8 @@ output_dir:  /path/to/quant/onnx_out
 onnx_output_model_name: qwen2_1p5b_w4
 onnx_opset: 12
 batch: 1
-kv_cache_max_len: 2048           # KV 缓存长度，决定能塞多长的上下文
+kv_cache_max_len: 2048           # KV 缓存上限（决定能塞多长的上下文）；
+                                 # 它会固化进模型张量形状，按需改 —— 不是引擎常量
 layers: 28
 seq_len:
   - 64                           # prefill 每轮喂的 token 数
