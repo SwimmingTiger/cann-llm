@@ -286,7 +286,8 @@ class HiaiBackend(EngineBackend):
                  default_params: Optional[GenerationParams] = None):
         self.model_dir = os.path.abspath(model_dir) if model_dir else ""
         self._lib_path = lib_path
-        self.model_id = model_id or (os.path.basename(self.model_dir) or "cann-llm")
+        from ..modelpkg import derive_model_name
+        self.model_id = model_id or derive_model_name(self.model_dir)
         self.default_params = default_params or GenerationParams()
         self._bind: Optional[_HiaiBindings] = None
         self._ctx: Optional[int] = None          # 仅代表"最近一次"的 Context

@@ -194,7 +194,8 @@ class CannNdkBackend(EngineBackend):
         default_params: Optional[GenerationParams] = None,
     ):
         self.model_dir = os.path.abspath(model_dir) if model_dir else ""
-        self.model_id = model_id
+        from ..modelpkg import derive_model_name
+        self.model_id = model_id or derive_model_name(self.model_dir)
         # 显式给了就用；没给就等 load() 时从 executor.json 里读
         self.context_length = context_length
         self.default_params = default_params or GenerationParams()

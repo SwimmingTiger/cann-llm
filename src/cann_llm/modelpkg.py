@@ -22,7 +22,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 __all__ = ["build_package_files", "write_package_files", "is_packaged",
-           "detect_layout", "PACKAGED_MARKERS", "main"]
+           "detect_layout", "PACKAGED_MARKERS", "main", "derive_model_name"]
 
 
 def is_packaged(model_dir: str) -> bool:
@@ -207,3 +207,46 @@ def main(argv: "Optional[List[str]]" = None) -> int:
 
 if __name__ == "__main__":            # pragma: no cover
     raise SystemExit(main())
+
+def derive_model_name(model_dir: str) -> str:
+    """给模型目录起一个**像样的**展示名。
+
+    优先级（都用得上的信息，不猜）::
+
+        ① 目录名（先 realpath —— 否则 ``-d .`` 会得到 "."）
+        ② <model>.json 的文件名去扩展名（官方包里有，如 qwen7b.json）
+        ③ api_config.json 的 modelPath 去扩展名（如 qwen7b.omc）
+        ④ "unknown"
+
+    ★ 为什么不直接用 ``os.path.basename(model_dir)``：``-d .`` 或 ``-d ..`` 时
+      它返回 "." / ".."，模型名就成了一个点，在 CLI / /v1/models 里都很难看。
+    """
+    d = os.path.abspath(model_dir or ".")
+    name = os.path.basename(d)
+    if name and name not in (".", "..", os.sep):
+        return name
+    # ② <model>.json：非派生的那份（executor/context 是我们生成的）
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        names = []
+    for n in names:
+        if n.endswith(".json") and n not in _DERIVED:
+            stem = n[:-5]
+            if stem:
+                return stem
+    # ③ modelPath 去扩展名
+    api = _read_json(os.path.join(d, "api_config.json"))
+    mp = str(api.get("modelPath") or "")
+    if mp:
+        stem = os.path.basename(mp)
+        for suf in (".omc", ".json"):
+            if stem.endswith(suf):
+                stem = stem[: -len(suf)]
+        if stem:
+            return stem
+    return "unknown"
+
+
+#: 我们自己生成的两份配置，不算"模型自带的 json"
+_DERIVED = ("executor.json", "context.json")
