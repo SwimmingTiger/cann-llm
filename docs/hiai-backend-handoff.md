@@ -341,3 +341,56 @@ Executor_GenerateAsync(exec, ctx, prompt)          // 0xfdbec：仅做参数校�
 
 反编译 **`sub_153B98`**(0x153B98) —— 它是 prefill/decode 的实现，**失败断言就在里面**。
 （x570 `~/re/sub153.txt`，脚本 `~/re/run10.sh`）
+
+---
+
+## ★★★ Round 49–52：失败点定位到 `InputExecutorCheck(ctx)`，并发现引擎内有「Prompt KV 缓存」阶段
+
+### 失败调用链（全部反编译确认）
+
+```
+Executor_GenerateAsync                                  0xfdbec
+  └─ sub_118704                                         0x118704
+       ├─ isInit_(exec+48) / pipelineExecutor_(exec+200) / ctx   全过 ✓
+       └─ sub_153B98                                    0x153b98
+            └─ (vtable+464)(pipelineExecutor, ctx)  ← ★ InputExecutorCheck(ctx) 失败
+                 → AI_Log_Print("InputExecutorCheck(ctx) == hiai::SUCCESS" "false, return FAIL.")
+                 → 上层调 (vtable+232) → 触发 OnGenerateAsyncFailed（我们观测到的 ✓）
+```
+
+### 由字符串挖出的流水线要求（同一函数族）
+
+```
+"GeneratePreproc(ctx) == hiai::SUCCESS"
+"CalculateCachedTokenLen() == hiai::SUCCESS"
+"GetPromptKVCacheSize(cacheSize, allSize) == hiai::SUCCESS"
+"ApplyMemoryForPromptKVCache(promptKVCache.cacheAddr_, allSize) == hiai::SUCCESS"
+"LoadCacheToTensor(promptKVCache, cacheSize) == hiai::SUCCESS"
+"ClearCachedEmbed() == hiai::SUCCESS"
+"FreeKVSparseResource() == hiai::SUCCESS"
+"LoadPromptKVCache inputIds_ size: %ld"
+"LoadPromptKVCache inputIds_ tokenizer encode time: %.5f ms"     ← ★★ 引擎自己会做 tokenizer encode
+"ExecuteDraftPrefill(ctx) == hiai::SUCCESS"
+"GenerateAsyncByEmbedding" / "GenerateByEmbedding"
+```
+
+### ★ 修正一个我此前的错误判断
+
+我曾判断官方 `api_config.json` 里的 `pmtCacheOperation` / `pfxInitTokenLen` / `initTokenLen`
+是"服务级字段、引擎不读"，因此在转换时丢弃了它们 ✗。
+
+**上述字符串表明引擎内部确有 Prompt KV Cache 阶段**（`GetPromptKVCacheSize` /
+`ApplyMemoryForPromptKVCache` / `LoadCacheToTensor` / `LoadPromptKVCache`），
+而我当时排除它们的依据只是"`CreateFromContextJson` 的 JSON schema 只读 4 个键"——
+**那只说明 JSON 入口的 schema，不等于引擎内部不需要这些状态** ✗。
+
+### `InputExecutorCheck` 的候选实现（来自字符串 xref）
+
+字符串 `InputExecutorCheck` @0x40238 被 4 个函数引用：
+`sub_176AC8`(0x176ac8)、`sub_26F948`、`sub_27D188`、`sub_154DE0`(0x154de0)；
+调用点断言字符串 @0x7ef5b 被 `sub_151888` / `sub_15326C` / `sub_153B98` 引用。
+完整反编译在 x570 `~/re/inexec.txt`（2494 行）。
+
+**下一步**：用 vtable 定位真正的 `InputExecutorCheck`（它是 `pipelineExecutor` 类的虚方法，
+槽位 `vtable+464`），或在上述候选中按"是否读取 ctx 的输入字段"逐个排除；
+读出它的断言即可知道 Context 缺什么。
