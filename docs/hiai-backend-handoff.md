@@ -842,3 +842,60 @@ exported = {nm -D ... 里 type 为 T/W 的符号}
 
 三处任一不齐都会以 **segfault** 的形式表现出来（第 3 条踩过两次：
 漏声明 → 指针被当 int 截断；声明成 `c_void_p` → 传 bytes 不补 NUL）。
+
+---
+
+# 附：满屏 `Unknown class perfgenius_interface` 的来源（结论：系统 SELinux 策略，非本项目问题）
+
+## 现象
+
+stderr 反复出现：
+
+```
+Unknown class perfgenius_interface
+```
+
+（常与 `avc:  could not determine enforcing mode: Permission denied` 一起出现。）
+
+## 完整链条（逐层实证）
+
+```
+我们的进程
+ └─ libhiai_llm_engine.so
+      └─ 运行时 dlopen("libperfgenius_client.z.so")      ← 目的：给 NPU 设置温控事件
+           └─ NEEDED → libselinux.z.so
+                └─ 解析/检查 SELinux 策略 → 警告写到 stderr
+```
+
+**证据**：
+
+1. 该字符串出现在 `libai_text_analyzer_innerapi.z.so` / `…_image_…`（它们静态链接了
+   libselinux 的策略解析代码），同库还有
+   `SELinux: Class %s not defined in policy.` / `Unknown permission %s for class %s` /
+   `%s/class/%s/perms` —— 都是 SELinux 策略解析器的措辞。
+2. `libhiai_llm_engine.so` 的 NEEDED **只有** `libz / libhilog_ndk / libc++_shared / libc`，
+   但内部含字符串 `while loading perfGenius, dlopen %s failed` 与
+   `Load PerfGeniusFuncs timeout, might failed to set thermal control event`，
+   且导入了 `dlopen/dlsym/dlclose` ⇒ **运行时 dlopen**，用途是温控。
+3. 进程 `/proc/self/maps` 快照里确实有：
+   `chipset-sdk/libperfgenius_client.z.so`、`chipset-sdk/libperfgenius_proxy_1.0.z.so`、
+   `chipset-sdk-sp/libselinux.z.so`。
+4. `perfgenius_interface` **在策略里是声明了的**
+   （`/system/etc/selinux/system_common.cil:214` 的
+   `(class perfgenius_interface (perfCmdHandle … perfSetMode …))`），
+   同时 `system.cil`、`compatible/40.cil` 等也有相关 neverallow / typeattribute。
+   ⇒ 警告的成因是**兼容层策略与主策略的解析可见性不一致**，不是"没声明"。
+
+## 为什么不"修"
+
+- **它不能靠注册 class 解决**：SELinux 的 object class 由策略声明、在加载策略时由解析器处理，
+  **没有运行时注册接口**。
+- **也不能改策略**：`/system/etc/selinux/*.cil` 是系统只读文件。
+- **唯一能从源头消除的办法**是让引擎不去 dlopen perfgenius（例如用同名空 stub 抢在
+  `LD_LIBRARY_PATH` 前面），但那会**连温控一起屏蔽** —— 对长时间 NPU 推理，
+  失去温控的风险大于一行 stderr。
+
+## 结论
+
+**接受现状**。用户侧若确实嫌吵，可在命令末尾加 `2>/dev/null`，
+但要知道它会屏蔽**所有** stderr（含真正的报错）。

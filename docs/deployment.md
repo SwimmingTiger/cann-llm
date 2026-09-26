@@ -121,10 +121,14 @@ curl -sN -X POST http://127.0.0.1:8000/v1/chat/completions \
 | 现象 | 原因 / 处理 |
 |---|---|
 | **segfault（崩溃）** | 用了 glibc 的 Python ✗ → 换 `/data/service/hnp/bin/python3`（musl）|
-| `未知后端 'hiai'` | 没装/没设 `PYTHONPATH`，或忘了 `-b hiai`（默认是 cann）|
-| `BackendUnavailableError: … 未加载` | 设备上没有该引擎库，或 `CANN_LLM_HIAI_LIB` 指错了 |
-| `不是官方结构（需要 <model>.json + api_config.json）` | 模型目录用的是旧版 K0200 包或自己拼的 ✗ → 用官方 OMC 包重跑步骤 1 |
-| 输出成段胡话（`ampie...`） | 历史问题：走了 `Prompt_SetText` ✗ —— 当前后端已改走 token ids ✓，若复现请查 `git log` 与 `docs/hiai-backend-handoff.md` |
+| `未知后端 'xxx'` | 没装/没设 `PYTHONPATH`；或后端名写错（`-b` 可用 `hiai` / `cann`，默认 `hiai`）|
+| `BackendUnavailableError: … 未加载` | 设备上没有该引擎库，或 `CANN_LLM_LIB`（cann）/ `CANN_LLM_HIAI_LIB`（hiai）指错了 |
+| `缺少 api_config.json（或 <model>.json）` | 模型目录是旧格式 ✗ → 补一次即可：`python -m cann_llm.modelpkg <模型目录>` |
+| 输出成段胡话（`ampie...`） | **极可能是 prompt 没套对话模板**：裸 prompt（如只有“你好”）没有 `<\|im_start\|>` 结构，模型会跑偏。CLI / HTTP 会自动套模板，正常使用不会出现；直接调后端 API 时请自行套模板 |
+| **满屏 `Unknown class perfgenius_interface`** | 引擎为给 NPU 设温控会 `dlopen` 华为的 perfgenius 客户端，它连带加载 `libselinux`，而系统的 SELinux 策略里 `perfgenius_interface` 这个 class 在解析阶段不可见 → 解析器把警告写到 stderr。**不是本项目的错误，也不影响功能**。确实嫌吵就在命令末尾加 `2>/dev/null`：<br>`./scripts/start_chat.sh -d … 2>/dev/null`<br>⚠️ `2>/dev/null` 会屏蔽**所有** stderr（含真正的报错），只在确认其它一切正常时用 |
+
+> 关于那条 SELinux 警告的完整调查（含它为什么会出现、以及"用 stub 屏蔽它"为什么不划算——会连温控一起屏蔽）见
+> `docs/hiai-backend-handoff.md` 的对应章节。
 
 ### 可覆盖的环境变量
 
