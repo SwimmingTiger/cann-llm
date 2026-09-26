@@ -83,7 +83,10 @@ from ..version import CANN_NDK_LIB
 from .base import EngineBackend, register_backend
 
 def _cann_log_suffix() -> str:
-    """失败时附上引擎原话；有原话就不要再列"可能原因"。"""
+    """失败时附上引擎日志；**有日志就不要再列可能原因**。
+
+    日志里带着抓取命令（hilog -x）与 pid，用户可自行复核 —— 那才是失败原因所在。
+    """
     from ..enginelog import format_engine_log, recent_engine_log
     if recent_engine_log():
         return format_engine_log()
@@ -459,10 +462,9 @@ class CannNdkBackend(EngineBackend):
             # 如实报告引擎的返回码，不替它断言原因 —— 我们无法区分到底是
             # 输入超长、含无法分词的字符，还是引擎内部错误。列出可能性即可。
             raise GenerationError(
-                f"引擎 Generate 返回 {status}。无法从返回码判断具体原因，"
-                f"常见可能：输入超出 KV 缓存（{_ctx_desc(self.context_length)}）、"
-                f"含无法分词的字符、引擎内部错误。"
-                + _cann_log_suffix())
+                # ★ 只说引擎的事实；原因在下面的 hilog 里 —— 引导用户去看它，
+                #   而不是解释"我们为什么不知道"。
+                f"引擎 Generate 返回 {status}。" + _cann_log_suffix())
 
         in_tok = ctypes.c_ulong(0)
         out_tok = ctypes.c_ulong(0)

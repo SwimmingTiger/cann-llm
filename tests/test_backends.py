@@ -219,10 +219,12 @@ class TestNoContextLimit(unittest.TestCase):
             with self.assertRaises(GenerationError) as cm:
                 be._run(prompt, GenerationParams(), None)
             msg = str(cm.exception)
+            # 只报引擎自己的事实（返回码），不替它断言原因
             self.assertIn("返回 1", msg)
-            self.assertIn("无法从返回码判断", msg)
-            # 不应断言某个具体原因
             self.assertNotIn("错误类型", msg)
+            # ★ 失败原因在 hilog 里 —— 消息应当引导用户去看它（附抓取命令）
+            if "引擎日志（原始" in msg:
+                self.assertIn("hilog -x", msg)
             self.assertEqual(cm.exception.http_status, 500)
 
     def test_params_are_used_verbatim(self):
