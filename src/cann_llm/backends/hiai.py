@@ -194,6 +194,11 @@ class _HiaiBindings:
         "HIAI_LLMEngine_Executor_CreateFromJson": (ctypes.c_void_p, [ctypes.c_char_p]),
         # 服务每个请求都会设这两个（见 libhm_model_engine_service 的符号引用）
         "HIAI_LLMEngine_Context_SetInitTokenLen": (ctypes.c_int, [ctypes.c_void_p, ctypes.c_int]),
+        # ★ 停止序列：签名反编译实锤 (ctx, const char** seqs, unsigned n)，n 有效范围 1..9
+        #   官方模型的 api_config.json 里有 stopSeq = ["<|im_end|>", "<|endoftext|>"]
+        "HIAI_LLMEngine_Context_SetStopSeq": (
+            ctypes.c_int,
+            [ctypes.c_void_p, ctypes.POINTER(ctypes.c_char_p), ctypes.c_uint]),
         "HIAI_LLMEngine_Context_SetMaxGenTokens": (ctypes.c_int, [ctypes.c_void_p, ctypes.c_int]),
         # ★ 输入通道：服务用 Context_SetPrefixPrompt(context_, param.prefixPrompt.c_str())
         #   （hiai_session.cpp:1429，反编译实锤）
@@ -274,6 +279,7 @@ class HiaiBackend(EngineBackend):
         self._ids = []
         self._bos: int = -1                        # 引擎期望的 BOS（缺它会 Generate 失败）
         self._init_token_len: int = 0              # 模型配置里的 initTokenLen（prefill 长度）
+        self._stop_seq: list = []                  # 停止序列（模型配置里的 stopSeq）
         # 显式给的优先；没给则 load() 时从合成的 executor JSON 里读
         self._context_length = context_length or 0
         self._info: Optional[ModelInfo] = None
@@ -326,6 +332,12 @@ class HiaiBackend(EngineBackend):
             self._bos = int(llm.get("bos_token_id", 2))
         except (TypeError, ValueError):
             self._bos = 2
+        # 停止序列：优先用模型自带的（api_config.json 的 stopSeq），否则用 Qwen 的默认
+        _ss = llm.get("stopSeq") or llm.get("stop_seq") or ["<|im_end|>", "<|endoftext|>"]
+        if isinstance(_ss, str):
+            _ss = [_ss]
+        self._stop_seq = [x for x in _ss if isinstance(x, str) and x][:9] or ["<|im_end|>"]
+
         # 服务在 SetPrefixPrompt 之后调 SetInitTokenLen(ctx, param.initTokenLen)
         # （hiai_session.cpp:1431）—— 取模型配置里的 init_token_len / initTokenLen
         for key in ("init_token_len", "initTokenLen"):
@@ -398,6 +410,10 @@ class HiaiBackend(EngineBackend):
             _lib.HIAI_LLMEngine_Context_GetAllGeneration(_ctx, buf, n.value + 63)
             return buf.value.decode("utf-8", "replace")
 
+        # 兜底：模型可能越过停止符继续生成，截断到第一个停止符
+        import re as _re
+        _STRIP = _re.compile(
+            r"<\|im_end\|>.*|<\|endoftext\|>.*|<\|im_start\|>.*", _re.S)
         import queue as _queue
         _q: "_queue.Queue[str]" = _queue.Queue()
         _st = {"emitted": ""}
@@ -413,7 +429,7 @@ class HiaiBackend(EngineBackend):
                     return
                 _b = _ctypes.create_string_buffer(_n.value + 64)
                 _lib.HIAI_LLMEngine_Context_GetAllGeneration(peer_ctx, _b, _n.value + 63)
-                _t = _b.value.decode("utf-8", "replace")
+                _t = _STRIP.sub("", _b.value.decode("utf-8", "replace"))
                 if len(_t) > len(_st["emitted"]):
                     _q.put(_t[len(_st["emitted"]):])
                     _st["emitted"] = _t
@@ -437,6 +453,11 @@ class HiaiBackend(EngineBackend):
             raise GenerationError("Context_SetPrefixPrompt 失败")
         # 服务在此设 initTokenLen（= 模型配置里的 initTokenLen）；两参，调用点实锤
         self._bind.lib.HIAI_LLMEngine_Context_SetInitTokenLen(ctx, self._init_token_len)
+        # ★ 不设它，引擎不会在 <|im_end|> 处停 —— 会继续编出 "<|im_end|>…Human: …" 这种假对话
+        if self._stop_seq:
+            _arr = (ctypes.c_char_p * len(self._stop_seq))(
+                *[x.encode("utf-8") for x in self._stop_seq])
+            self._bind.lib.HIAI_LLMEngine_Context_SetStopSeq(ctx, _arr, len(self._stop_seq))
 
         rc = self._bind.lib.HIAI_LLMEngine_Executor_GenerateAsync(self._exec, ctx, text)
         _idx = 0
