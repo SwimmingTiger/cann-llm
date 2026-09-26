@@ -62,9 +62,21 @@ resolve_python() {
         return 0
     fi
 
-    # 候选可配（装完「Python安装器」后若不在以下位置，可用它补充）
+    # 候选：优先 PATH 里的 python3/python，其次在 hnp 包目录里**动态发现**
+    # （hnp = 鸿蒙的包服务，装的工具都落在 /data/service/hnp/bin，但那个目录
+    # 默认**不在 PATH 里** —— 用户常常要自己 export，所以上面主动补了 PATH）。
+    # 还可用 CANN_LLM_PYTHON_CANDIDATES 覆盖。
+    local candidates="${CANN_LLM_PYTHON_CANDIDATES:-python3 python}"
+    local g
+    for g in /data/service/hnp/bin/python3 \
+             /data/service/hnp/bin/python3.[0-9]* \
+             /data/service/hnp/python.org/python_*/bin/python3 \
+             /data/service/hnp/python.org/python_*/bin/python3.[0-9]*; do
+        [[ -x "$g" ]] && candidates+=" $g"
+    done
+
     local cand first_seen="" tried=""
-    for cand in ${CANN_LLM_PYTHON_CANDIDATES:-python3 python /data/service/hnp/bin/python3}; do
+    for cand in $candidates; do
         command -v "$cand" >/dev/null 2>&1 || continue
         [[ -n "$first_seen" ]] || first_seen="$(command -v "$cand")"
         if py_libc_ok "$cand"; then PY="$cand"; return 0; fi
@@ -78,6 +90,16 @@ resolve_python() {
 ${tried}")"
     return 0
 }
+
+# hnp（鸿蒙包服务）装的工具都落在 /data/service/hnp/bin，但那个目录**默认不在
+# PATH 里**（用户常要自己 export）。这里主动补上，这样 hnp 装的 Python 及它带的
+# 工具都能被找到 —— 包括"Python安装器"装完之后的解释器。
+if [[ -d /data/service/hnp/bin ]]; then
+    case ":$PATH:" in
+        *:/data/service/hnp/bin:*) ;;
+        *) PATH="/data/service/hnp/bin:$PATH"; export PATH ;;
+    esac
+fi
 
 resolve_python
 NDK_LIB="${CANN_LLM_LIB:-/system/lib64/ndk/libcann_llm_engine.so}"
@@ -129,6 +151,10 @@ if [[ -z "${PYTHON:-}" ]] && command -v python3 >/dev/null 2>&1 \
 fi
 
 
+# 一律带 -X faulthandler：段错误时能打出 Python 栈，
+# 而不是只有一句 "segmentation fault (core dumped)"。
+PY_FLAGS=(-X faulthandler)
+
 ok "Python $PY_VER  ·  $PY_PATH$PY_NOTE"
 # 没找到兼容解释器时已回退 —— 一定要把问题和安装建议说清楚
 if [[ -n "$PY_WARN" ]]; then
@@ -161,4 +187,4 @@ fi
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 export CANN_LLM_LIB="$NDK_LIB"
 
-exec "$PY" -m cann_llm.cli.chat "${PASSTHRU[@]}"
+exec "$PY" "${PY_FLAGS[@]}" -m cann_llm.cli.chat "${PASSTHRU[@]}"

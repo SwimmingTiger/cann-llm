@@ -27,6 +27,7 @@ import os
 import queue
 import sys
 import threading
+import warnings
 import time
 from typing import Dict, Iterator, Optional, Tuple
 
@@ -237,10 +238,15 @@ class CannNdkBackend(EngineBackend):
             if not os.path.exists(os.path.join(self.model_dir, need)):
                 raise ModelLoadError(f"模型目录缺少 {need}：{self.model_dir}")
 
-        # libc 不匹配会段错误，没有 Python 异常可捕获 —— 必须提前拦
+        # libc 不匹配时**只警告，不拦**：拦下来等于把"会不会崩"这个事实藏掉了，
+        # 用户既看不到真实行为、也无从判断是不是别的原因。让它去试，真崩了就是
+        # 真实的崩溃（脚本侧会带 -X faulthandler，能看到 Python 栈）。
+        # 需要"提前拒绝"的场景（例如 CI）可设 CANN_LLM_STRICT_LIBC=1。
         conflict = interpreter_libc_conflict()
         if conflict:
-            raise BackendUnavailableError(conflict)
+            if os.environ.get("CANN_LLM_STRICT_LIBC") == "1":
+                raise BackendUnavailableError(conflict)
+            warnings.warn(conflict, RuntimeWarning, stacklevel=2)
 
         self._ndk = _NdkBindings(self._lib_path)
 
