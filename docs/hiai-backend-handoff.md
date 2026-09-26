@@ -442,3 +442,62 @@ batchSize(pe+2568)=1   resourceFreed(pe+3698)=0   modelExecutor_(pe+2944)非空
 
 反编译 **`sub_153B98`** 的**线程函数**及其调用：`sub_15933C` / `sub_158D00` / `sub_158458` / `sub_156C64`
 （`sub_153B98` 本体反编译已在 x570 `~/re/sub153.txt`）—— 失败在 `Generate` **之前**。
+
+---
+
+# ★★★★★ 可行方案（Round 87–88 实测打通）
+
+## 结论：直接调引擎内部函数，绕过两个缺陷
+
+```python
+exec   = HIAI_LLMEngine_Executor_CreateFromJson(executor_json)   # ① 只调它！
+ctx    = HIAI_LLMEngine_Context_Create()                          # ② 每请求【新建】
+#        HIAI_LLMEngine_Context_SetMaxGenTokens(ctx, n)
+prompt = HIAI_LLMEngine_Prompt_Create()
+HIAI_LLMEngine_Prompt_SetTokenIds(prompt, ids, n)                 # ③ 自研分词器编码的 ids
+
+vec = (c_uint64 * 3)(0, 0, 0)                                     # 空 vector<Prompt336>
+sub_FDA28(byref(vec), prompt)          # 0xfda28 —— 原样搬 336 字节（含 prompt[39..41] 的 tokenids）
+sub_118704(exec, ctx, byref(vec))      # 0x118704 —— 真正的执行入口（GenerateAsync 的内部调用）
+
+ids  = HIAI_LLMEngine_Context_GetOneTokenGeneration(ctx, buf, len)  # ④ 取 token id 数组
+text = tokenizer.decode(ids)                                        # ⑤ ★ 自己解码
+```
+
+## 实测结果（官方 Qwen2.5-Coder-7B）
+
+| 指标 | 实测 |
+|---|---|
+| **成功回调 `OnAllTokensGenerateDone`** | ★ **触发**（此前每次都是 `OnGenerateAsyncFailed`）|
+| `GetInputTokenCount` | **9 / 11 / 8** —— 与自研分词器编码长度**逐一对上** ✓✓ |
+| `GetDecodeNum` / `GetOutputTokenCount` | **59 / 60** —— 真的生成了 |
+| `GetOneTokenGeneration` | 返回 **token id 数组**（不是文本）⇒ 必须自己 `decode` |
+
+## 为什么必须这样（两个缺陷）
+
+1. **`Prompt_SetText` 的 `std::string` 堆路径坏掉**：实测边界**精确在 22 字节**（libc++ SSO 容量）✗；
+   **已用 C 程序最终确认缺陷在引擎内部**（C 与 ctypes 表现完全相同，连 `ampie...` 胡话都一样）✗
+   ⇒ **文本路径对长 prompt 不可用** ⇒ 必须走 tokenids
+2. **`GenerateAsync` 内部的 `Prompt→params` 转换丢弃 tokenids** ✗：
+   证据 = 流水线里 `CheckPromptType` 把类型写进 `ctx+920`，实测值恒为 **3**（"text 与 tokenids 都为空"）；
+   而 `sub_FDA28` 只做 336 字节 memcpy，不做筛选 ⇒ **转换发生在它之前的那一步** ✗
+   ⇒ 直接调 `sub_FDA28` 把 Prompt 【原样】塞进参数向量，**跳过转换**
+
+## 关键地址
+
+```
+Executor_CreateFromJson  0xff4d0    Context_Create        0x1083c8
+Prompt_Create            0xfa82c    Prompt_SetTokenIds    0xfbedc
+Prompt_SetText           0xfaa00    SetMaxGenTokens       0x108f30
+sub_FDA28 (push_back)    0xfda28    sub_118704 (执行入口)  0x118704
+GetOneTokenGeneration    —          GetOutputTokenCount   —
+```
+运行时地址 = 模块基址 + 上述偏移（基址从 `/proc/self/maps` 读 `libhiai_llm_engine.so`）。
+
+## 剩余（判据 #1–#4）
+
+1. 用 `tokenizer.decode(ids)` 把输出变成文本
+2. Context 过滤掉终止 token（`<|im_end|>` / `<|endoftext|>`）
+3. 接进 `hiai.py` 的 `load()`/`generate()`，`supports_streaming` 依据 `SetOnSomeTokenGenerateDoneFunc`
+4. CLI + HTTP 端到端验证（长 prompt / 中文 / 连续多次）
+5. 测试与 git 提交
