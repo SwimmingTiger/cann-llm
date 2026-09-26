@@ -1,3 +1,12 @@
+/*
+ * ⚠ 历史遗留：本文件【不再使用】（dead code）。
+ *
+ * 它是早期为了 HIAI_LLMEngine_Executor_Create(modelInfo*) / SetModel(opt, modelInfo*)
+ * 而写的 C++ 辅助库。最终确定正确路径是 Executor_CreateFromJson（见 docs/hiai-backend-handoff.md），
+ * 因此 hiai 后端【纯 Python 即可】运行，无需编译本文件、也无需 C/C++ 工具链。
+ *
+ * 保留仅为记录当时的探索过程。
+ */
 // hiai_shim.c —— 极小的 C++ 辅助库，绕过 Python 侧的 C++ ABI 猜测。
 //
 // 为什么需要它：

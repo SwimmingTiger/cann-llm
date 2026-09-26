@@ -239,16 +239,21 @@ class _HiaiBindings:
             fn.argtypes = args
 
 
-def _module_base() -> int:
-    """libhiai_llm_engine.so 的加载基址（内部函数地址 = 基址 + 静态偏移）。"""
+def _module_base(lib_path: "str | None" = None) -> int:
+    """libhiai_llm_engine.so 的加载基址（内部函数地址 = 基址 + 静态偏移）。
+
+    lib_path 省略时用 HIAI_LIB；CANN_LLM_HIAI_LIB 可覆盖（见 HiaiBackend.load）。
+    """
+    target = lib_path or os.environ.get("CANN_LLM_HIAI_LIB") or HIAI_LIB
+    name = target.rsplit("/", 1)[-1]
     lo = None
     with open("/proc/self/maps") as fh:
         for line in fh:
-            if HIAI_LIB.rsplit("/", 1)[-1] in line:
+            if name in line:
                 a = int(line.split("-", 1)[0], 16)
                 lo = a if lo is None else min(lo, a)
     if lo is None:
-        raise BackendUnavailableError(f"{HIAI_LIB} 未加载")
+        raise BackendUnavailableError(f"{target} 未加载")
     return lo
 
 
@@ -424,7 +429,7 @@ class HiaiBackend(EngineBackend):
             #    实测 GenerateAsync 内部的 Prompt→params 转换会让流水线看到空 tokenids
             #    （证据：CheckPromptType 写入的 ctx+920 恒为 3 = "两者都空"）。
             #    这里自己组 params 向量，用引擎的 push_back 原样搬 336 字节的 Prompt。
-            base = _module_base()
+            base = _module_base(self._lib_path)
             push = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)(
                 base + OFF_PUSH_PROMPT)
             run = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p,

@@ -1,3 +1,4 @@
+BACKEND ?= cann
 PY ?= python3
 export PYTHONPATH := src
 
@@ -12,11 +13,11 @@ test-v:          ## 跑单元测试（详细）
 lint:            ## 需要 ruff：pip install ruff
 	ruff check src tests
 
-chat:            ## 交互式对话：make chat MODEL=/path/to/model_dir
-	$(PY) -m cann_llm.cli.chat -d $(MODEL)
+chat:            ## 交互式对话：make chat MODEL=/path/to/model_dir [BACKEND=cann|hiai]
+	$(PY) -m cann_llm.cli.chat -b $(BACKEND) -d $(MODEL)
 
-server:          ## 启动 OpenAI 兼容服务：make server MODEL=/path PORT=8000
-	$(PY) -m cann_llm.api.server -d $(MODEL) --port $(PORT)
+server:          ## 启动服务：make server MODEL=/path PORT=8000 [BACKEND=cann|hiai]
+	$(PY) -m cann_llm.api.server -b $(BACKEND) -d $(MODEL) --port $(PORT)
 
 clean:
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
