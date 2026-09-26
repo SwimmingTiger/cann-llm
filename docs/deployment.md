@@ -37,7 +37,10 @@
 
 ### 步骤 1：准备模型目录
 
-从华为官方 OMC 包（zip）转换：
+**先拿模型包**：官方模型在 Matrix 模型库，网页点击步骤见
+👉 **[docs/get-models.md](get-models.md)**（关键：详情页点 **「模型文件」** 标签取直链）。
+
+拿到 zip 后转换：
 
 ```bash
 python3 scripts/import_omc_package.py <官方zip> -o /path/to/models

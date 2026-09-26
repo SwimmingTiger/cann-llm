@@ -6,6 +6,8 @@
 **不需要 HAP、不需要 root、核心零第三方依赖**。
 
 > ### 📖 还没有模型？先看 [模型转换指南](docs/model-conversion.md)
+> 📥 **官方模型怎么下载**（含网页点击步骤、选包提醒）：见 [docs/get-models.md](docs/get-models.md)
+
 >
 > 从 HuggingFace 检查点到能在 NPU 上跑的模型，**完整可照着做的步骤**：
 > dopt 三阶段量化 → 导出 ONNX → OMG 转换 → 装配模型目录 → 验证。
