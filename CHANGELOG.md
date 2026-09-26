@@ -127,6 +127,44 @@ if finish_reason == "length" and pending_calls:
 **彻底移除**（先改为默认关闭，随后连开关一并删掉），`extract_json_objects`
 也一并删除（只被它使用）。
 
+### Added — Qwen3 系列的转换坑（实测）+ 两个新工具
+
+尝试把链路从 Qwen2.5-1.5B 扩展到 **Qwen3-4B-Instruct-2507**，一路踩到 5 个官方示例代码
+层面的问题，逐个定位并给出了修法与工具。**端到端尚未成功**（见下面第 4 条），
+但过程与结论都已写进 `docs/model-conversion.md` 附录 D。
+
+新工具（都在 `scripts/model-conversion/`，并在真实数据上验证过判断）：
+
+- **`normalize_tokenizer_merges.py`** ★ 最要命的一个
+  新版 HF tokenizer.json 把 BPE merges 存成「数组的数组」，旧版是空格分隔字符串。
+  引擎解析新版会抛 `nlohmann::json type_error.302: type must be string, but is array`
+  然后 **core dumped**。本脚本转成旧格式并去掉 `model.ignore_merges`。
+  实测 151387 条 merges 秒级转换，转换后模型从「加载即崩」变为「能正常加载」。
+- **`set_quant_strategy.py`**
+  dopt 首次运行只生成一份「全是 float（不量化）」的配置就退出，必须人工填策略。
+  本脚本按规则自动填（Linear 量化、lm_head/embedding 保持 float）。
+  回归验证：在 7B 的生成配置上运行，产出与实测跑通的 1.5B 配置**逐字段一致 198/198**。
+- **`patch_qwen3_embedding.py`**
+  qwen3 导出脚本把独立 embedding 导出的整段代码注释掉了，导致 ONNX 有 `input_embed`
+  输入却没有 embedding 文件。本脚本按 qwen2 的写法恢复。
+- **`patch_qwen3_export_mem.py`**
+  qwen3 导出脚本把 `from dopt.do_opt import ...` 写成了不存在的路径（两个 DDK 版本
+  都没有顶层 `dopt.do_opt`，真实定义在示例自带的 `do_opt.py` 里）——本脚本改为
+  `from do_opt import`；同时让 `onnxsim.simplify` 可由 `CANN_SKIP_ONNX_SIMPLIFY=1` 跳过。
+
+关键结论（写进附录 D）：
+
+1. qwen3 导出脚本的 dopt import 路径是错的（qwen2 脚本用的是本地 `do_opt`，所以
+   1.5B 那条路没碰上）；
+2. 独立 embedding 导出被整段注释掉；
+3. tokenizer merges 新旧格式不兼容会导致引擎 core dump；
+4. **导出精度必须 FP32**：FP32 在 31 GB 内存的机器上装不下 4B（确定性 OOM，
+   实测可用内存掉到 33 MB）；改成 FP16 虽然能导出、能出 OMC，但会让 OMG 的
+   RoPE 融合 pass 匹配失败（`rope_llm_fusion_pass.cc CheckMul0: mul0 weight size
+   invalid 0 != 1`，36 层 × 4 = 144 条），结果是引擎能加载模型但 `Generate`
+   恒返回 1。**这一步需要 ≥ 64 GB 内存的转换机**；
+5. Qwen3 的 `q_norm` / `k_norm` 是被 OMG 正常支持的，不是坑。
+
 ### Fixed — 模型转换：量化钳位的真正原因是配置项，不是工具版本
 
 用 DDK 6.1.1.0 完整重跑了转换链路，并把之前那个「权重负半轴被钳成 0」的问题

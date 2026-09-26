@@ -613,3 +613,108 @@ CANN 导出的图）+ `ort_check.py`（在 ORT 里跑一遍，判断是"模型�
 | Qwen3-8B | 同上 |
 
 不在这个列表里的架构，这条链路基本走不通 —— 得先确认华为的导出脚本支持它。
+
+---
+
+## 附录 D：转 Qwen3 系列的额外坑（实测记录）
+
+Qwen2.5-1.5B 那条链路是**完全跑通并验证过**的（见第 6 节）。
+换到 **Qwen3 系列**（本文用的是 `Qwen3-4B-Instruct-2507`）时会额外踩到 4 个坑 ——
+都是官方示例代码本身的问题，下面按踩到的顺序列出，脚本收在
+[`scripts/model-conversion/`](../scripts/model-conversion/)。
+
+> **状态说明**：Qwen3-4B 的量化 / 导出 / OMG / 装配都已跑通，模型也能在 NPU 上
+> **加载**，但 `Generate` 恒返回 1，**端到端尚未验证成功**。原因见坑 4。
+
+### 坑 1 —— `export_model_single_qwen3.py` 的 dopt import 路径是错的
+
+```python
+from dopt.do_opt import optimize_model_gemm2matmul     # ✗ 两个 DDK 版本都没有这个路径
+```
+
+5.1.1.1 里是 `dopt/dopt_llm/do_opt.so`，6.1.1.0 里是 `dopt/dopt_lm/do_opt.so`，
+**都没有顶层的 `dopt.do_opt`**，而且这两处的函数名也不含 `optimize_model_gemm2matmul`。
+
+真正的定义在**示例代码自带的 `npu_tuned_export/do_opt.py`** 里 ——
+隔壁的 `export_model_single_qwen2.py:87` 就是按 `from do_opt import ...` 写的（所以
+1.5B 那条路没碰上这个问题）。
+
+**修法**：把 `from dopt.do_opt import` 改成 `from do_opt import`（4 处）。
+
+### 坑 2 —— 独立 embedding 导出的整段代码被注释掉了
+
+Qwen2.5 的脚本会调用 `process_embedding_weights(...)` 产出
+`<name>_<seq>_<kv>.embedding_weights` / `.embedding_dequant_scale`
+（引擎要在图外算 `input_embed`，`executor.json` 也引用这两个文件）。
+
+Qwen3 的脚本把这一整段注释掉了，结果导出的 ONNX 有 `input_embed` 输入却没有
+embedding 文件，模型目录装配不起来。
+
+**修法**：`patch_qwen3_embedding.py` 按 qwen2 的写法恢复这段。
+
+### 坑 3 —— 新版 tokenizer.json 的 merges 格式引擎不认 ★
+
+新版 HF（Qwen3 等）把 BPE merges 存成「数组的数组」，旧版（Qwen2.5 等）是空格分隔的字符串：
+
+```json
+"merges": [ ["Ġ","t"], ["Ġ","a"] ]      // 新版 —— 引擎直接 abort
+"merges": [ "Ġ t", "Ġ a" ]              // 旧版 —— 引擎认
+```
+
+引擎解析时抛 `nlohmann::json type_error.302: type must be string, but is array`，
+然后 **core dumped**，模型根本加载不了。另外新版还多一个 `model.ignore_merges`。
+
+**修法**：`normalize_tokenizer_merges.py` 把每项 `" ".join(pair)` 并去掉
+`ignore_merges`（15 万条，秒级完成）。
+
+### 坑 4 —— 导出精度：FP32 装不下，FP16 会破坏 RoPE 融合 ★★
+
+`export_model_single_qwen3.py:88` 把精度**硬编码**成 FP32：
+
+```python
+hf_model_device = "cpu"
+hf_model_dtype = torch.float32
+```
+
+**用 FP32**：4B 的模型 16 GB + `from_pretrained` 转换峰值 + 量化权重 ckpt ~8 GB，
+超过本文测试机（31 GB 内存）→ 确定性 OOM（实测可用内存掉到 33 MB）。
+
+**改成 FP16**：导出能过、OMG 能出 `.omc`，但 OMG 日志里出现
+**36 层 × 4 = 144 条**：
+
+```
+E/AI_NPUCL rope_llm_fusion_pass.cc CheckMul0(222)::mul0 weight size invalid 0 != 1
+```
+
+RoPE 融合 pass 完全匹配不上（FP16 会引入额外的 Cast，破坏模式匹配）→
+图里留下 kirinx90 执行不了的 RoPE → 引擎能加载模型，但 **`Generate` 恒返回 1**。
+
+**结论**：这一步**必须用 FP32**，且转换机需要 **≥ 64 GB 内存**（或换更小的模型）。
+本文测试机（31 GB）跑不完 4B 的 FP32 导出。
+
+**同时可做的两个内存优化**（`patch_qwen3_export_mem.py` + 手工一处）：
+
+1. `onnx_utils.process_onnx` 里的 `onnxsim.simplify` 是内存峰值之一，可加环境变量
+   `CANN_SKIP_ONNX_SIMPLIFY=1` 跳过；
+2. 导出脚本把 `quant_pth` **`torch.load` 了两次**（一次给 `ckpt`、一次内联），
+   改成复用同一个 `ckpt` 并在 `load_state_dict` 后 `del ckpt; gc.collect()`。
+
+### 坑 5 —— Qwen3 的 `q_norm` / `k_norm` 是被支持的
+
+顺带确认：Qwen3 在 Q/K 上多出的 `q_norm` / `k_norm`（per-head RMSNorm）
+**OMG 能正常处理**（日志里可见 `SetWeightInfo, node: model.layers.N.self_attn.q_norm_3_0`），
+不是坑。
+
+### 与 Qwen2.5-1.5B 的形状对照（生成 OMG 参数时要用）
+
+| | Qwen2.5-1.5B | Qwen3-4B-Instruct-2507 |
+|---|---|---|
+| `num_hidden_layers` | 28 | 36 |
+| `hidden_size` | 1536 | 2560 |
+| `num_key_value_heads` | 2 | 8 |
+| `head_dim` | 128 | 128 |
+| `vocab_size` | 151936 | 151936 |
+| `bos_token_id` / `eos_token_id` | 151643 / 151643 | **151643 / 151645** |
+| RoPE theta | 1000000 | 5000000 |
+
+`eos_token_id` 不同这点在写 `executor.json` 时容易忽略（Qwen3 的 eos 是 `<|im_end|>`)。
