@@ -453,7 +453,8 @@ class CannNdkBackend(EngineBackend):
                 f"引擎 Generate 返回 {status}。无法从返回码判断具体原因，"
                 f"常见可能：输入超出 KV 缓存（{_ctx_desc(self.context_length)}）、"
                 f"含无法分词的字符、引擎内部错误。"
-                + "\n    · 当前终端没有访问 NPU 的权限（换一个系统终端试试，最可靠）")
+                + "\n    · 当前终端没有访问 NPU 的权限（换一个系统终端试试）"
+                + __import__("cann_llm.enginelog", fromlist=["x"]).format_engine_errors())
 
         in_tok = ctypes.c_ulong(0)
         out_tok = ctypes.c_ulong(0)
