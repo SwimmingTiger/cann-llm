@@ -5,6 +5,28 @@
 
 ## [Unreleased]
 
+### Fixed — 换模型后名字仍是 `qwen2.5-1.5b`
+
+`ModelConfig.model_id` 默认值被写死成字符串 `"qwen2.5-1.5b"`，而 `-d/--model-dir`
+只覆盖 `model_dir`、从不设置 `model_id`（chat CLI 甚至没有这个参数）。
+于是不管加载哪个模型，横幅、`/v1/models`、响应里的 `model` 字段一律显示
+`qwen2.5-1.5b`。
+
+改为**默认取模型目录名**：
+
+- `ModelConfig.model_id` 默认值改为 `None`（表示"未显式指定"）
+- 新增 `ModelConfig.resolved_id` 属性：有显式 `model_id` 就用它，否则取
+  `model_dir` 的目录名（`/srv/models/qwen3_4b` -> `qwen3_4b`；目录也没有则 `cann-llm`）
+- 全部用户可见处（chat 横幅、`/v1/models`、`chat/completions` 与 `completions`
+  响应、导出命令）改用 `resolved_id`（共 14 处）
+- chat CLI 补上 `--model-id`（server 早就有），需要固定名字时可显式指定
+
+实测：`models/qwen611` -> `qwen611`、`models/qwen3_4b` -> `qwen3_4b`、
+`models/rebuilt` -> `rebuilt`；`-d` 换目录后跟着变；显式指定优先。
+
+新增 `tests/test_config.py`（8 个用例，含"默认值不应含 1.5b 字样"的回归断言）。
+测试 170 -> 178，全过。
+
 ### Added
 
 **核心**
