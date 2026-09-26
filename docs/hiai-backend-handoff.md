@@ -33,7 +33,7 @@
 
 **修法**（已实现）：改用 `Prompt_SetTokenIds(prompt, int32*, count)`，
 即**自己在外面分词**——这正是系统服务的做法。
-分词器：`src/cann_llm/backends/hiai_tokenizer.py`（纯 Python，**已用往返验证**：
+分词器（**该模块后已删除**，此处保留历史）：`src/cann_llm/backends/hiai_tokenizer.py`（纯 Python，**已用往返验证**：
 vocab 151643 / merges 151387 / ByteLevel / BPE / NFC / 22 个特殊 token）。
 
 ### ② API 差异（全部反编译确认）
@@ -96,7 +96,7 @@ v3 = *((_QWORD *)a2 + 5);           // opt+40 → 当作 modelInfo 结构体
 | 文件 | 内容 |
 |---|---|
 | `cann-llm/src/cann_llm/backends/hiai.py` | 后端；**文件末尾注释块有完整施工图 + 全部地址** |
-| `cann-llm/src/cann_llm/backends/hiai_tokenizer.py` | 纯 Python Qwen 分词器（已验证）|
+| ~~`cann-llm/src/cann_llm/backends/hiai_tokenizer.py`~~ | 纯 Python Qwen 分词器 —— **已删除**（全导出 API 重构后不需要自己分词）|
 | ~~`cann-llm/src/cann_llm/backends/hiai_shim.c`~~ | C++ 辅助库 —— **已删除**（证明无用）|
 | `probe2.py` / `test_infer.py` / `test_shim.py` | 单变体探针（一变体一进程）|
 | x570 `~/re/*.txt` | 各函数反编译结果 |
@@ -280,7 +280,7 @@ __int64 HIAI_LLMEngine_Context_SetOnPrefillGenerateDoneFunc(void *ctx, void *cb)
 ④ ctx  = Context_CreateFromContextJson(context_super.json)
 ⑤ Context_SetMaxGenTokens / SetTemperature / SetTopP / SetTopK / SetSeed / SetStopSeq
 ⑥ 注册四个回调：SetOnPrefill / SetOnSomeToken / SetOnAllTokens / SetOnGenerateAsyncFailed
-⑦ prompt = Prompt_Create(); Prompt_SetTokenIds(prompt, ids, n)   ← ids 由 hiai_tokenizer 生成
+⑦ prompt = Prompt_Create(); Prompt_SetTokenIds(prompt, ids, n)   ← ✗ 这条路径已被证伪，见文末更正节
 ⑧ Executor_GenerateAsync(exec, ctx, prompt)   → 实测 rc=0 ✓（未注册回调时 60s 零 token）
 ⑨ 在 OnAllTokensDone 回调里读 Context_GetAllGeneration
 ⑩ Context_TerminateOnce(ctx)
