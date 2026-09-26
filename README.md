@@ -23,8 +23,10 @@
 
 - 🗣 **交互式对话 CLI** —— 逐字流式输出、多轮上下文、采样参数热更新
 - 🔌 **OpenAI 兼容 HTTP 服务** —— `/v1/chat/completions`（含 SSE 流式）、`/v1/completions`、`/v1/models`
-- 🧩 **可插拔后端** —— 统一的 `EngineBackend` 协议，CANN NDK 是首个实现，
-  将来可接 llama.cpp / vLLM / 远端 OpenAI 服务而不改上层
+- 🧩 **两个后端，同一套上层** —— 统一 `EngineBackend` 协议下目前实现了两个：
+  **`cann`** 走华为官方 NDK 接口（`/system/lib64/ndk/libcann_llm_engine.so`），
+  **`hiai`** 走系统内部引擎（`/system/lib64/libhiai_llm_engine.so`）。
+  用 `-b cann` / `-b hiai` 切换，**CLI、HTTP 服务、对话模板都不用改**
 - 📦 **零第三方依赖核心** —— HTTP 层基于 `http.server`，设备上开箱即用
 - 🧪 **可测** —— 分块聚合、对话模板、协议映射都有单元测试；`scripts/stream_check.py` 自检流式
 

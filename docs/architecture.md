@@ -64,7 +64,7 @@ CANN 引擎一个 Executor 同时只能跑一路推理。这个约束被封装�
 
 * 服务层代码保持线性、无锁
 * 排队上限 / 超时 / `BusyError`（→ HTTP 503）只有一处实现
-* 将来接上支持并发的后端（vLLM 等）时，直接不套这层即可
+* 若某个后端本身支持并发，直接不套这层即可
 
 ## 核心零依赖
 
@@ -92,7 +92,7 @@ POST /v1/chat/completions {"stream": true}
 
 | 想做什么 | 改哪里 |
 |---|---|
-| 加后端（vLLM / llama.cpp / 远端） | 新建 `backends/xxx.py` + `@register_backend("xxx")`，在 `backends/__init__.py` import 一次 |
+| 再加一个后端 | 新建 `backends/xxx.py` + `@register_backend("xxx")`，在 `backends/__init__.py` import 一次 |
 | 加对话模板（GLM / HunYuan） | `chat/template.py` 里实现 `ChatTemplate` + `register_template` |
 | 换 HTTP 框架 | 复用 `api/openai.py`，重写 `api/server.py` |
 | 加 tokenize / logprobs 接口 | `GenerationChunk.token_id` 已预留；后端补实现即可 |
