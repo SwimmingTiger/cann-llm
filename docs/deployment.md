@@ -112,16 +112,6 @@ curl -s -X POST http://127.0.0.1:8000/v1/chat/completions \
 curl -sN -X POST http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"hiai","messages":[{"role":"user","content":"请写一个加法函数"}],"max_tokens":40,"stream":true}'
-# 期望：多行 data: {"object":"chat.completion.chunk",...} 最后 data: [DONE] ✓
-
-# ③ 分词器自检（不加载模型，秒级；维护者用）
-PYTHONPATH=src python3 -c "
-from cann_llm.backends.hiai_tokenizer import QwenTokenizer
-t = QwenTokenizer('<模型目录>/tokenizer.json')
-for s in ['def add(a, b): return a + b', '你好，请写一个加法函数']:
-    ids = t.encode(s); print(len(ids), t.decode(ids) == s)
-"
-```
 
 ---
 

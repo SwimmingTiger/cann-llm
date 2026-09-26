@@ -46,7 +46,6 @@ from ..types import (
     ModelInfo,
 )
 from .base import EngineBackend, register_backend
-from .hiai_tokenizer import QwenTokenizer
 
 #: 系统内部引擎（非 NDK 公开接口；仅用于本机自运行，不涉及分发）
 HIAI_LIB = "/system/lib64/libhiai_llm_engine.so"
@@ -269,7 +268,6 @@ class HiaiBackend(EngineBackend):
         self._ctx: Optional[int] = None          # 仅代表"最近一次"的 Context
         self._exec: Optional[int] = None
         self._ctx_json: bytes = b""               # 每请求用它新建 Context
-        self._tok: Optional[QwenTokenizer] = None
         self._cb_done = None                       # 回调需长期持有，勿被 GC
         self._cb_fail = None
         self._cb_some = None
@@ -313,13 +311,8 @@ class HiaiBackend(EngineBackend):
         if not self._exec:
             raise ModelLoadError("Executor 创建失败（检查合成的 executor JSON）")
 
-        # 分词器：tokenizer.json 在模型目录里
-        tok_path = os.path.join(self.model_dir, "tokenizer.json")
-        if not os.path.exists(tok_path):
-            raise ModelLoadError(f"缺少 tokenizer.json: {tok_path}")
-        self._tok = QwenTokenizer(tok_path)
-        print(f"  [hiai] 分词器就绪: vocab={len(self._tok.vocab)}", flush=True)
-
+        # 注：本后端【不需要】自己分词 —— 输入/输出都是明文，
+        # 引擎用模型配置里的 tokenizer 自己处理。
         llm = executor_cfg["llm_config"]
         # 优先模型自带的扁平 <model>.json；我们生成的 executor.json 只作兜底。
         # 读不到就保持 0（= 未知）—— **不猜默认值**，否则提示里会写一个
