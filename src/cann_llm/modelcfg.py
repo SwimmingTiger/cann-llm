@@ -77,3 +77,37 @@ def read_kv_cache_max_len(model_dir: str) -> Tuple[Optional[int], str]:
     authoritative = [f for f in found if not f[2]]
     name, val, _ = (authoritative or found)[0]
     return val, name
+
+
+#: api_config.json 里的采样字段 → 我们内部的规范名
+_SAMPLER_KEYS = {
+    "temperature": "temperature",
+    "topK": "top_k",
+    "topP": "top_p",
+    "repetitionPenalty": "repetition_penalty",
+    "sampleFlag": "do_sample",
+}
+
+
+def read_sampler(model_dir: str) -> dict:
+    """读模型自带的采样配置（``api_config.json``），返回规范名 → 值的字典。
+
+    **只返回文件里确实写了的项**；缺的键不出现在结果里 —— 不填猜的默认值，
+    由调用方去决定"没给时怎么办"。
+
+    为什么以这个文件为准：它是华为发布模型包时随包给的运行参数，
+    是这份模型**自己的**配置。我们之前在代码里写死过 top_p=0.95，
+    而官方包写的是 0.8 —— 每请求下发 setter 时把模型真值盖掉了。
+    """
+    out: dict = {}
+    try:
+        with open(os.path.join(model_dir, "api_config.json")) as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        return out
+    if not isinstance(cfg, dict):
+        return out
+    for src, dst in _SAMPLER_KEYS.items():
+        if src in cfg and cfg[src] is not None:
+            out[dst] = cfg[src]
+    return out

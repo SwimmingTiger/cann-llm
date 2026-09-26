@@ -77,7 +77,8 @@
 scripts/start_chat.sh -d /path/to/model_dir
 scripts/start_chat.sh -d /path/to/model_dir -p "你好"          # 单轮
 
-#    采样默认是【开着】的（temperature=0.7 / top-k=20 / top-p=0.95），
+#    采样默认是【开着】的，而且各项**跟随模型自带的 api_config.json**
+#    （官方包是 temperature=0.7 / topK=20 / topP=0.8 / repetitionPenalty=1.1），
 #    所以同一提示每次回答都不一样。想固定下来：
 #      --temp 0          贪心解码（最可靠，与服务是否长驻无关）
 #      --seed 42         固定种子（CLI 每次是新进程，可复现）

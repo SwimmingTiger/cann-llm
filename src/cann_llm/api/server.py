@@ -32,7 +32,7 @@ from .. import version
 from ..backends import available_backends, create_backend
 from ..backends.base import EngineBackend, SerializedBackend
 from ..chat.template import get_template
-from ..config import AppConfig, load_config
+from ..config import AppConfig, load_config, resolve_sampler
 from ..agent.loop import StreamFilter
 from ..agent.parser import parse_tool_calls
 from ..errors import CannLlmError, InvalidRequestError
@@ -71,12 +71,12 @@ class AppState:
     started_at: float = field(default_factory=time.time)
 
     def base_params(self) -> GenerationParams:
+        """请求里没给的采样项用这里的值：**用户显式给的 > 模型自带 > 兜底**。"""
         mc = self.cfg.model
         return GenerationParams(
-            max_tokens=mc.max_tokens, temperature=mc.temperature, top_k=mc.top_k,
-            top_p=mc.top_p, repetition_penalty=mc.repetition_penalty,
-            seed=mc.seed,
-            stop=tuple(self.template.stop_strings()))
+            max_tokens=mc.max_tokens,
+            stop=tuple(self.template.stop_strings()),
+            **resolve_sampler(mc, self.backend.sampler_defaults()))
 
 
 def build_state(cfg: AppConfig) -> AppState:
@@ -87,15 +87,16 @@ def build_state(cfg: AppConfig) -> AppState:
         "model_dir": mc.model_dir,
         "model_id": mc.resolved_id,
         "context_length": mc.context_length,
-        "default_params": GenerationParams(
-            max_tokens=mc.max_tokens, temperature=mc.temperature, top_k=mc.top_k,
-            top_p=mc.top_p, repetition_penalty=mc.repetition_penalty,
-            seed=mc.seed),
+        # default_params 在 load() 之后再设 —— 采样默认值要读模型自己的 api_config.json
     }
     if mc.backend == "cann":
         kw["lib_path"] = os.environ.get("CANN_LLM_LIB", version.CANN_NDK_LIB)
     inner = create_backend(mc.backend, **kw)
     inner.load()
+    # ★ 采样默认值：模型自带的 api_config.json 是权威来源，用户没显式指定的项跟随它
+    inner.default_params = GenerationParams(
+        max_tokens=mc.max_tokens,
+        **{k: v for k, v in resolve_sampler(mc, inner.sampler_defaults()).items()})
     # 引擎一次只能跑一路，统一在后端层串行化（见 backends/base.SerializedBackend）
     backend = SerializedBackend(inner, max_queue=cfg.server.max_queue,
                                 timeout_s=cfg.server.queue_timeout_s)

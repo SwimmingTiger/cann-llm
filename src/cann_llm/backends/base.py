@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import threading
 from abc import ABC, abstractmethod
-from typing import Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from ..errors import BusyError, InvalidRequestError
 from ..types import GenerationChunk, GenerationRequest, ModelInfo
@@ -74,6 +74,19 @@ class EngineBackend(ABC):
         """是否支持真正的逐 token 回调（否则上层会以整块形式收到）。"""
         return False
 
+    def sampler_defaults(self) -> "Dict[str, Any]":
+        """**模型自带**的采样配置（权威来源），没有就返回 ``{}``。
+
+        上层用它来填 :class:`~cann_llm.types.GenerationParams` 里"用户没显式指定"
+        的项 —— 这样就不会拿代码里写死的值去覆盖模型自己的配置
+        （实测踩过：写死的 top_p=0.95 盖掉了官方模型的 0.8）。
+
+        返回的键用规范名：``temperature`` / ``top_k`` / ``top_p`` /
+        ``repetition_penalty`` / ``do_sample``。**不含 ``seed``** —— 那个由
+        "每次请求换一个随机种子"的策略决定，不沿用模型里写死的值。
+        """
+        return {}
+
 
 class SerializedBackend(EngineBackend):
     """把只支持单路推理的后端串行化。
@@ -115,6 +128,9 @@ class SerializedBackend(EngineBackend):
     @property
     def supports_streaming(self) -> bool:
         return self._inner.supports_streaming
+
+    def sampler_defaults(self) -> "Dict[str, Any]":
+        return self._inner.sampler_defaults()
 
     # ---- 串行化 ----
     def generate(self, request: GenerationRequest) -> Iterator[GenerationChunk]:

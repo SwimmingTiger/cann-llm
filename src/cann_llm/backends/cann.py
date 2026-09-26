@@ -286,6 +286,14 @@ class CannNdkBackend(EngineBackend):
         self._contexts.clear()
         self._loaded = False
 
+    def sampler_defaults(self) -> "Dict[str, Any]":
+        """模型自带的采样配置（``api_config.json``）—— 与 hiai 后端同一口径。
+
+        **不含 seed**：那个由"每次请求换一个随机种子"的策略决定。
+        """
+        from ..modelcfg import read_sampler
+        return {k: v for k, v in read_sampler(self.model_dir).items() if k != "seed"}
+
     @property
     def supports_streaming(self) -> bool:
         return True

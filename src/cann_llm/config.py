@@ -9,7 +9,7 @@ import os
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Mapping, Optional
 
 ENV_PREFIX = "CANN_LLM_"
 
@@ -49,13 +49,19 @@ class ModelConfig:
     chat_template: str = "chatml"
     system_prompt: str = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
     max_tokens: int = 256
-    temperature: float = 0.7
-    top_k: int = 20
-    top_p: float = 0.95
-    repetition_penalty: float = 1.1
-    #: 采样随机种子。留空（None）= **每次请求换一个随机种子** ——
-    #: 这样同一提示每次的回答才会不一样。设成固定值则输出可复现。
-    #  （引擎自己的默认是写死 seed=99 且采样关闭，会让每次结果完全相同。）
+    # ---- 采样参数：None = 【未指定 → 跟随模型自带的配置】----
+    # ★ 这里绝不写死"推荐值"。模型目录里的 api_config.json 才是权威来源
+    #   （temperature / topK / topP / repetitionPenalty / sampleFlag）。
+    #   实测踩过的坑：本文件曾写死 top_p=0.95，而官方模型配置是 0.8 ——
+    #   每请求下发 setter 时把模型的真值盖掉了，而且从输出上完全看不出来。
+    #   命令行 / 配置文件里**显式**给出的值仍然最高优先。
+    temperature: Optional[float] = None
+    top_k: Optional[int] = None
+    top_p: Optional[float] = None
+    repetition_penalty: Optional[float] = None
+    #: 采样随机种子。None = **每次请求换一个随机种子**（模型配置里的 seed 也【不】沿用）
+    #: —— 这样同一提示每次的回答才会不一样。设成固定值则输出可复现。
+    #  （引擎自己的默认是写死 seed=99，沿用会让每次结果完全相同。）
     seed: Optional[int] = None
     #: 上下文长度（用于 /v1/models 展示）
     # 0 = 未指定，交给后端按【模型自己的配置】探测（kv_cache_max_len）。
@@ -83,6 +89,32 @@ class ModelConfig:
             if name and name != "unknown":
                 return name
         return "cann-llm"
+
+
+#: 采样参数的内置兜底值 —— **只在「配置与模型都没给」时生效**，绝不拿来覆盖模型真值
+_SAMPLER_FALLBACK: "Dict[str, Any]" = {
+    "temperature": 0.7,
+    "top_k": 20,
+    "top_p": 0.95,
+    "repetition_penalty": 1.1,
+}
+
+
+def resolve_sampler(cfg: "ModelConfig", model_sampler: "Mapping[str, Any]") -> "Dict[str, Any]":
+    """合并出采样参数，供构造 :class:`GenerationParams` 使用。
+
+    优先级：**配置 / 命令行显式给的 > 模型自带（api_config.json）的 > 内置兜底**。
+
+    ★ 兜底只在两者都没有时生效 —— 绝不用它去覆盖模型的真值。
+    ★ ``seed`` **不**从模型配置取：模型里写的是引擎默认的 99，沿用会让每次输出
+      完全相同；这里保持 ``None``（= 每次请求换一个随机种子）。
+    """
+    out: "Dict[str, Any]" = {}
+    for key, fallback in _SAMPLER_FALLBACK.items():
+        val = getattr(cfg, key, None)
+        out[key] = model_sampler.get(key, fallback) if val is None else val
+    out["seed"] = cfg.seed
+    return out
 
 
 @dataclass(frozen=True)

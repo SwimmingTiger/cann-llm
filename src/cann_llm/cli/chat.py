@@ -31,7 +31,7 @@ from ..agent.loop import (
 from ..backends import available_backends, create_backend
 from ..backends.base import EngineBackend
 from ..chat.template import Message, available_templates, get_template
-from ..config import AppConfig, load_config
+from ..config import AppConfig, load_config, resolve_sampler
 from ..errors import CannLlmError
 from ..tools import ToolRegistry, default_registry
 from ..types import GenerationParams
@@ -69,14 +69,17 @@ def build_engine(cfg: AppConfig) -> EngineBackend:
         "model_dir": mc.model_dir,
         "model_id": mc.resolved_id,
         "context_length": mc.context_length,
-        "default_params": GenerationParams(
-            max_tokens=mc.max_tokens, temperature=mc.temperature, top_k=mc.top_k,
-            top_p=mc.top_p, repetition_penalty=mc.repetition_penalty),
+        # default_params 在 load() 之后设（采样默认值要读模型自己的配置）
     }
     if mc.backend == "cann":
         kw["lib_path"] = os.environ.get("CANN_LLM_LIB", version.CANN_NDK_LIB)
     backend = create_backend(mc.backend, **kw)
     backend.load()
+    # ★ 采样参数在【load 之后】才能定下来：模型自带的 api_config.json 是权威来源，
+    #   用户没显式指定的项就跟随它 —— 不用代码里写死的值去覆盖模型真值。
+    kw_sampler = resolve_sampler(mc, backend.sampler_defaults())
+    backend.default_params = GenerationParams(
+        max_tokens=mc.max_tokens, stop=backend.default_params.stop, **kw_sampler)
     return backend
 
 
@@ -254,11 +257,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     template = get_template(cfg.model.chat_template)
     state = CliState(
         params=GenerationParams(
-            max_tokens=cfg.model.max_tokens, temperature=cfg.model.temperature,
-            top_k=cfg.model.top_k, top_p=cfg.model.top_p,
-            repetition_penalty=cfg.model.repetition_penalty,
-            seed=cfg.model.seed,
-            stop=tuple(template.stop_strings())),
+            max_tokens=cfg.model.max_tokens,
+            stop=tuple(template.stop_strings()),
+            # 用户显式给的 > 模型自带（api_config.json）> 兜底
+            **resolve_sampler(cfg.model, engine.sampler_defaults())),
         system_prompt=cfg.model.system_prompt,
         tool_names=registry.names(),
         stream=not args.no_stream,

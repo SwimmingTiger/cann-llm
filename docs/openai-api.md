@@ -67,7 +67,7 @@ for chunk in client.chat.completions.create(
 | `stream` | SSE；`data: [DONE]` 结束 |
 | `stream_options.include_usage` | 末尾额外发一帧 `choices: []` 且带 `usage` 的块 |
 | `max_tokens` / `max_completion_tokens` | 后者优先 |
-| `temperature` | 默认 **0.7**（不是 0）—— 不传也是采样，同一提示每次回答不同 |
+| `temperature` | 不传则**跟随模型自带的 `api_config.json`**（官方包是 0.7，兜底也是 0.7，**绝不是 0**）—— 不传也是采样，同一提示每次回答不同 |
 | `top_p` / `stop` | 直接映射 |
 | `seed` | 见下方「关于 seed 的实际限制」⚠️ |
 | `n` | 只支持 `1` |

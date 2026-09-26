@@ -925,6 +925,32 @@ Unknown class perfgenius_interface
 
 2. 原来的实现把 sampler 写进 executor JSON 就完事了，没有按请求下发。
 
+### ★ 附带发现：引擎根本不读我们 JSON 里的 sampler 字段
+
+我们合成的 executor/context JSON 里写了 `sampler`（topK / topP / temperature /
+repetition_penalty / seed，值取自模型的 `api_config.json`），但实测新建 Context 的
+默认值**不是那些**：
+
+```
+我们 JSON 里写了 topK=20（来自 api_config.json）
+实测 GetTopK = 100        ← 引擎自己的默认，不是 20
+实测 GetDoSampleFlag = 0  ← api_config.json 写的是 True
+实测 GetSeed = 99
+```
+
+⇒ **那份 JSON 里的 sampler 键名引擎不认**，采样参数只能靠 `Context_Set*` 显式下发。
+
+### 因此：采样默认值以「模型自带的 api_config.json」为准
+
+`config.py` 里曾写死 `top_p=0.95`，而官方包写的是 **0.8** —— 每请求下发 setter 时
+把模型真值盖掉了，且**从输出上完全看不出来**（topK / temperature /
+repetitionPenalty 恰好与官方一致，只有 topP 露了馅）。
+
+现在 `ModelConfig` 的采样字段默认是 `None`（= 未指定），由
+`modelcfg.read_sampler()` 读模型目录里的 `api_config.json` 作为权威来源，
+按 `用户显式给的 > 模型自带 > 内置兜底` 的顺序合并（见 `config.resolve_sampler`）。
+`seed` **不**跟随模型：模型里那 99 是引擎默认，沿用会让每次输出完全相同。
+
 ### 签名（**不是猜的**：用「设进去再读回来」逐条验证）
 
 ```

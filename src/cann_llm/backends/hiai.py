@@ -317,6 +317,8 @@ class HiaiBackend(EngineBackend):
         self._bos: int = -1                        # 引擎期望的 BOS（缺它会 Generate 失败）
         self._init_token_len: int = 0              # 模型配置里的 initTokenLen（prefill 长度）
         self._stop_seq: list = []                  # 停止序列（模型配置里的 stopSeq）
+        # 模型自带的采样配置（api_config.json），load() 时读入 —— 权威来源
+        self._model_sampler: Dict[str, Any] = {}
         # 显式给的优先；没给则 load() 时从合成的 executor JSON 里读
         self._context_length = context_length or 0
         self._info: Optional[ModelInfo] = None
@@ -337,6 +339,11 @@ class HiaiBackend(EngineBackend):
                 f"    （转换脚本 scripts/model-conversion/build_model.py 会自动生成）")
 
         executor_cfg, context_cfg = build_configs(self.model_dir)
+        # ★ 模型自带的采样配置（api_config.json）—— 权威来源。
+        #   上层会用它来填"用户没显式指定"的采样项，避免我们用写死的值覆盖模型真值。
+        #   （实测踩过：本项目的默认 top_p=0.95 盖掉了官方模型的 0.8。）
+        from ..modelcfg import read_sampler
+        self._model_sampler = read_sampler(self.model_dir)
         self._bind = _HiaiBindings(self._lib_path)
 
         # 引擎按相对路径解析模型文件
@@ -411,6 +418,14 @@ class HiaiBackend(EngineBackend):
         #   回调里只用轻量的 GetOneTokenGeneration 取单 token 并 append；
         #   增量由主线程轮询列表后解码（已被 scripts/streaming_reference.py 验证）。
         return True
+
+    def sampler_defaults(self) -> Dict[str, Any]:
+        """模型自带的采样配置（``api_config.json``），load() 时读入。
+
+        **不含 seed** —— 那个由"每次请求换一个随机种子"的策略决定，
+        沿用模型里写死的 99 会让每次输出完全相同。
+        """
+        return {k: v for k, v in self._model_sampler.items() if k != "seed"}
 
     # ------------------------------------------------------------------ 生成
 
