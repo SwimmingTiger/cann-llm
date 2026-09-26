@@ -81,6 +81,8 @@ class GenerationChunk:
     index: int = 0
     token_id: Optional[int] = None
     finish_reason: Optional[str] = None
+    #: 仅最终分块携带（用量与耗时），中间分块为 None
+    stats: Optional["GenerationStats"] = None
 
     @property
     def is_final(self) -> bool:
@@ -129,13 +131,17 @@ def aggregate(chunks: Iterator[GenerationChunk], stats: GenerationStats | None =
     parts: List[str] = []
     reason = FINISH_STOP
     n = 0
+    seen_stats: Optional[GenerationStats] = None
     for c in chunks:
         parts.append(c.text)
         n += 1
+        if c.stats is not None:
+            seen_stats = c.stats
         if c.finish_reason:
             reason = c.finish_reason
     return GenerationResult(text="".join(parts), finish_reason=reason,
-                            stats=stats or GenerationStats(), chunk_count=n)
+                            stats=seen_stats or stats or GenerationStats(),
+                            chunk_count=n)
 
 
 @dataclass(frozen=True)
