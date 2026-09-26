@@ -5,6 +5,13 @@
 直接以 `ctypes` 调用系统自带的 NDK 库 `/system/lib64/ndk/libcann_llm_engine.so`，
 **不需要 HAP、不需要 root、核心零第三方依赖**。
 
+> ### 📖 还没有模型？先看 [模型转换指南](docs/model-conversion.md)
+>
+> 从 HuggingFace 检查点到能在 NPU 上跑的模型，**完整可照着做的步骤**：
+> 导出 ONNX → **修复被量化破坏的权重（不修就是垃圾输出）** → 切分大矩阵 →
+> OMG 转换 → 装配模型目录 → 验证。
+> 配套脚本在 [`scripts/model-conversion/`](scripts/model-conversion/)。
+
 ## 特性
 
 - 🗣 **交互式对话 CLI** —— 逐字流式输出、多轮上下文、采样参数热更新
@@ -153,6 +160,8 @@ src/cann_llm/
 │   ├── base.py     EngineBackend 协议 + 注册表
 │   └── cann.py     CANN LLM Engine NDK（ctypes）实现
 ├── chat/           对话模板（ChatML 等）与多轮会话
+├── agent/          工具调用循环与解析
+├── tools/          工具注册表与内置工具
 ├── cli/chat.py     交互式命令行
 └── api/            OpenAI 兼容 HTTP 服务（stdlib http.server）
 ```
@@ -161,9 +170,11 @@ src/cann_llm/
 
 | 文档 | 内容 |
 |---|---|
+| **[docs/model-conversion.md](docs/model-conversion.md)** | **模型转换全流程**（从 HF 检查点到能上 NPU，含最容易踩的量化坑） |
 | `docs/architecture.md` | 分层、数据流、为什么这样设计 |
-| `docs/cann-engine-notes.md` | **踩坑记录**：API 调用约定、回调签名、必须避开的崩溃点 |
-| `docs/openai-api.md` | 兼容范围与差异 |
+| `docs/cann-engine-notes.md` | **引擎笔记**：API 调用约定、回调签名、必须避开的崩溃点、上下文上限 |
+| `docs/agent.md` | 工具调用（function calling）的原理、用法与可靠性 |
+| `docs/openai-api.md` | 兼容范围、与官方的差异、排错 |
 
 ## 许可
 
