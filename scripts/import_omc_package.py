@@ -162,6 +162,19 @@ def convert(d, dry_run=False):
     with open(os.path.join(d, "context.json"), "w") as f:
         json.dump(cx, f, indent=4, ensure_ascii=False)
     log("已写 executor.json / context.json")
+
+    # ★ 本脚本处理的本来就是【官方包】（自带 api_config.json / <model>.json），
+    #   所以通常无需补写；仅当它们缺失时才用 executor 反推，保证布局同构。
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "..", "src"))
+        from cann_llm.modelpkg import is_packaged, write_package_files
+        if not is_packaged(d):
+            written = write_package_files(d, ex)
+            if written:
+                log("已补写打包配置: " + ", ".join(written))
+    except Exception as e:                      # noqa: BLE001
+        log(f"警告：未能补写打包配置（{e}）")
     return ex, cx
 
 

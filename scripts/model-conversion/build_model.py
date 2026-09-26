@@ -365,6 +365,19 @@ def main():
         json.dump(executor, f, indent=4, ensure_ascii=False)
     log("已写 context.json / executor.json")
 
+    # ★ 再补出 api_config.json 与 <model>.json，使目录与官方包【同构】——
+    #   这样 hiai / cann 两个后端、以及"打包布局优先"的逻辑都不需要特殊分支，
+    #   也就不会产出所谓 bare 模型。
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "..", "..", "src"))
+        from cann_llm.modelpkg import write_package_files
+        written = write_package_files(out_dir, executor)
+        if written:
+            log("已写打包配置: " + ", ".join(written))
+    except Exception as e:                      # noqa: BLE001
+        log(f"警告：未能补写 api_config.json / <model>.json（{e}）")
+
     log(f"完成 → {out_dir}")
     log("三处 KV 长度已对齐：" 
         f"yaml {args.kv_len} · OMG input_shape {args.kv_len} · executor.json {args.kv_len}")
