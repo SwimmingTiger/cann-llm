@@ -151,6 +151,7 @@ usage() {
 
 环境变量: CANN_LLM_MODEL_DIR / CANN_LLM_PORT / CANN_LLM_API_KEY /
           CANN_LLM_CONFIG / CANN_LLM_BACKEND / CANN_LLM_LOG / PYTHON
+          CANN_LLM_LIB（cann） / CANN_LLM_HIAI_LIB（hiai）
 EOF
 }
 
@@ -305,15 +306,19 @@ if [[ -n "$PY_WARN" ]]; then
     printf '%s\n\n' "$PY_WARN" >&2
 fi
 
-NDK_LIB="${CANN_LLM_LIB:-/system/lib64/ndk/libcann_llm_engine.so}"
-# 只有【显式】指定 cann 时才强制要求 NDK 库；auto 未定时不假定后端
+# 引擎库按【后端】选：两个后端用的是不同的库
 if [[ "$BACKEND" == "cann" ]]; then
-    if [[ -f "$NDK_LIB" ]]; then
-        ok "CANN NDK 库: $NDK_LIB"
-    else
-        die "找不到 CANN NDK 库 $NDK_LIB
-     这个后端需要鸿蒙设备（NPU）环境；在别的机器上请用 -b 指定其它后端。"
-    fi
+    ENGINE_LIB="${CANN_LLM_LIB:-/system/lib64/ndk/libcann_llm_engine.so}"
+    ENGINE_KIND="cann NDK 库"
+else
+    ENGINE_LIB="${CANN_LLM_HIAI_LIB:-/system/lib64/libhiai_llm_engine.so}"
+    ENGINE_KIND="hiai 引擎"
+fi
+if [[ -f "$ENGINE_LIB" ]]; then
+    ok "$ENGINE_KIND: $ENGINE_LIB"
+else
+    die "找不到 $ENGINE_KIND $ENGINE_LIB
+     后端 $BACKEND 需要鸿蒙设备（NPU）环境；在别的机器上请用 -b 指定其它后端。"
 fi
 
 # 模型目录：参数 > 环境变量 > 配置文件 > 自动探测
@@ -377,7 +382,12 @@ ARGS=(-m cann_llm.api.server -d "$MODEL_DIR" --host "$HOST" --port "$PORT")
 [[ -n "$API_KEY" ]] && ARGS+=(-k "$API_KEY")
 
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
-export CANN_LLM_LIB="$NDK_LIB"
+# 只导出所选后端对应的库变量
+if [[ "$BACKEND" == "cann" ]]; then
+    export CANN_LLM_LIB="$ENGINE_LIB"
+else
+    export CANN_LLM_HIAI_LIB="$ENGINE_LIB"
+fi
 
 SHOWN="$HOST"; [[ "$HOST" == "0.0.0.0" || -z "$HOST" ]] && SHOWN="127.0.0.1"
 

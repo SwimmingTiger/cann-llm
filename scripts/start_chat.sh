@@ -113,7 +113,14 @@ if [[ -d /data/service/hnp/bin ]]; then
 fi
 
 resolve_python
-NDK_LIB="${CANN_LLM_LIB:-/system/lib64/ndk/libcann_llm_engine.so}"
+# 引擎库按【后端】选：两个后端用的是不同的库，检查/提示/导出都要对应
+if [[ "$BACKEND" == "cann" ]]; then
+    ENGINE_LIB="${CANN_LLM_LIB:-/system/lib64/ndk/libcann_llm_engine.so}"
+    ENGINE_KIND="cann NDK 库"
+else
+    ENGINE_LIB="${CANN_LLM_HIAI_LIB:-/system/lib64/libhiai_llm_engine.so}"
+    ENGINE_KIND="hiai 引擎"
+fi
 
 usage() {
     sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -137,16 +144,19 @@ usage() {
       --list-backends   列出可用后端与模板
   -h, --help            显示本帮助
 
-环境变量: CANN_LLM_MODEL_DIR / CANN_LLM_LIB / PYTHON
+环境变量: CANN_LLM_MODEL_DIR / CANN_LLM_BACKEND
+          CANN_LLM_LIB（cann 后端） / CANN_LLM_HIAI_LIB（hiai 后端） / PYTHON
 EOF
 }
 
 MODEL_DIR="${CANN_LLM_MODEL_DIR:-}"
+BACKEND="${CANN_LLM_BACKEND:-hiai}"        # 与 CLI 默认一致
 PASSTHRU=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
         -d|--model-dir) MODEL_DIR="${2:?}"; PASSTHRU+=("$1" "$2"); shift 2 ;;
+        -b|--backend)   BACKEND="${2:?}";   PASSTHRU+=("$1" "$2"); shift 2 ;;
         --list-backends) PASSTHRU+=("$1"); shift ;;
         *) PASSTHRU+=("$1"); shift ;;
     esac
@@ -175,11 +185,11 @@ if [[ -n "$PY_WARN" ]]; then
     printf '\n' >&2
 fi
 
-if [[ ! -f "$NDK_LIB" ]]; then
-    die "找不到 CANN NDK 库 $NDK_LIB
-     本后端需要鸿蒙设备（NPU）环境。"
+if [[ ! -f "$ENGINE_LIB" ]]; then
+    die "找不到 $ENGINE_KIND $ENGINE_LIB
+     后端 $BACKEND 需要鸿蒙设备（NPU）环境。"
 fi
-ok "CANN NDK 库: $NDK_LIB"
+ok "$ENGINE_KIND: $ENGINE_LIB"
 
 if [[ -z "$MODEL_DIR" ]]; then
     for cand in "$ROOT"/models/*/ "$ROOT"/../models/*/; do
@@ -205,6 +215,11 @@ else
 fi
 
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
-export CANN_LLM_LIB="$NDK_LIB"
+# 只导出所选后端对应的库变量（另一个保持默认，不干扰）
+if [[ "$BACKEND" == "cann" ]]; then
+    export CANN_LLM_LIB="$ENGINE_LIB"
+else
+    export CANN_LLM_HIAI_LIB="$ENGINE_LIB"
+fi
 
 exec "$PY" "${PY_FLAGS[@]}" -m cann_llm.cli.chat "${PASSTHRU[@]}"
