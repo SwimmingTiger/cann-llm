@@ -67,6 +67,21 @@ scripts/start_server.sh -d /path/to/model_dir -b              # 后台，等就�
 scripts/start_server.sh --status                              # 看状态
 scripts/start_server.sh --stop                                # 停止
 
+# 4) 切换后端（默认 hiai）
+#    hiai = 系统内部引擎。更快、输出干净、支持停止序列 —— 官方 OMC 包推荐用它
+#    cann = 官方 NDK 后端
+scripts/start_chat.sh   -d /path/to/model_dir -b cann        # 改用 cann
+scripts/start_server.sh -d /path/to/model_dir -b cann
+#    也可以固定住：export CANN_LLM_BACKEND=hiai
+#
+# 5) stderr 里满屏 Unknown class perfgenius_interface 时
+#    这是引擎为给 NPU 设温控而 dlopen 华为 perfgenius 客户端、连带加载 libselinux
+#    解析系统策略时产生的警告 —— 不是本项目的错误，也不影响功能。
+#    嫌吵可以把它屏蔽掉：
+scripts/start_chat.sh -d /path/to/model_dir 2>/dev/null
+#    ⚠️ 这会屏蔽【所有】stderr（含真正的报错），只在确认其它一切正常时用。
+#    完整调查见 docs/hiai-backend-handoff.md。
+
 # 不带参数也行：会自动在 models/<名字>/ 下找模型目录
 # 也可以用环境变量：export CANN_LLM_MODEL_DIR=/path/to/model_dir
 
@@ -175,6 +190,7 @@ src/cann_llm/
 
 | 文档 | 内容 |
 |---|---|
+| **[docs/deployment.md](docs/deployment.md)** | **部署与运行**（装依赖、拿模型、启动、验证、常见问题）—— 上手第一篇 |
 | **[docs/get-models.md](docs/get-models.md)** | **下载官方模型**（Matrix 模型库网页点击步骤、选包提醒、SHA256） |
 | **[docs/model-conversion.md](docs/model-conversion.md)** | **模型转换全流程**（从 HF 检查点到能上 NPU，含最容易踩的量化坑） |
 | `docs/architecture.md` | 分层、数据流、为什么这样设计 |
