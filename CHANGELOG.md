@@ -49,6 +49,21 @@
 现在完全不截断：工具返回多少，模型就看到多少，调用方也拿到多少。
 需要控制长度请在工具实现里自己分块/摘要/返回引用。
 
+### Changed — 工具失败只陈述事实
+
+工具失败时不再追加「请修正参数后重新调用同一个工具；在拿到成功结果之前不要
+凭猜测作答」这类指导语，只回**错误原文**（`Error: <原因>`）。
+
+判定失败本身是 agent 循环的职责（DSH 的 `dsh-agent-loop` 同样设
+`isError: true`），问题在于**判完之后多说了话** —— 那属于替调用方指挥模型。
+
+查证 pi-ai 的 wire 转换（`dist/api/openai-completions.js`）：tool 消息只发
+`content` / `tool_call_id`，**`isError` 不发给模型**（只是框架内部元数据）。
+所以 content 里的文字是模型唯一能看到的失败信号，`Error:` 前缀是必须的，
+而任何指导语都不是。
+
+同时删除了从未被使用的死配置 `announce_tool_calls`。
+
 ### Changed — 彻底移除「裸 JSON 兜底」
 
 `parse_tool_calls` 原先默认把**不带 `<tool_call>` 标签**的裸 JSON 也当成工具

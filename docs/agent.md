@@ -163,7 +163,7 @@ def query_db(order_id: str) -> str:
 |---|---|
 | 提问里明确提到工具/参数 | 稳定调用 |
 | 一次给多个工具、问复合问题 | 能选对工具并分别调用 |
-| 工具失败（语法错等） | **会**把错误回给模型；加上显式重试指令后能自我修正 |
+| 工具失败（语法错等） | 把错误原文回给模型，由它自己决定怎么办 —— 框架不加任何指导 |
 | 提问很短、工具参数全可选 | **可能不调用**，转而向用户索要信息 |
 
 最后一条是最常见的失败模式。**框架不提供任何「强制调用」开关** —— 缓解只能
@@ -172,6 +172,39 @@ def query_db(order_id: str) -> str:
 * **把工具的 `description` 写具体**（说明「无需参数，可直接调用」之类）。
   实测这对模型的影响很大。
 * **在调用方自己的 system prompt 里写清期望**。框架不会替你加这类文字。
+
+### 工具失败：只陈述事实
+
+工具抛异常、参数不符 schema、工具名不存在、调用格式无法解析 —— 这四种情况
+由 agent 循环判定为失败（`ToolResult.ok = False`）并**把错误原文回给模型**，
+**不追加任何指导**。
+
+判定失败确实是 agent 循环的职责，这一点有参照实现佐证。DSH 的
+`dsh-agent-loop` 在工具失败时构造：
+
+```js
+{ content: [{ type: "text", text: "Error: tool call aborted before dispatch" }],
+  isError: true,
+  error: { message: "...", info: { name: "AbortError", code: ... } } }
+```
+
+即「事实 + 结构化元数据」，**没有一句「请重试」**。
+
+这一点很要紧：pi-ai 的 wire 转换（`dist/api/openai-completions.js`）里，
+
+```js
+const toolResultMsg = { role: "tool", content: sanitizeSurrogates(toolResultText),
+                        tool_call_id: toolMsg.toolCallId };
+```
+
+—— **`isError` 根本不发给模型**，它只是框架内部给 UI/会话记录用的元数据。
+所以模型判断「这是失败」的唯一依据就是 content 里的文字，那个 `Error:` 前缀
+（而非任何指导语）才是必须的部分。
+
+曾经在这里追加过「请修正参数后重新调用同一个工具；在拿到成功结果之前不要凭
+猜测作答」。实测那样确实能让小模型少编答案，但那属于**替调用方指挥模型** ——
+与 `force_tool_use` 同类，已移除。想让模型失败后重试，请写在调用方自己的
+system prompt 里。
 
 ### 为什么框架不写「你必须调用工具」
 

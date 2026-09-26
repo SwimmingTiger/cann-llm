@@ -241,7 +241,34 @@ class TestAgentLoop(unittest.TestCase):
         _, events = run(["<tool_call>胡说八道</tool_call>", "ok"], make_registry([]))
         done = [e for e in events if isinstance(e, ToolCallDone)][0]
         self.assertFalse(done.result.ok)
-        self.assertIn("无法解析", done.result.content)
+        self.assertIn("Error:", done.result.content)
+        self.assertIn("could not parse", done.result.content)
+
+    def test_failure_content_is_factual_only(self):
+        """失败内容只陈述事实，不追加任何指导 —— 依据 DSH 的做法。
+
+        DSH 的 dsh-agent-loop 在工具失败时构造
+          { content: "Error: tool call aborted before dispatch",
+            isError: true, error: {message, info:{name, code}} }
+        只有事实 + 结构化元数据，没有「请重试」之类的指导。
+
+        而且 pi-ai 的 wire 转换只发 content / tool_call_id —— isError 不发给
+        模型，所以 content 里的文字是模型唯一能看到的失败信号。
+        """
+        cases = [
+            ('<tool_call>{"name": "nope", "arguments": {}}</tool_call>', "no tool named"),
+            ('<tool_call>{"name": "echo", "arguments": {}}</tool_call>', "Error:"),
+            ('<tool_call>{"name": "broken", "arguments": {}}</tool_call>', "故意的"),
+            ("<tool_call>胡说八道</tool_call>", "could not parse"),
+        ]
+        for raw, expect in cases:
+            _, events = run([raw, "ok"], make_registry([]))
+            done = [e for e in events if isinstance(e, ToolCallDone)][0]
+            self.assertFalse(done.result.ok, raw)
+            self.assertIn(expect, done.result.content, raw)
+            # 不许出现任何指挥模型的话
+            for banned in ("请", "重新调用", "不要凭猜测", "must ", "should "):
+                self.assertNotIn(banned, done.result.content, f"{raw} → {banned}")
 
     def test_max_steps_forces_final_without_tools(self):
         calls = []

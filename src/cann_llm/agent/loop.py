@@ -183,8 +183,6 @@ class StreamFilter:
 class AgentConfig:
     #: 最多迭代几轮（含最后一轮强制收尾）
     max_steps: int = 4
-    #: 是否把工具调用过程也流给用户（作为提示，不含协议标记）
-    announce_tool_calls: bool = True
 
 
 # ------------------------------------------------------------------ 主循环
@@ -210,15 +208,12 @@ class AgentLoop:
 
         if not call.name:
             raw = call.arguments.get("__unparsable__", call.raw)
-            return (ToolResult(call.id, "", f"你上一条工具调用格式无法解析：{raw!r}。"
-                                            "请严格按 <tool_call>{\"name\": ..., "
-                                            "\"arguments\": {...}}</tool_call> 重新输出。",
+            return (ToolResult(call.id, "", f"Error: could not parse tool call: {raw!r}",
                                ok=False), 0.0)
         if tool is None:
             return (ToolResult(call.id, call.name,
-                               f"没有名为 {call.name!r} 的工具。可用工具："
-                               f"{', '.join(self.tools.names())}。"
-                               "请改用其中某个工具重新调用。", ok=False), 0.0)
+                               f"Error: no tool named {call.name!r}. Available: "
+                               f"{', '.join(self.tools.names())}", ok=False), 0.0)
 
         try:
             if tool.timeout_s:
@@ -229,20 +224,28 @@ class AgentLoop:
                 value, ensure_ascii=False, default=str)
             ok = True
         except (ToolError, PermissionError, KeyError) as e:
-            content, ok = f"工具调用失败：{e}", False
+            content, ok = f"Error: {e}", False
         except Exception as e:                    # noqa: BLE001 - 工具是外部代码
-            content, ok = f"工具执行异常：{type(e).__name__}: {e}", False
+            content, ok = f"Error: {type(e).__name__}: {e}", False
 
-        if not ok:
-            # 实测：小模型拿到"失败"后倾向于直接编一个答案，而不是重试。
-            # 显式要求它修正参数后重新调用，能显著改善。
-            content += ("\n请修正参数后重新调用同一个工具；"
-                        "在拿到成功结果之前不要凭猜测作答。")
-
-        # 工具返回多少就用多少，不截断。
-        # 截断既会让调用方拿不回自己工具返回的数据（这是数据销毁，不是
-        # 构造 prompt），又是在替调用方决定模型能看到多少信息。要控制就
-        # 由调用方自己在工具里分块/摘要。
+        # 失败时只陈述事实，**不追加任何指导**。
+        #
+        # 依据 DSH 的实现（dsh-agent-loop）：工具失败时它构造
+        #   { content: [{type:"text", text:"Error: tool call aborted before dispatch"}],
+        #     isError: true, error: {message, info:{name, code}} }
+        # 也就是「事实 + 结构化元数据」，没有一句「请重试」。
+        #
+        # 这一点很要紧：查过 pi-ai 的 wire 转换（dist/api/openai-completions.js），
+        # tool 消息只发 content / tool_call_id —— **isError 根本不发给模型**。
+        # 所以模型判断"这是失败"的唯一依据就是 content 里的文字，
+        # 那个 "Error:" 前缀（而非任何指导语）才是必须的部分。
+        #
+        # 曾经在这里追加过「请修正参数后重新调用同一个工具；在拿到成功结果之前
+        # 不要凭猜测作答」—— 实测那样确实能让小模型少编答案，但那属于替调用方
+        # 指挥模型，与 force_tool_use 同类，已移除。
+        #
+        # 工具返回多少就用多少，也不截断：截断既让调用方拿不回自己工具返回的
+        # 数据（数据销毁，不是构造 prompt），又替调用方决定了模型能看到多少。
         return ToolResult(call.id, call.name, content, ok=ok), (time.time() - t0) * 1000
 
     @staticmethod
