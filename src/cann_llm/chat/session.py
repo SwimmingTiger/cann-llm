@@ -15,7 +15,12 @@ from dataclasses import dataclass, field
 from typing import Iterator, List, Optional, Sequence
 
 from ..backends.base import EngineBackend
-from ..types import GenerationChunk, GenerationParams, GenerationRequest
+from ..types import (
+    GenerationChunk,
+    GenerationParams,
+    GenerationRequest,
+    GenerationStats,
+)
 from .template import ChatTemplate, Message, get_template
 
 
@@ -31,6 +36,11 @@ class ChatSession:
     max_prompt_tokens: int = 1800
 
     messages: List[Message] = field(default_factory=list)
+
+    #: 最近一轮的用量与耗时（由 ask() 填充）
+    last_stats: Optional[GenerationStats] = None
+    #: 最近一轮的结束原因（stop / length / error）
+    last_finish_reason: Optional[str] = None
 
     # ------------------------------------------------------------ 历史
 
@@ -83,6 +93,10 @@ class ChatSession:
             for chunk in self.backend.generate(GenerationRequest(prompt=prompt, params=params)):
                 if chunk.text:
                     collected.append(chunk.text)
+                if chunk.stats is not None:
+                    self.last_stats = chunk.stats
+                if chunk.finish_reason:
+                    self.last_finish_reason = chunk.finish_reason
                 yield chunk
         finally:
             self.messages.append(Message("assistant", "".join(collected)))
@@ -100,8 +114,6 @@ class ChatSession:
         return ""
 
     @property
-    def last_stats(self):
-        for m in reversed(self.messages):
-            del m
-            break
-        return getattr(self, "_stats", None)
+    def turn_count(self) -> int:
+        """已完成的问答轮数。"""
+        return sum(1 for m in self.messages if m.role == "user")
