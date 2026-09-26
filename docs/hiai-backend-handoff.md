@@ -529,3 +529,68 @@ GetOneTokenGeneration    —          GetOutputTokenCount   —
 3. `supports_streaming`：用 `SetOnSomeTokenGenerateDoneFunc` + 轮询 `GetDecodeNum` 实现
 4. CLI（`-b hiai`）与 HTTP 服务端到端验证
 5. 测试 + 提交（判据 #4/#5 收尾）
+
+---
+
+# ✅ 判据 #3 / #4 / #5 收尾（Round 91–93）
+
+## 判据 #3：CLI 与 HTTP 端到端 —— 达成 ✓
+
+```bash
+# CLI
+cann-llm chat -b hiai -d <模型目录> -p "def add(a, b): return a + b" --maxtok 60
+# → ```python\n#   def add(a, b):\n#       return a + b\n#   ``` ✓
+
+# HTTP（OpenAI 兼容）
+POST /v1/chat/completions
+{"model":"hiai","messages":[{"role":"user","content":"def add(a, b): return a + b"}],"max_tokens":60}
+# → {"object":"chat.completion","choices":[{"message":{"content":"The function `add(a, b)` takes two
+#    arguments...\n```python\nresult = add(3, 5)\nprint(result)  # Output: 8\n```"},
+#    "finish_reason":"stop"}],"usage":{"prompt_tokens":19,"completion_tokens":60,"total_tokens":79}} ✓
+```
+
+## 判据 #4：测试 —— 达成 ✓
+
+```
+pip install pytest            # 本机 brew python3 需要装（设备自带 python 均无 pytest）
+PYTHONPATH=src pytest -q      # → 184 passed in 8.41s ✓
+```
+
+## ★ 第三个关键修复：**绝不能在生成期间轮询 Context**
+
+症状：调用成功（内部执行入口返回 0），但随后 `libc++abi: Pure virtual function called!` → abort。
+
+原因：推理是**异步**的，在引擎工作线程运行期间从外部读 Context（哪怕只是
+`GetAllTokenGenerationLen`）会与工作线程**竞态**，导致虚表被破坏。
+
+修法：**完全由回调驱动** ——
+
+```python
+import threading
+ev_done, ev_fail = threading.Event(), threading.Event()
+CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+cb_done = CB(lambda _p: ev_done.set())        # 必须长期持有引用，勿被 GC
+cb_fail = CB(lambda _p: ev_fail.set())
+Context_SetOnAllTokensGenerateDoneFunc(ctx, cast(cb_done, c_void_p))
+Context_SetOnGenerateAsyncFailed(ctx, cast(cb_fail, c_void_p))
+
+run(exec, ctx, byref(vec))                     # 返回 0 后
+ev_done.wait(timeout=300)                      # ★ 等回调，【不要】轮询
+if ev_fail.is_set():
+    raise GenerationError("引擎报告生成失败")
+```
+
+## 另一处坑：`load()` 里不要预建 Context
+
+预建（`Context_CreateFromContextJson`）再建 Executor → **SIGTRAP**。
+正确顺序：**只调 `Executor_CreateFromJson`**；Context 每请求用 **`Context_Create()`（无参）** 新建。
+
+## 判据状态
+
+| # | 判据 | 状态 |
+|---|---|---|
+| 1 | 长 prompt / 中文 / 连续多次输出正确 | ✅ 达成 |
+| 2 | 流式 `supports_streaming = True` | ✗ **唯一剩余**（`SetOnSomeTokenGenerateDoneFunc` 已定位）|
+| 3 | CLI + HTTP 端到端 | ✅ 达成 |
+| 4 | 测试通过不回归（184 passed）| ✅ 达成 |
+| 5 | 提交到 git | ✅ 达成 |
