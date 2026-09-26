@@ -243,18 +243,18 @@ def _gen_failure_msg(rc, context_length: int) -> str:
       stat/open 在 *有权限* 与 *没权限* 的终端上都失败（errno 13），没有区分度。
       所以这里只能把权限列为**可能原因之一**，不断言。
     """
-    from ..enginelog import format_engine_errors, recent_engine_errors
+    from ..enginelog import format_engine_log, recent_engine_log
     head = (f"引擎 GenerateAsync 返回 {rc}" if rc is not None else "引擎报告生成失败")
     # ★ 拿到引擎日志就【只用它】—— 那四条"可能原因"是我没依据时的兜底，
     #   有引擎原话时再列出来只会分散注意力。读不到才退回兜底文案。
-    if recent_engine_errors():
-        return f"{head}。" + format_engine_errors()
+    if recent_engine_log():
+        return f"{head}。" + format_engine_log()
     return (f"{head}。\n"
             f"    · 输入超出 KV 缓存（{_ctx_desc(context_length)}）\n"
             f"    · 当前终端没有访问 NPU 的权限（换一个系统终端试试）\n"
             f"    · 含无法分词的字符\n"
             f"    · 引擎内部错误"
-            + format_engine_errors())
+            + format_engine_log())
 
 
 def _ctx_desc(n: int) -> str:

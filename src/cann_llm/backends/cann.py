@@ -84,11 +84,11 @@ from .base import EngineBackend, register_backend
 
 def _cann_log_suffix() -> str:
     """失败时附上引擎原话；有原话就不要再列"可能原因"。"""
-    from ..enginelog import format_engine_errors, recent_engine_errors
-    if recent_engine_errors():
-        return format_engine_errors()
+    from ..enginelog import format_engine_log, recent_engine_log
+    if recent_engine_log():
+        return format_engine_log()
     return ("\n    · 当前终端没有访问 NPU 的权限（换一个系统终端试试）"
-            + format_engine_errors())
+            + format_engine_log())
 
 
 def _ctx_desc(n: int) -> str:
