@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cann-llm"
+dynamic = ["version"]
+description = "华为 CANN LLM Engine 的对话与 OpenAI 兼容推理服务"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "cann-llm contributors" }]
+keywords = ["cann", "harmonyos", "npu", "llm", "openai", "qwen"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# 核心零第三方依赖：HTTP 层用 stdlib，保证在设备上开箱即用
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+# 想用 FastAPI 版 HTTP 层时再装（可选，非必需）
+fastapi = ["fastapi", "uvicorn"]
+
+[project.scripts]
+cann-llm-chat = "cann_llm.cli.chat:main"
+cann-llm-server = "cann_llm.api.server:main"
+
+[project.urls]
+Homepage = "https://example.invalid/cann-llm"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "cann_llm.version.__version__" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]

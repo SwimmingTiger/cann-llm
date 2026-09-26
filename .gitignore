@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 运行时产物
+.context.live.json
+*.log
+logs/
+
+# 模型资产（体积巨大，不入库）
+models/
+*.omc
+SubGraph_*.weight
+*.embedding_weights
+*.embedding_dequant_scale
+*.onnx
+*.pb
+*.gguf
+
+# 本地配置
+config.local.toml
+.env
