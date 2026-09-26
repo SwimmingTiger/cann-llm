@@ -34,12 +34,6 @@ _LINE = re.compile(
     r"^\s*\S+\s+\S+\s+(?P<pid>\d+)\s+(?P<tid>\d+)\s+(?P<lvl>[EWID])\s+"
     r"\S*/(?P<tag>[A-Z_]+):\s*(?P<body>.*)$")
 _QUOTED = re.compile(r'"([^"]{6,300})"')
-#: 只保留"看起来像失败"的消息，避免把一堆 is not in json file 也带上
-_NOISE = re.compile(
-    r"is not in json file|use mhc|use ndk|supported on this plat"
-    r"|io uring reader is init failed"          # load 阶段的 warning，与本次失败无关
-    r"|can not be used\."
-)
 
 
 def hilog_available() -> bool:
@@ -66,7 +60,7 @@ def describe_probe() -> str:
     return ""
 
 
-def recent_engine_errors(pid: Optional[int] = None, limit: int = 6,
+def recent_engine_errors(pid: Optional[int] = None, limit: int = 200,
                          timeout: float = 8.0) -> "Optional[List[str]]":
     """读 hilog 缓冲，返回本进程最近若干条**引擎报错**（已去掉引号外的装饰）。
 
@@ -93,16 +87,16 @@ def recent_engine_errors(pid: Optional[int] = None, limit: int = 6,
         if m.group("tag") not in _TAGS:
             continue
         body = m.group("body")
+        # ★ 暂不过滤任何消息：把本进程的所有引擎日志原样收下
         for q in _QUOTED.findall(body):
-            if _NOISE.search(q):
-                continue
-            # 去掉 <|...|> 之类无关字符，保留引擎原话
             if q not in msgs:
                 msgs.append(q)
+        if not _QUOTED.findall(body) and body.strip():
+            msgs.append(body.strip())
     return msgs[-limit:] if msgs else []
 
 
-def format_engine_errors(pid: Optional[int] = None, limit: int = 6) -> str:
+def format_engine_errors(pid: Optional[int] = None, limit: int = 200) -> str:
     """把引擎最近的报错整理成可直接拼进异常消息的文本（读不到时给一句原因）。"""
     got = recent_engine_errors(pid=pid, limit=limit)
     if got is None:
