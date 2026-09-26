@@ -99,32 +99,34 @@ class TestParser(unittest.TestCase):
         arr = '<tool_call>[{"name":"a","arguments":{"x":1}},{"name":"b","arguments":{}}]</tool_call>'
         self.assertEqual([c.name for c in parse_tool_calls(arr).tool_calls], ["a", "b"])
 
-    def test_bare_json_is_not_a_call_by_default(self):
+    def test_json_the_user_asked_for_is_untouched(self):
+        """用户明确要生成 JSON 代码时，绝不能把它当成工具调用删掉。"""
+        text = "\n".join([
+            "当然，这是一个 JSON-RPC 请求体：", "",
+            "```json",
+            '{"name": "getUserProfile", "arguments": {"userId": 42}}',
+            "```", "", "把它 POST 到 /rpc 即可。",
+        ])
+        r = parse_tool_calls(text)
+        self.assertEqual(r.tool_calls, [])
+        self.assertEqual(r.text, text)                    # 一字不动
+        self.assertIn("getUserProfile", r.text)           # 代码块内容还在
+
+    def test_bare_json_is_never_a_call(self):
         """模型没写标签就是没表达调用意图 —— 不替它认定。"""
-        text = '{"name": "echo", "arguments": {"s": "hi"}}'
-        r = parse_tool_calls(text)
-        self.assertEqual(r.tool_calls, [])
-        self.assertEqual(r.text, text)          # 正文一字不动
+        for text in ('{"name": "echo", "arguments": {"s": "hi"}}',
+                     'The tool takes {"name": "search", "arguments": {"q": "x"}} as input.'):
+            r = parse_tool_calls(text)
+            self.assertEqual(r.tool_calls, [], text)
+            self.assertEqual(r.text, text, text)
 
-    def test_bare_json_opt_in(self):
-        r = parse_tool_calls('{"name": "echo", "arguments": {"s": "hi"}}',
-                             allow_bare_json=True)
-        self.assertEqual(len(r.tool_calls), 1)
-
-    def test_bare_json_default_does_not_eat_prose(self):
-        """原先的默认行为会把回答里举例的 JSON 删掉、句子被挖空。"""
-        text = 'The tool takes {"name": "search", "arguments": {"q": "x"}} as input.'
-        r = parse_tool_calls(text)
-        self.assertEqual(r.tool_calls, [])
-        self.assertIn('"name": "search"', r.text)
-        self.assertEqual(r.text, text)
-
-    def test_opt_in_still_eats_prose(self):
-        """打开该选项确实会抹正文 —— 这就是它默认关闭的原因，行为如实记录。"""
-        text = 'The tool takes {"name": "search", "arguments": {"q": "x"}} as input.'
-        r = parse_tool_calls(text, allow_bare_json=True)
-        self.assertEqual(len(r.tool_calls), 1)
-        self.assertNotIn('"name": "search"', r.text)
+    def test_there_is_no_bare_json_switch(self):
+        """该「容错」已被彻底移除，不留开关。"""
+        import inspect
+        from cann_llm.agent import parser as pmod
+        src = inspect.getsource(pmod)
+        self.assertNotIn("allow_bare_json", src)
+        self.assertNotIn("extract_json_objects", src)
 
     def test_plain_text_and_plain_json_not_calls(self):
         self.assertFalse(parse_tool_calls("巴黎是法国的首都。").tool_calls)

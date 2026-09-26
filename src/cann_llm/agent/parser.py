@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..types import ToolCall
 
-__all__ = ["ParsedOutput", "parse_tool_calls", "extract_json_objects", "repair_json"]
+__all__ = ["ParsedOutput", "parse_tool_calls", "repair_json"]
 
 #: 匹配 <tool_call>…</tool_call>；闭标签可选（可能被截断）
 _BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
@@ -140,60 +140,23 @@ def _to_tool_call(obj: Any, raw: str) -> Optional[ToolCall]:
                     id=call_id or "", raw=raw.strip())
 
 
-def extract_json_objects(text: str) -> List[Tuple[str, Any]]:
-    """从文本里扫出所有顶层 JSON 对象（括号配对扫描，不用正则硬啃）。"""
-    out: List[Tuple[str, Any]] = []
-    depth = 0
-    start = -1
-    in_str = False
-    escape = False
-    for i, ch in enumerate(text):
-        if in_str:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    frag = text[start:i + 1]
-                    parsed = repair_json(frag)
-                    if parsed is not None:
-                        out.append((frag, parsed))
-                    start = -1
-    return out
+def parse_tool_calls(text: str) -> ParsedOutput:
+    """解析模型输出，只认 ``<tool_call>…</tool_call>`` 标签里的内容。
 
+    **不做「裸 JSON 容错」**。曾经尝试过：模型没写标签时，把形如
+    ``{"name": ..., "arguments": ...}`` 的 JSON 也当成工具调用。实测它会：
 
-def parse_tool_calls(text: str, *,
-                     allow_bare_json: bool = False) -> ParsedOutput:
-    """解析模型输出。
+    * 把用户**明确要求生成**的 JSON 代码当成调用，并从回答里删掉 ——
+      实测用户说"给我一个 JSON-RPC 请求体的例子"、模型给出
+      ` ```json {"name": "getUserProfile", "arguments": {...}} ``` `，
+      结果代码块被掏空成 ` ```json\n\n``` `；
+    * 把模型举例说明用的 JSON 从正文里抹掉，句子被挖空
+      （``The tool takes {"name": ...} as input.`` → ``The tool takes  as input.``）。
 
-    :param allow_bare_json: 是否把**没有 ``<tool_call>`` 标签**的裸 JSON
-        也当成工具调用（默认**关闭**）。
-
-        ⚠ 打开它有实实在在的误判代价，实测：
-
-        * ``调用格式是这样的：{"name": "w", "arguments": {...}}``
-          → 被判成调用，**且这段 JSON 会从正文里删掉**，用户看到的是被挖空的句子；
-        * ``The tool takes {"name": "search", "arguments": {...}} as input.``
-          → 同上，正文变成 ``The tool takes  as input.``。
-
-        即使输出恰好只有一个这种 JSON 对象也仍有歧义：用户问"给我一个函数调用
-        的 JSON 示例"时，模型产出的就是这个形状。
-
-        根因是它做了两件越权的事：在模型**没有表达调用意图**时替它认定意图，
-        并把模型写下的文本从输出里抹掉。模型忘记标签属于它自身的行为偏离，
-        推理框架应当如实呈现而不是替它补全 —— 所以默认关闭，要开请自行承担。
+    根因是它替模型认定了并不存在的调用意图，并把模型写下的文本从输出里删掉。
+    **模型忘记标签属于它自身的格式偏离**：推理框架应当如实呈现，由调用方决定
+    怎么办 —— 想让它稳定用标签，该改的是 prompt 里的格式说明，而不是在这里
+    猜。``<tool_call>`` 标签的存在本身就是"这是一个调用"的协议信号。
     """
     if not text:
         return ParsedOutput()
@@ -229,23 +192,6 @@ def parse_tool_calls(text: str, *,
             had_invalid = True
             calls.append(ToolCall(name="", arguments={"__unparsable__": inner},
                                   raw=inner))
-
-    # 裸 JSON 兜底：默认关闭，见 parse_tool_calls 的说明（会误判并抹掉正文）
-    if not calls and allow_bare_json:
-        for frag, obj in extract_json_objects(text):
-            tc = _to_tool_call(obj, frag)
-            if tc is None:
-                continue
-            # 必须同时有「名字」与「参数」形状才认为是调用
-            if not isinstance(obj, dict):
-                continue
-            if not (("arguments" in obj) or ("parameters" in obj)
-                    or isinstance(obj.get("function"), dict)):
-                continue
-            calls.append(tc)
-            i = text.find(frag)
-            if i >= 0:
-                consumed.append((i, i + len(frag)))
 
     # 去掉消费掉的片段，剩下的就是给用户看的话
     remaining = text
