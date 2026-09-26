@@ -7,6 +7,11 @@
 
 from .registry import Tool, ToolError, ToolRegistry, default_registry  # noqa: F401
 from .schema import SchemaError, validate  # noqa: F401
+from . import builtin  # noqa: F401  （下面的注册需要它）
 
 __all__ = ["Tool", "ToolRegistry", "ToolError", "default_registry",
            "SchemaError", "validate"]
+
+
+# 把内置工具装进进程级默认注册表
+builtin.register_into(default_registry())
