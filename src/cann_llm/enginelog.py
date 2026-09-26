@@ -78,8 +78,17 @@ def recent_engine_log(pid: Optional[int] = None,
         return None
     if proc.returncode != 0 and not proc.stdout:
         return None
+    # ★ 按 hilog 的【pid 字段】比较，不是子串匹配 ——
+    #   子串会把提到该 pid 的别的进程日志也捞进来，例如
+    #   "… 1723 2827 E utils_base: path (/proc/51255/status) to realpath error …"
+    #   行首三列是 日期 时间 PID，所以取第 3 列。
     key = str(pid)
-    return [ln for ln in proc.stdout.splitlines() if key in ln]
+    out: List[str] = []
+    for ln in proc.stdout.splitlines():
+        parts = ln.split(None, 4)
+        if len(parts) >= 3 and parts[2] == key:
+            out.append(ln)
+    return out
 
 
 def format_engine_log(pid: Optional[int] = None) -> str:
