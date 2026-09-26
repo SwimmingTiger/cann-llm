@@ -79,10 +79,6 @@ def interpreter_libc_conflict() -> Optional[str]:
     )
 
 
-#: executor.json 读不到 kv_cache_max_len 时的回退值。
-#: 真正的大小是**编译期**决定的（见 docs/cann-engine-notes.md 第 9 节），
-#: 这里只是给元信息展示用一个保守默认值，不参与任何限制判断。
-DEFAULT_CONTEXT_LEN = 2048
 from ..version import CANN_NDK_LIB
 from .base import EngineBackend, register_backend
 
