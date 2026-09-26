@@ -200,8 +200,6 @@ class _HiaiBindings:
             ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]),
         "HIAI_LLMEngine_Context_GetDecodeTimeMs": (
             ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]),
-        "HIAI_LLMEngine_Context_GetDecodeNum": (
-            ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_longlong)]),
         "HIAI_LLMEngine_Executor_CreateFromJson": (ctypes.c_void_p, [ctypes.c_char_p]),
         # 服务每个请求都会设这两个（见 libhm_model_engine_service 的符号引用）
         "HIAI_LLMEngine_Context_SetInitTokenLen": (ctypes.c_int, [ctypes.c_void_p, ctypes.c_int]),
