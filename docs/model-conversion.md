@@ -63,6 +63,27 @@ ONNX  +  外置的 embedding_weights / embedding_dequant_scale
 | **Python** | 3.10（本项目用 `venv310`，torch 2.4.0+cu121），需要 `onnx` / `onnxruntime` / `numpy` / `safetensors` |
 | **磁盘** | 至少 20 GB（ONNX + 权重 + 中间产物） |
 
+### 长任务一定要挂 `tmux`（或者 `nohup`）
+
+量化、导出、OMG 都是**几十分钟到几小时**的任务。如果你是 SSH 到转换机上跑，
+**连接一断（网络抖动、笔记本休眠、终端关掉），进程就会被一起杀掉** ——
+往往跑了一半才发现白跑，而且中间产物处于半成品状态，很难判断能不能复用。
+
+```bash
+# 起一个后台会话（detached），断线不影响
+tmux new-session -d -s build "bash build.sh > build.log 2>&1"
+
+# 随时回来看进度
+tmux ls                       # 有哪些会话
+tmux attach -t build          # 接回去看
+tail -f build.log             # 或者直接看日志
+```
+
+`tmux` 不在的话用 `nohup … &` 也能扛断线，但没有"接回去看现场"的能力。
+
+> 本项目的 `scripts/model-conversion/build_model.py` 会打印进度，建议把它的输出
+> 重定向到日志文件，这样即使挂了会话也能事后查。
+
 ### DDK 工具从哪下载
 
 **→ [开发准备（CANN Kit）](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/cannkit-preparations)**
