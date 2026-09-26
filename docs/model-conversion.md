@@ -623,8 +623,13 @@ Qwen2.5-1.5B 那条链路是**完全跑通并验证过**的（见第 6 节）。
 都是官方示例代码本身的问题，下面按踩到的顺序列出，脚本收在
 [`scripts/model-conversion/`](../scripts/model-conversion/)。
 
-> **状态说明**：Qwen3-4B 的量化 / 导出 / OMG / 装配都已跑通，模型也能在 NPU 上
-> **加载**，但 `Generate` 恒返回 1，**端到端尚未验证成功**。原因见坑 4。
+> **状态（已跑通）**：Qwen3-4B-Instruct-2507 已完整转换并在 NPU 上验证通过。
+> 实测：`The capital of France is` → `Paris.`、`What is the capital of Japan?` →
+> `The capital of Japan is Tokyo.`、80 token 长文本通顺、真流式逐 token；
+> 速度 2.5~4.1 tok/s（同设备上 Qwen2.5-1.5B 是 13.1 tok/s）。
+>
+> 关键约束见坑 4：**导出必须用 FP32**，因此转换机需要 **≥ 64 GB 内存**
+> （实测在 62 GB 的机器上通过，31 GB 的机器会确定性 OOM）。
 
 ### 坑 1 —— `export_model_single_qwen3.py` 的 dopt import 路径是错的
 
@@ -689,8 +694,16 @@ E/AI_NPUCL rope_llm_fusion_pass.cc CheckMul0(222)::mul0 weight size invalid 0 !=
 RoPE 融合 pass 完全匹配不上（FP16 会引入额外的 Cast，破坏模式匹配）→
 图里留下 kirinx90 执行不了的 RoPE → 引擎能加载模型，但 **`Generate` 恒返回 1**。
 
-**结论**：这一步**必须用 FP32**，且转换机需要 **≥ 64 GB 内存**（或换更小的模型）。
-本文测试机（31 GB）跑不完 4B 的 FP32 导出。
+**结论（已验证）**：这一步**必须用 FP32**，且转换机需要 **≥ 64 GB 内存**。
+
+实测对照（同一份 ONNX 配置，只改精度）：
+
+| 导出精度 | OMG 里的 RoPE 融合错误 | 引擎 `Generate` | 转换机内存 |
+|---|---|---|---|
+| FP32 | **0 条** | ✓ 正常出词（`Paris.`） | 需 > 31 GB（62 GB 机器实测通过） |
+| FP16 | **144 条**（36 层 × 4） | ✗ 恒返回 1 | 31 GB 够用但没用 |
+
+所以正确做法是**换一台大内存的机器**，而不是降精度。
 
 **同时可做的两个内存优化**（`patch_qwen3_export_mem.py` + 手工一处）：
 
@@ -704,6 +717,25 @@ RoPE 融合 pass 完全匹配不上（FP16 会引入额外的 Cast，破坏模�
 顺带确认：Qwen3 在 Q/K 上多出的 `q_norm` / `k_norm`（per-head RMSNorm）
 **OMG 能正常处理**（日志里可见 `SetWeightInfo, node: model.layers.N.self_attn.q_norm_3_0`），
 不是坑。
+
+### 坑 6 —— 换机器做 OMG 时缺 `/tmp/ld-linux-x86-64-2.35.so.2`
+
+`tools_omg/master/omg` 的 ELF 解释器被指定成了 **`/tmp/ld-linux-x86-64-2.35.so.2`**
+（不是标准的 `/lib64/ld-linux-x86-64.so.2`）。这是为设备侧 qemu 场景准备的，
+所以在设备/老机器上通常有个 `ln -snf` 建它（`to_omc.sh` 里就有这一步）。
+
+**换到一台干净的机器做 OMG 时，若忘了这个链接**，`master/omg` 会以
+`FileNotFoundError: .../master/omg` 的形式失败 —— **报的却是"文件不存在"，
+而文件其实在**（内核加载不了 ELF 解释器就是不报解释器缺失）。容易误判。
+
+**修法**：
+
+```bash
+ln -snf "$(readlink -f /lib64/ld-linux-x86-64.so.2)" /tmp/ld-linux-x86-64-2.35.so.2
+```
+
+若之后报 `libomg.so: cannot open shared object file`，那是 `LD_LIBRARY_PATH`
+没设（用本文第 4 节的脚本跑就正常）。
 
 ### 与 Qwen2.5-1.5B 的形状对照（生成 OMG 参数时要用）
 

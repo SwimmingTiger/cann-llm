@@ -127,6 +127,43 @@ if finish_reason == "length" and pending_calls:
 **彻底移除**（先改为默认关闭，随后连开关一并删掉），`extract_json_objects`
 也一并删除（只被它使用）。
 
+### Fixed — Qwen3-4B 端到端跑通：FP16 导出会被 RoPE 融合 pass 拒绝
+
+上面那条「端到端尚未成功」已解决。根因与修法如下。
+
+**根因**：`export_model_single_qwen3.py` 硬编码 FP32 导出，但在 31 GB 内存的机器上
+FP32 装不下 4B（确定性 OOM）。当时把精度改成 FP16 绕开 —— 导出能过、OMG 也能出
+`.omc`，但 OMG 日志里出现 **36 层 × 4 = 144 条**
+`rope_llm_fusion_pass.cc CheckMul0: mul0 weight size invalid 0 != 1`：
+FP16 引入的额外 Cast 破坏了 RoPE 的模式匹配，融合失败后图里留下 kirinx90 执行不了的
+RoPE，于是引擎**能加载模型但 `Generate` 恒返回 1**。
+
+**修法**：换一台大内存的机器跑 FP32 导出，而不是降精度。实测在 62 GB 的机器上：
+  - FP32 导出通过（437 秒，`.pb` 16.36 GB）
+  - OMG 的 RoPE 融合错误 **0 条**（对比 FP16 当时是 144 条）
+  - 模型在 NPU 上**正常出词**
+
+**Qwen3-4B 实测结果**（设备侧）：
+  `The capital of France is` -> `Paris.`
+  `What is the capital of Japan?` -> `The capital of Japan is Tokyo.`
+  `1+1=` -> `1 + 1 = 2.`
+  80 token 长文本通顺；真流式逐 token；2.5~4.1 tok/s
+  （同设备 Qwen2.5-1.5B 为 13.1 tok/s）
+
+顺带踩到并记录的第 6 个坑：`tools_omg/master/omg` 的 ELF 解释器被指到
+`/tmp/ld-linux-x86-64-2.35.so.2`，换到干净机器做 OMG 时忘了建这个链接会以
+`FileNotFoundError: .../master/omg` 的形式失败（文件其实在），极易误判。
+
+**跨机协作分工**（本次实际用的）：
+  - 量化要 8 GB 显存 -> RTX 3080 Ti（12 GB）那台
+  - FP32 导出要 >31 GB 内存 -> 62 GB 那台
+  - OMG 纯 CPU -> 随便哪台
+  两台的目录保持同一个绝对路径，脚本里的绝对路径就不用改；
+  唯一要补的是 venv 的 `bin/python` 符号链接和上面那个 ld.so 链接。
+
+文档：`docs/model-conversion.md` 附录 D 的状态说明改为「已跑通」，坑 4 补上
+FP32/FP16 的实测对照表，新增坑 6。
+
 ### Added — Qwen3 系列的转换坑（实测）+ 两个新工具
 
 尝试把链路从 Qwen2.5-1.5B 扩展到 **Qwen3-4B-Instruct-2507**，一路踩到 5 个官方示例代码
