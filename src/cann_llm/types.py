@@ -145,6 +145,47 @@ def aggregate(chunks: Iterator[GenerationChunk], stats: GenerationStats | None =
 
 
 @dataclass(frozen=True)
+class ToolCall:
+    """模型请求的一次工具调用。
+
+    ``id`` 由本服务生成（模型的输出里没有 id），用于把 tool 结果与请求对应起来。
+    """
+
+    name: str
+    arguments: dict = field(default_factory=dict)
+    id: str = ""
+    #: 模型原始输出片段，出问题时便于排查
+    raw: str = ""
+
+    def to_openai(self) -> dict:
+        """转成 OpenAI ``message.tool_calls`` 的条目。"""
+        import json as _json
+
+        return {
+            "id": self.id or "call_0",
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "arguments": _json.dumps(self.arguments, ensure_ascii=False),
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """一次工具调用的结果。``ok=False`` 时内容里是错误说明。"""
+
+    tool_call_id: str
+    name: str
+    content: str
+    ok: bool = True
+
+    def to_openai(self) -> dict:
+        return {"role": "tool", "tool_call_id": self.tool_call_id,
+                "name": self.name, "content": self.content}
+
+
+@dataclass(frozen=True)
 class ModelInfo:
     """后端对外声明的模型元信息，用于 /v1/models 与日志。"""
 
