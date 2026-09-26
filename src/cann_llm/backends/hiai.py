@@ -191,6 +191,17 @@ class _HiaiBindings:
             ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]),
         "HIAI_LLMEngine_Context_GetOutputTokenCount": (
             ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]),
+        # ★ 耗时/计数：反编译实锤都是「(ctx, T* out)」形式，返回 0 表示 ok。
+        #   注意时间是 **double（8 字节）** —— 曾经用 c_float 去读，只拿到低 4 字节，
+        #   显示成 0.000（小端下小值低位近 0），误以为签名不对。
+        "HIAI_LLMEngine_Context_GetTotalTimeMs": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]),
+        "HIAI_LLMEngine_Context_GetPrefillTimeMs": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]),
+        "HIAI_LLMEngine_Context_GetDecodeTimeMs": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]),
+        "HIAI_LLMEngine_Context_GetDecodeNum": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_longlong)]),
         "HIAI_LLMEngine_Executor_CreateFromJson": (ctypes.c_void_p, [ctypes.c_char_p]),
         # 服务每个请求都会设这两个（见 libhm_model_engine_service 的符号引用）
         "HIAI_LLMEngine_Context_SetInitTokenLen": (ctypes.c_int, [ctypes.c_void_p, ctypes.c_int]),
@@ -515,8 +526,21 @@ class HiaiBackend(EngineBackend):
                 self._ctx, ctypes.byref(n)) == 0:
             pout = n.value
         # tokens_per_second 是导出属性（由 decode_ms 算），不能传
+        def _d(fn):
+            v = ctypes.c_double(0.0)
+            try:
+                fn(self._ctx, ctypes.byref(v))
+            except Exception:      # noqa: BLE001
+                pass
+            return float(v.value)
+
+        lib = self._bind.lib
+        pre = _d(lib.HIAI_LLMEngine_Context_GetPrefillTimeMs)
+        dec = _d(lib.HIAI_LLMEngine_Context_GetDecodeTimeMs)
+        tot = _d(lib.HIAI_LLMEngine_Context_GetTotalTimeMs)
         return GenerationStats(prompt_tokens=pin or 0,
-                               completion_tokens=pout or 0)
+                               completion_tokens=pout or 0,
+                               prefill_ms=pre, decode_ms=dec, total_ms=tot)
 
     def count_prompt_tokens(self, text: str) -> int:
         # 内部引擎没有单独的分词接口；交给引擎在 Generate 时统计
