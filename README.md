@@ -45,6 +45,10 @@ pip install -e .            # 提供 cann-llm-chat / cann-llm-server 两个命�
 scripts/start_chat.sh -d /path/to/model_dir
 scripts/start_chat.sh -d /path/to/model_dir -p "你好"          # 单轮
 
+# 2.5) 工具调用（agent）
+scripts/start_chat.sh -d /path/to/model_dir --tools all      # 启用内置工具
+python3 -m cann_llm.cli.chat --list-tools                    # 看有哪些工具
+
 # 3) OpenAI 兼容推理服务 —— 一键脚本
 scripts/start_server.sh -d /path/to/model_dir                 # 前台
 scripts/start_server.sh -d /path/to/model_dir -b              # 后台，等就绪后返回
@@ -78,12 +82,41 @@ make server MODEL=/path/to/model_dir PORT=8000
 `start_server.sh` 启动前会做预检：Python 版本、NDK 库、模型目录完整性、
 端口占用；后台模式还会轮询 `/healthz` 等到就绪才返回。
 
+## 工具调用（agent）
+
+本服务支持 **prompt-based function calling**：模型用 Qwen 官方格式
+`<tool_call>{...}</tool_call>` 表达调用意图，服务端解析、执行、把结果回填，
+再让模型作答。详见 **[docs/agent.md](docs/agent.md)**。
+
+```bash
+# CLI
+scripts/start_chat.sh -d /path/to/model_dir --tools all
+you> 帮我算一下 (23*7+11)/4
+  → 调用 calculator({'expression': '(23*7+11)/4'})
+    ✓ 0ms  {"expression": "(23*7+11)/4", "result": 43.0}
+bot> 计算结果是 43.0。
+
+# HTTP：客户端声明工具，服务端自动执行（agent 模式）
+curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages": [{"role": "user", "content": "现在几点？"}],
+  "tools": [{"type": "function", "function": {"name": "get_current_time",
+             "description": "获取当前日期与时间。",
+             "parameters": {"type": "object", "properties": {}}}}]}'
+```
+
+内置工具：`get_current_time`、`calculator`（默认启用）、`http_get`（带 SSRF
+防护，标记 `dangerous` 需显式开启）。**框架刻意不内置 shell / 文件读写工具** ——
+要加请自行注册并评估风险。加工具只需一个装饰器，见 docs/agent.md。
+
+若客户端声明的工具本服务没有，则按 **OpenAI 标准**返回 `tool_calls` 交给
+客户端自己执行（两种语义都支持，由 `server.agent_tools` 切换）。
+
 ## 项目结构
 
 ```
 scripts/
 ├── start_server.sh   一键启动推理服务（预检 + 前台/后台 + status/stop）
-├── start_chat.sh     一键启动交互式对话
+├── start_chat.sh     一键启动交互式对话（支持 --tools）
 └── stream_check.py   流式输出自检
 
 src/cann_llm/

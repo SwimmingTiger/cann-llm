@@ -38,6 +38,21 @@
 - `Makefile`、`examples/config.example.toml`
 - `docs/architecture.md`、`docs/cann-engine-notes.md`、`docs/openai-api.md`
 
+### Added — Agent（工具调用）
+
+- **prompt-based function calling**：模型用 Qwen 官方格式
+  `<tool_call>{...}</tool_call>` 表达调用，服务端解析、执行、回填
+  `<tool_response>`，循环至给出最终回答
+- `tools/`：零依赖的 JSON Schema 子集校验器、工具注册表（`dangerous` 门禁）、
+  内置工具（`get_current_time` / `calculator` / `http_get` 带 SSRF 防护）
+- `agent/parser.py`：容错的 tool_call 解析（12 种畸形输出）
+- `agent/loop.py`：agent 循环 + `StreamFilter`（流式时隐藏工具协议标记）
+- API 两种语义：服务端执行（agent 模式，带 `x_agent` 轨迹）与
+  客户端执行（OpenAI 标准 `tool_calls`），由 `server.agent_tools` 切换
+- CLI：`--tools all|<名字>`、`--list-tools`、`/tools` 命令、调用过程可视化
+- `server.agent_max_steps`（默认 4）、`AgentConfig.force_tool_use`（默认开）
+- 文档 `docs/agent.md`
+
 ### Changed
 
 - **不支持的字段改为默认「接受但忽略」**（原为一律 400）。

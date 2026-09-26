@@ -9,7 +9,7 @@ model_dir = "/storage/Users/currentUser/work/llm/models/rebuilt"
 model_id  = "qwen2.5-1.5b"
 backend   = "cann"
 chat_template = "chatml"
-system_prompt = "You are a helpful assistant."
+system_prompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 
 max_tokens = 256
 temperature = 0.7
@@ -32,3 +32,11 @@ cors_allow_origin = "*"
 # False（默认）= 忽略并在响应头 X-Cann-Llm-Ignored-Fields 回报
 # 默认宽容是有意的：多数客户端即使普通聊天也会带 tools，一律报错会让它们用不了。
 # reject_unsupported = false
+
+# 工具执行模式：
+#   "auto"（默认）客户端声明的工具若本服务已注册就由服务端执行（服务端即 agent），
+#                  否则按 OpenAI 标准把 tool_calls 返回给客户端自行执行
+#   "off"         永远按 OpenAI 标准返回 tool_calls
+#   "on"          永远由服务端执行（未注册的工具会作为错误回给模型）
+# agent_tools = "auto"
+# agent_max_steps = 4    # agent 循环最多几轮
