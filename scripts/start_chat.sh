@@ -113,14 +113,6 @@ if [[ -d /data/service/hnp/bin ]]; then
 fi
 
 resolve_python
-# 引擎库按【后端】选：两个后端用的是不同的库，检查/提示/导出都要对应
-if [[ "$BACKEND" == "cann" ]]; then
-    ENGINE_LIB="${CANN_LLM_LIB:-/system/lib64/ndk/libcann_llm_engine.so}"
-    ENGINE_KIND="cann NDK 库"
-else
-    ENGINE_LIB="${CANN_LLM_HIAI_LIB:-/system/lib64/libhiai_llm_engine.so}"
-    ENGINE_KIND="hiai 引擎"
-fi
 
 usage() {
     sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -161,6 +153,15 @@ while [[ $# -gt 0 ]]; do
         *) PASSTHRU+=("$1"); shift ;;
     esac
 done
+
+# 引擎库按【后端】选：两个后端用的是不同的库，检查/提示/导出都要对应
+if [[ "$BACKEND" == "cann" ]]; then
+    ENGINE_LIB="${CANN_LLM_LIB:-/system/lib64/ndk/libcann_llm_engine.so}"
+    ENGINE_KIND="cann NDK 库"
+else
+    ENGINE_LIB="${CANN_LLM_HIAI_LIB:-/system/lib64/libhiai_llm_engine.so}"
+    ENGINE_KIND="hiai 引擎"
+fi
 
 command -v "$PY" >/dev/null 2>&1 || die "找不到 $PY；可用 PYTHON=/path/to/python3 指定"
 
