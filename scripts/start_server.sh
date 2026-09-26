@@ -38,7 +38,13 @@ except OSError:
 raise SystemExit(1 if "libmusl_compat" in maps else 0)' 2>/dev/null
 }
 
-# 找解释器：显式 PYTHON 优先；否则按候选顺序取第一个存在的，再逐个验 libc
+# 找解释器：显式 PYTHON 优先；否则按候选顺序，把每个候选在 PATH 里的
+# 【所有同名项】都试一遍，取第一个与引擎 libc 兼容的。
+#
+# ★ 必须全枚举 PATH，不能只用 command -v —— 它只看第一个。用户自己的 python3
+#   往往排在前面且是 glibc 构建（不兼容），而兼容的那个（hnp 的）在 PATH 末尾；
+#   只取第一个的话，把 hnp 追加到 PATH 末尾就毫无意义。
+#   （这里不用管道把结果带出来：管道会开子 shell，PY 赋值带不回来。）
 PY=""
 if [ -n "${PYTHON:-}" ]; then
     command -v "$PYTHON" >/dev/null 2>&1 || {
@@ -49,14 +55,21 @@ if [ -n "${PYTHON:-}" ]; then
 else
     first=""
     for cand in ${CANN_LLM_PYTHON_CANDIDATES:-python3 python}; do
-        full=$(command -v "$cand" 2>/dev/null || true)
-        [ -n "$full" ] || continue
-        [ -n "$first" ] || first="$full"
-        if libc_ok "$full"; then
-            PY="$full"
-            break
-        fi
-        printf '\033[33m!\033[0m 跳过 %s：glibc 构建（带 libmusl_compat 垫片），与按 musl 编译的引擎不兼容\n' "$full" >&2
+        _oldifs=$IFS
+        IFS=:
+        for _d in $PATH; do
+            [ -n "$_d" ] || continue
+            [ -x "$_d/$cand" ] || continue
+            full="$_d/$cand"
+            [ -n "$first" ] || first="$full"
+            if libc_ok "$full"; then
+                PY="$full"
+                break
+            fi
+            printf '\033[33m!\033[0m 跳过 %s：glibc 构建（带 libmusl_compat 垫片），与按 musl 编译的引擎不兼容\n' "$full" >&2
+        done
+        IFS=$_oldifs
+        [ -n "$PY" ] && break
     done
     [ -n "$PY" ] || PY="${first:-python3}"
 fi
