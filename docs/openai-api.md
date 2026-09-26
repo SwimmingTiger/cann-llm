@@ -163,3 +163,61 @@ data: [DONE]
 4. **不支持函数调用、多模态、logprobs**（引擎无对应能力）。
 5. **没有 `/v1/embeddings`**。模型未导出 embedding 接口。
    将来要加时，在 `EngineBackend` 上扩一个方法即可。
+
+
+## 排错
+
+### `base_url` 该填什么？
+
+**只到 `/v1`**，不要带端点路径：
+
+```python
+# ✓ 正确
+OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="...")
+
+# ✗ 错误：SDK 会在后面拼 /models、/chat/completions
+OpenAI(base_url="http://127.0.0.1:8000/v1/chat/completions")
+OpenAI(base_url="http://127.0.0.1:8000/chat/completions")        # 少了 /v1
+OpenAI(base_url="http://127.0.0.1:8000")                        # 少了 /v1
+```
+
+填错时服务端会返回带提示的 404，例如：
+
+```
+GET /v1/chat/completions/models  → 404
+未知路径 /v1/chat/completions/models。
+路径 /v1/chat/completions/models 看起来是把端点路径拼进了 base_url。
+OpenAI 客户端的 base_url 只应到 /v1，例如 http://127.0.0.1:8000/v1
+—— 不要带上 /chat/completions 之类的端点路径。
+```
+
+### 直接用浏览器打开根路径
+
+`GET /` 会返回一个小索引，列出全部端点并重复 base_url 的说明：
+
+```json
+{
+  "service": "cann-llm",
+  "endpoints": {
+    "GET /v1/models": "列出模型",
+    "POST /v1/chat/completions": "对话补全（支持 stream）",
+    "POST /v1/completions": "文本补全（支持 stream）",
+    "GET /healthz": "健康检查"
+  },
+  "note": "OpenAI 客户端的 base_url 只应到 /v1，例如 http://127.0.0.1:8000/v1 …"
+}
+```
+
+### 常见状态码速查
+
+| 看到 | 多半是 |
+|---|---|
+| `404 未知路径 …/v1/chat/completions/models` | base_url 带上了端点路径 |
+| `404 未知路径 /chat/completions` | base_url 少了 `/v1` |
+| `405 GET 不被 /v1/chat/completions 支持` | 用错了 HTTP 方法（端点是 POST）；响应头有 `Allow` |
+| `401 invalid_api_key` | 服务端开了 `api_key`，但请求没带 `Authorization: Bearer` |
+| `503 server_busy` | 并发超过 `server.max_queue`（引擎一次只跑一路），稍后重试 |
+| `400 invalid_request_error` | 参数问题，`error.message` 里有具体原因 |
+| `503 backend_unavailable` | 不在鸿蒙环境 / 找不到 NDK 库 |
+
+服务端日志里也会带上同样的提示（404/405 会打印原因），方便对着日志排查。

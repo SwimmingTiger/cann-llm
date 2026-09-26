@@ -39,6 +39,24 @@ from . import openai as oa
 #: 请求体上限（防止误发大文件把内存打满）
 MAX_BODY_BYTES = 4 * 1024 * 1024
 
+#: 路由表：路径 -> 允许的方法
+ROUTES: Dict[str, Tuple[str, ...]] = {
+    "/": ("GET",),
+    "/healthz": ("GET",),
+    "/health": ("GET",),
+    "/v1/models": ("GET",),
+    "/v1/chat/completions": ("POST",),
+    "/v1/completions": ("POST",),
+}
+
+#: 这些子路径常被误当成 base_url，404 时给出针对性提示
+_ENDPOINT_LIKE = ("/v1/chat/completions", "/v1/completions", "/v1/models")
+
+BASE_URL_HINT = (
+    "OpenAI 客户端的 base_url 只应到 /v1，例如 "
+    "http://127.0.0.1:{port}/v1 —— 不要带上 /chat/completions 之类的端点路径。"
+)
+
 
 @dataclass
 class AppState:
@@ -92,6 +110,10 @@ class Handler(BaseHTTPRequestHandler):
     def state(self) -> AppState:
         return self.server.state          # type: ignore[attr-defined]
 
+    def _path(self) -> str:
+        """取归一化后的路径（去掉查询串与结尾斜杠）。"""
+        return urlparse(self.path).path.rstrip("/") or "/"
+
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
@@ -142,6 +164,41 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
+    # ---- 路由错误提示 ----
+    def _hint_for(self, path: str) -> Optional[str]:
+        """对常见误用给出针对性提示（而不是干巴巴一句 404）。"""
+        base = BASE_URL_HINT.format(port=self.state.cfg.server.port)
+        # 把端点路径拼进了 base_url，例如 /v1/chat/completions/models
+        for ep in _ENDPOINT_LIKE:
+            if path != ep and ep in path:
+                return f"路径 {path} 看起来是把端点路径拼进了 base_url。" + base
+        # 少了或多了一层 /v1
+        if path in ("/v1", "/chat/completions", "/completions", "/models"):
+            return "base_url 的路径部分应为 /v1。" + base
+        if path.startswith("/v1/"):
+            return ("本服务提供的路径：GET /v1/models、POST /v1/chat/completions、"
+                    "POST /v1/completions、GET /healthz。")
+        return None
+
+    def _not_found(self, path: str) -> None:
+        hint = self._hint_for(path)
+        self.log_message("404 %s %s%s", self.command, path,
+                         f"  —— {hint}" if hint else "")
+        self._send_error_json(404, f"未知路径 {path}" + (f"。{hint}" if hint else ""),
+                              "not_found")
+
+    def _method_not_allowed(self, path: str, allowed: Tuple[str, ...]) -> None:
+        self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
+        self.send_header("Allow", ", ".join(allowed))
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        body = json.dumps(oa.error_payload(
+            f"{self.command} 不被 {path} 支持；允许的方法：{', '.join(allowed)}",
+            err_type="method_not_allowed"), ensure_ascii=False).encode()
+        self.send_header("Content-Length", str(len(body)))
+        self._cors()
+        self.end_headers()
+        self.wfile.write(body)
+
     def _cors(self) -> None:
         origin = self.state.cfg.server.cors_allow_origin
         if origin:
@@ -189,7 +246,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:                # noqa: N802
-        path = urlparse(self.path).path.rstrip("/") or "/"
+        path = self._path()
         if path in ("/healthz", "/health"):
             st = self.state
             self._send_json(200, {
@@ -200,18 +257,38 @@ class Handler(BaseHTTPRequestHandler):
                 "version": version.__version__,
             })
             return
+        if path == "/":
+            self._send_json(200, {
+                "service": "cann-llm",
+                "version": version.__version__,
+                "model": self.state.cfg.model.model_id,
+                "endpoints": {
+                    "GET /v1/models": "列出模型",
+                    "POST /v1/chat/completions": "对话补全（支持 stream）",
+                    "POST /v1/completions": "文本补全（支持 stream）",
+                    "GET /healthz": "健康检查",
+                },
+                "note": BASE_URL_HINT.format(port=self.state.cfg.server.port),
+            })
+            return
         if path == "/v1/models":
             if not self._authorized():
                 self._send_error_json(401, "鉴权失败", "invalid_api_key")
                 return
             self._send_json(200, oa.models_response([self.state.cfg.model.model_id]))
             return
-        self._send_error_json(404, f"未知路径 {path}", "not_found")
+        if path in ROUTES:
+            self._method_not_allowed(path, ROUTES[path])
+            return
+        self._not_found(path)
 
     def do_POST(self) -> None:               # noqa: N802
-        path = urlparse(self.path).path.rstrip("/") or "/"
+        path = self._path()
         if path not in ("/v1/chat/completions", "/v1/completions"):
-            self._send_error_json(404, f"未知路径 {path}", "not_found")
+            if path in ROUTES:
+                self._method_not_allowed(path, ROUTES[path])
+            else:
+                self._not_found(path)
             return
         if not self._authorized():
             self._send_error_json(401, "鉴权失败", "invalid_api_key")

@@ -217,5 +217,75 @@ class TestBusy(unittest.TestCase):
         httpd.server_close()
 
 
+
+
+class TestRoutingHelpfulness(unittest.TestCase):
+    """路由误用要给出可操作的提示，而不是干巴巴 404。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd, cls.base = _start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def _err_message(self, method, path):
+        req = urllib.request.Request(self.base + path, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, ""
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode())["error"]["message"]
+
+    def test_base_url_with_endpoint_appended(self):
+        """用户实际遇到的：base_url 写成了 .../v1/chat/completions。"""
+        status, msg = self._err_message("GET", "/v1/chat/completions/models")
+        self.assertEqual(status, 404)
+        self.assertIn("base_url", msg)
+        self.assertIn("/v1", msg)
+
+    def test_missing_v1_prefix(self):
+        status, msg = self._err_message("GET", "/chat/completions")
+        self.assertEqual(status, 404)
+        self.assertIn("base_url", msg)
+
+    def test_unknown_v1_subpath_lists_endpoints(self):
+        status, msg = self._err_message("GET", "/v1/bogus")
+        self.assertEqual(status, 404)
+        self.assertIn("/v1/chat/completions", msg)
+
+    def test_get_on_post_endpoint_is_405_with_allow(self):
+        req = urllib.request.Request(self.base + "/v1/chat/completions", method="GET")
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req, timeout=10)
+        self.assertEqual(cm.exception.code, 405)
+        self.assertIn("POST", cm.exception.headers.get("Allow", ""))
+        body = json.loads(cm.exception.read().decode())
+        self.assertEqual(body["error"]["type"], "method_not_allowed")
+
+    def test_post_on_get_endpoint_is_405(self):
+        req = urllib.request.Request(self.base + "/v1/models", method="POST", data=b"{}",
+                                     headers={"Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req, timeout=10)
+        self.assertEqual(cm.exception.code, 405)
+        self.assertIn("GET", cm.exception.headers.get("Allow", ""))
+
+    def test_index_lists_endpoints(self):
+        status, body = _get(self.base + "/")
+        self.assertEqual(status, 200)
+        d = json.loads(body)
+        # endpoints 的 key 形如 "POST /v1/chat/completions"
+        self.assertTrue(any("/v1/chat/completions" in k for k in d["endpoints"]))
+        self.assertTrue(any("/v1/models" in k for k in d["endpoints"]))
+        self.assertIn("base_url", d["note"])
+
+    def test_trailing_slash_is_tolerated(self):
+        status, _ = _get(self.base + "/v1/models/")
+        self.assertEqual(status, 200)
+
+
 if __name__ == "__main__":
     unittest.main()
