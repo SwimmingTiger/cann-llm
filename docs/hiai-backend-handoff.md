@@ -625,3 +625,74 @@ if ev_fail.is_set():
   从**外部**轮询 Context 已验证会导致 `libc++abi Pure virtual function call` abort（见上文），
   所以这条路需要重新设计（例如让回调把 token 数写进一块 `ctypes` 预分配内存，
   由生成器只读那块内存，不碰 Context）
+
+---
+
+# 🎉 全部判据达成（Round 94–96）：流式已打通
+
+## 判据 #2（流式）—— 达成 ✓
+
+| 入口 | 实测 |
+|---|---|
+| 后端 `supports_streaming` | **True** ✓ |
+| 后端 `generate()` | **30 token → 30 个分片**，约 60 ms/片，零崩溃 ✓ |
+| CLI（默认即流式）| 短 prompt / 中文 prompt 均退出码 0，逐字输出 ✓ |
+| HTTP `stream: true`（SSE）| **56 行 `data: {...chat.completion.chunk...}` + `data: [DONE]`** ✓ |
+
+## ★★ 之前多次 segfault 的【真正根因】——两个，缺一不可
+
+### 根因 1：`_HiaiBindings` 缺少这两个函数的 `argtypes`
+
+```python
+"HIAI_LLMEngine_Context_SetOnSomeTokenGenerateDoneFunc": (c_int, [c_void_p, c_void_p]),
+"HIAI_LLMEngine_Context_GetOneTokenGeneration":         (c_int, [c_void_p, c_char_p, c_int]),
+```
+
+只补上这两行，**问题就从"必崩"变成"完全不崩"** —— 这是本次定位的关键
+（定位手段：用"后端 `load()` + 独立脚本自设 argtypes"做二分，一次命中）。
+
+### 根因 2：回调里**不能触碰 `self`**
+
+引擎工作线程上访问 Python 对象的属性会 segfault。回调必须**只闭包局部名**：
+
+```python
+_acc: list = []
+_one_fn = self._bind.lib.HIAI_LLMEngine_Context_GetOneTokenGeneration   # 先取到局部
+_byref, _cast, _i32, _cp = ctypes.byref, ctypes.cast, ctypes.c_int32, ctypes.c_char_p
+
+def _on_some(p: object) -> None:          # 只用 _one_fn / _acc / _byref …，不碰 self
+    try:
+        _v = _i32(0)
+        if _one_fn(p, _cast(_byref(_v), _cp), 4) == 0:
+            _acc.append(int(_v.value))
+    except Exception:
+        pass
+```
+
+## 流式的完整正确形态（已验证）
+
+```
+回调（引擎工作线程）          主线程（生成器）
+─────────────────────        ──────────────────────────────
+GetOneTokenGeneration(p)  →  _acc.append(id)
+                             轮询 len(_acc) 变大
+                             → decode(全量 id) → 与已发出文本 diff
+                             → yield GenerationChunk(text=增量)
+                             （OnAllTokensDone 后补最后一次 + finish_reason="stop"）
+```
+
+### 三条实测禁忌（都会 segfault 或 abort）
+
+1. 回调里用 **`GetAllTokenGeneration`**（全量拷贝 → 重入引擎）✗
+2. 回调里**解码** / 用 **`queue.put`** / 触碰 **`self`** ✗
+3. 生成期间**从外部读 Context**（与工作线程竞态 → `libc++abi Pure virtual function called!`）✗
+
+## 判据总表（全部达成）
+
+| # | 判据 | 状态 |
+|---|---|---|
+| 1 | 长 prompt / 中文 / 连续多次输出正确，`in=1` 与 `ampie` 消失 | ✅ |
+| 2 | 流式 `supports_streaming = True`（后端 + CLI + HTTP/SSE）| ✅ |
+| 3 | CLI + HTTP 端到端（含 OpenAI 兼容流式响应）| ✅ |
+| 4 | 测试通过不回归（**184 passed**）| ✅ |
+| 5 | 提交到 git | ✅ |
