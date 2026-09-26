@@ -459,7 +459,7 @@ class CannNdkBackend(EngineBackend):
             # 如实报告引擎的返回码，不替它断言原因 —— 我们无法区分到底是
             # 输入超长、含无法分词的字符，还是引擎内部错误。列出可能性即可。
             raise GenerationError(
-                f"引擎出错（返回码 {status}，它不区分具体原因），"
+                f"引擎 Generate 返回 {status}。无法从返回码判断具体原因，"
                 f"常见可能：输入超出 KV 缓存（{_ctx_desc(self.context_length)}）、"
                 f"含无法分词的字符、引擎内部错误。"
                 + _cann_log_suffix())

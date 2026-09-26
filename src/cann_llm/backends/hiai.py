@@ -249,7 +249,9 @@ def _gen_failure_msg(rc, context_length: int) -> str:
     #   · 不提 GenerateAsync 的返回码 —— 实测它成功失败都是 0，没有信息量；
     #   · 不说"生成失败" —— CLI 的前缀（"生成失败: " / "[失败] "）已经说了，
     #     异常消息里只保留【引擎侧】的事实。
-    head = "引擎出错"
+    # ★ 不做翻译：直接给引擎的返回码与回调名，具体原因看下面的原始日志
+    head = (f"GenerateAsync 返回 {rc}" if rc is not None
+            else "GenerateAsync 失败回调被触发")
     # ★ 拿到引擎日志就【只用它】—— 那四条"可能原因"是我没依据时的兜底，
     #   有引擎原话时再列出来只会分散注意力。读不到才退回兜底文案。
     if recent_engine_log():

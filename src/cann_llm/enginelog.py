@@ -28,6 +28,10 @@ from typing import List, Optional
 __all__ = ["recent_engine_log", "hilog_available", "describe_probe"]
 
 
+#: 抓取用的原始命令（打印出来便于用户自己复核）
+HILOG_CMD = "hilog -x"
+
+
 def _hilog_exe() -> Optional[str]:
     for p in ("/usr/bin/hilog", "/system/bin/hilog"):
         if os.path.exists(p):
@@ -101,4 +105,5 @@ def format_engine_log(pid: Optional[int] = None) -> str:
     if not lines:
         return "\n（hilog 里没有本进程的日志）"
     body = "\n".join(f"    {ln}" for ln in lines)
-    return f"\n引擎日志（原始，{len(lines)} 行，仅按 pid 过滤）：\n{body}"
+    return (f"\n引擎日志（原始，{len(lines)} 行；抓取命令：{HILOG_CMD}；"
+            f"仅按 pid={pid or os.getpid()} 过滤）：\n{body}")
