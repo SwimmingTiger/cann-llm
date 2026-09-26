@@ -77,6 +77,7 @@ v3 = *((_QWORD *)a2 + 5);           // opt+40 → 当作 modelInfo 结构体
 - `SetInferType` 的取值（0/1/2/5）**都改变不了** `opt+0`（0 还会段错误）
 
 **已尝试**：写了 `hiai_shim.c`（用真 C++ 组装 `modelInfo{int model_type; char reserved[36]; std::string weight_dir;}` 并代调）→ **编译成功**（92,608 字节）但 `Init_Use_Option` **仍 rc=1** ✗
+> 📌 该文件**已删除**（结论证明它无用：最终走 `Executor_CreateFromJson`）。此处仅保留探索记录。
 → 说明该布局猜测**不对**。
 
 ## 下一步（按优先级）
@@ -96,7 +97,7 @@ v3 = *((_QWORD *)a2 + 5);           // opt+40 → 当作 modelInfo 结构体
 |---|---|
 | `cann-llm/src/cann_llm/backends/hiai.py` | 后端；**文件末尾注释块有完整施工图 + 全部地址** |
 | `cann-llm/src/cann_llm/backends/hiai_tokenizer.py` | 纯 Python Qwen 分词器（已验证）|
-| `cann-llm/src/cann_llm/backends/hiai_shim.c` | C++ 辅助库（编译通过，布局待修正）|
+| ~~`cann-llm/src/cann_llm/backends/hiai_shim.c`~~ | C++ 辅助库 —— **已删除**（证明无用）|
 | `probe2.py` / `test_infer.py` / `test_shim.py` | 单变体探针（一变体一进程）|
 | x570 `~/re/*.txt` | 各函数反编译结果 |
 
@@ -223,8 +224,8 @@ rc = HIAI_LLMEngine_Executor_Init_Use_Option(exec, opt);        // ② → **实
 实测（`test_both.py`）：`① CreateFromJson -> exec ✓  ② InitOption ✓  ③ Init_Use_Option rc=0 ✓✓`
 **两条路必须串起来** —— 只走任一条都会失败（见上一节对照表）。
 
-`modelInfo` 用 `hiai_shim.c` 构造（真 C++ `std::string`），
-设备上编译：`clang -x c++ -std=c++17 -shared -fPIC -o libhiai_shim.so hiai_shim.c -L/system/lib64 -lhiai_llm_engine`
+`modelInfo` 用 `hiai_shim.c` 构造（真 C++ `std::string`；该文件**已删除**），
+设备上编译（**文件已删除，仅存记录**）：`clang -x c++ -std=c++17 -shared -fPIC -o libhiai_shim.so hiai_shim.c -L/system/lib64 -lhiai_llm_engine`
 （**注意**：文件名是 .c 时必须加 `-x c++`，否则报 `invalid argument '-std=c++17' not allowed with 'C'`）
 
 ### 2. 同步 `Generate` 不可用，**必须用 `GenerateAsync`**
@@ -274,7 +275,7 @@ __int64 HIAI_LLMEngine_Context_SetOnPrefillGenerateDoneFunc(void *ctx, void *cb)
 
 ```
 ① exec = Executor_CreateFromJson(executor_json)            ← 载 JSON
-② opt  = shim.hiai_make_opt(omc, 3, 4, "tokenizer.json", 模型目录, 0)
+② opt  = shim.hiai_make_opt(omc, 3, 4, "tokenizer.json", 模型目录, 0)   # shim 已删除，此路已废弃
 ③ Init_Use_Option(exec, opt)  → 实测 rc=0 ✓
 ④ ctx  = Context_CreateFromContextJson(context_super.json)
 ⑤ Context_SetMaxGenTokens / SetTemperature / SetTopP / SetTopK / SetSeed / SetStopSeq

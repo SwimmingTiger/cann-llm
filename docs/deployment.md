@@ -5,8 +5,8 @@
 | 项 | 现状 |
 |---|---|
 | 运行时依赖 | `dependencies = []` —— **只用标准库 + ctypes** ✓ |
-| 是否需要编译 | **不需要** ✓（没有 setup.py 的 ext_modules、没有 CMake、没有 Makefile 编译目标）|
-| `src/cann_llm/backends/hiai_shim.c` | ⚠ **历史遗留死代码**（早期为 `Executor_Create(modelInfo*)` 写的；最终正确路径是 `CreateFromJson`，用不到它）—— 无需编译 |
+| 是否需要编译 | **不需要** ✓（没有 ext_modules、没有 CMake、没有编译目标，且**不含任何 C/C++ 源文件**）|
+| C/C++ 代码 | **没有** ✓ —— 曾有一个实验用的 `hiai_shim.c`，因最终走 `CreateFromJson` 而用不到，**已删除** |
 | 原生库从哪来 | **系统自带**：`/system/lib64/libhiai_llm_engine.so`（hiai 后端）与 `/system/lib64/ndk/libcann_llm_engine.so`（cann 后端）|
 
 **所以"部署"= 把 Python 代码 + 模型文件放到设备上，然后用设备上的 Python 跑。**
