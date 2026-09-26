@@ -353,9 +353,7 @@ class HiaiBackend(EngineBackend):
         p = request.params if request.params is not None else self.default_params
 
         # ★ 每次请求新建 Context（不复用 —— 见 load() 里的说明）
-        print("    [g1] ctx 前", flush=True)
         ctx = self._bind.lib.HIAI_LLMEngine_Context_Create()
-        print(f"    [g1] ctx={ctx}", flush=True)
         if not ctx:
             raise GenerationError("Context 创建失败")
         if not ctx:
@@ -381,27 +379,21 @@ class HiaiBackend(EngineBackend):
         self._bind.lib.HIAI_LLMEngine_Context_SetOnGenerateAsyncFailed(
             ctx, ctypes.cast(self._cb_fail, ctypes.c_void_p))
 
-        print("    [g2] prompt 前", flush=True)
         prompt = self._bind.lib.HIAI_LLMEngine_Prompt_Create()
-        print(f"    [g2] prompt={prompt}", flush=True)
         if not prompt:
             raise GenerationError("Prompt 创建失败")
         try:
             # ★ 走 token ids：Prompt_SetText 的 std::string 堆路径在本机不可用
             #   （实测边界精确在 22 字节 = libc++ SSO 容量，超过就只剩 1 个 token）
             assert self._tok is not None
-            print("    [g3] 编码", flush=True)
             ids = self._tok.encode(request.prompt)
-            print(f"    [g3] ids={len(ids)}", flush=True)
             if not ids:
                 raise GenerationError("分词结果为空")
             if self._bos >= 0 and ids[0] != self._bos:
                 ids = [self._bos] + ids          # ★ 补 BOS
             # ★ 告知引擎本prompt要 prefill 多少 token（服务在 SetTokenIds 前设它）
             # 注：不要自己调 SetInitTokenLen（流水线内部会设 base.cpp:401）
-            print("    [g4] SetTokenIds 前", flush=True)
             arr = (ctypes.c_int32 * len(ids))(*ids)
-            print("    [g4] arr 就绪", flush=True)
             if self._bind.lib.HIAI_LLMEngine_Prompt_SetTokenIds(
                     prompt, arr, len(ids)) != 0:
                 raise GenerationError("Prompt_SetTokenIds 失败")
@@ -414,15 +406,11 @@ class HiaiBackend(EngineBackend):
                 base + OFF_PUSH_PROMPT)
             run = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p,
                                    ctypes.c_void_p)(base + OFF_RUN_GENERATE)
-            print("    [g5] 构造 push/run", flush=True)
             print(f"    [g6] base=0x{base:x} push=0x{base+OFF_PUSH_PROMPT:x} run=0x{base+OFF_RUN_GENERATE:x}", flush=True)
             vec = (ctypes.c_uint64 * 3)(0, 0, 0)
-            print("    [g7] push 前", flush=True)
             push(ctypes.byref(vec), prompt)
-            print(f"    [g7] push 后 vec={vec[0]:#x}/{vec[1]:#x}", flush=True)
             print("    [g8] run 前", flush=True)
             rc = run(self._exec, ctx, ctypes.byref(vec))
-            print(f"    [g8] run 后 rc={rc}", flush=True)
             if rc == 0:
                 # ★ 等回调（不轮询！）—— 生成期间读 Context 会与工作线程竞态而 abort
                 _ev_done.wait(timeout=300)
