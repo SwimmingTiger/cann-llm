@@ -394,3 +394,51 @@ Executor_GenerateAsync                                  0xfdbec
 **下一步**：用 vtable 定位真正的 `InputExecutorCheck`（它是 `pipelineExecutor` 类的虚方法，
 槽位 `vtable+464`），或在上述候选中按"是否读取 ctx 的输入字段"逐个排除；
 读出它的断言即可知道 Context 缺什么。
+
+---
+
+## ★★★★ Round 78–80：方向性修正 —— 失败**不在** `Generate` 内部
+
+### 决定性证据（读内存字段，前后对比）
+
+```
+[GenerateAsync 前]  promptType(ctx+920) = 3     ← Context 的默认值（"未设定"）
+[GenerateAsync 后]  promptType(ctx+920) = 3
+[GenerateAsync 前]  inferring(pe+3697) = 0
+[GenerateAsync 后]  inferring(pe+3697) = 0
+batchSize(pe+2568)=1   resourceFreed(pe+3698)=0   modelExecutor_(pe+2944)非空
+```
+
+- `CheckPromptType`（`pipeline_executor_base.cpp:372`）应把类型写入 `ctx+920`（text=0 / tokenids=1 …）
+  → **实测始终是默认值 3** ✗ ⇒ **该步从未执行**
+- `SetInferringStatus`（同文件:373，`vtable+16`）会置 `pe+3697 = 1`
+  → **实测始终 0** ✗ ⇒ **该步也从未执行**
+
+**两条独立信号 ⇒ `PipelineExecutorBase::Generate` 根本没走到 372/373 行。**
+⇒ **失败发生在 `Generate` 被调用【之前】**，即在 `sub_153B98` 内。
+
+### 因此在 `Generate` 内部做的一切排查都是无效功（教训）
+
+曾被推断为失败点、后被**实测排除**的共 **9 项**：
+
+| 被排除的假设 | 依据 |
+|---|---|
+| `isInit_`(exec+48) 未置位 | 实测已置 1 |
+| `modelExecutor_` 为空 | 实测非空 |
+| `Init_Use_Option` 初始化不全 | 反而**有害**（会清零 `pipelineExecutor_`/`modelExecutor_`）|
+| `GeneratePreproc` 失败 | 8 字节空函数，必返回 0 |
+| `InputExecutorCheck` 失败 | 只查 `modelExecutor_ != NULL`，实测非空 |
+| `CheckPromptType` 失败 | 非空 prompts 即返回 0（类型只存进 ctx+920）|
+| `SetInferringStatus`（槽 16）| 实测返回 0 |
+| `SetBatchInfo`（槽 680）| **永远返回 0** |
+| `batchSize_` 为 0 / 资源已释放 | 实测 1 / 0 |
+
+### 方法论教训（我反复踩的）
+
+1. **只看函数的局部就断定返回值会失败** ✗ —— 必须看它的**直接封装者**（`CheckPromptType` 就是典型）
+2. **按字符串猜函数** ✗ —— 会被**同名不同类**误导（spec-eagle/tree 版 `GeneratePreproc` 就是典型），应改用 **vtable 槽位 + 内存读取 + 基址换算**（本方法已在 `InputExecutorCheck`(槽 464→0x176ac8)、`GeneratePreproc`(槽 368→0x179458)、`SetInferringStatus`(槽 16→0x16d888)、`SetBatchInfo`(槽 680→0x178838) 上四次验证成功 ✓）
+
+### 下一步（新方向）
+
+反编译 **`sub_153B98`** 的**线程函数**及其调用：`sub_15933C` / `sub_158D00` / `sub_158458` / `sub_156C64`
+（`sub_153B98` 本体反编译已在 x570 `~/re/sub153.txt`）—— 失败在 `Generate` **之前**。
