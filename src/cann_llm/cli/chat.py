@@ -148,6 +148,15 @@ def run_turn(engine: EngineBackend, cfg: AppConfig, state: CliState,
         print()
     elif final is not None and final.text:
         print(f"bot> {final.text}")
+    elif final is not None:
+        # 如实报告，不去替模型圆场。用满 max_steps 时模型可能仍停在
+        # 「还想调用工具」的状态 —— 这是它的真实行为，说清楚即可。
+        if final.tool_calls:
+            names = ", ".join(dict.fromkeys(c.name or "?" for c in final.tool_calls))
+            print(f"  [已达步数上限 {final.steps}，模型仍在请求工具调用（{names}），"
+                  f"没有最终回答]")
+        else:
+            print("  [模型没有输出文本]")
 
     if final is None:
         return

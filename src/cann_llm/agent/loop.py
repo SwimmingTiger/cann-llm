@@ -290,9 +290,23 @@ class AgentLoop:
             last_step = step >= self.config.max_steps
             yield StepStarted(step=step, max_steps=self.config.max_steps)
 
-            # 最后一轮不再给工具，逼模型用自然语言收尾
-            active_tools = None if last_step else self.tools.openai_schemas()
-            prompt = self._render(convo, tools=active_tools)
+            # **每一轮都传完全相同的工具声明**，包括最后一轮。
+            #
+            # 曾经在最后一轮把工具声明撤掉，想逼模型用自然语言收尾。但那会
+            # 破坏 KV 缓存：工具声明注入在第一个 system 轮次内部，也就是
+            # prompt 的最开头，撤掉它等于从第 87 个字符起就与前面几轮不同。
+            # 实测（同一对话，只有这一处不同）：
+            #     带工具声明  in=226  prefill=346ms   → 1.5 ms/token
+            #     撤掉声明    in= 94  prefill=771ms   → 8.2 ms/token（慢 5.5 倍）
+            # token 少一半多，prefill 反而更慢 —— 缓存完全没命中。
+            #
+            # 步数上限仍然保留（循环必须能终止），但只用来决定**何时停止**，
+            # 不再去改模型看到的东西。用满步数时模型可能停在"还想调工具"的
+            # 状态，那就如实交给调用方（Final.tool_calls 里能看出来）。
+            #
+            # 参照实现佐证：DSH 全包（dsh-agent-loop 等）搜不到 maxSteps /
+            # stepLimit / maxIterations 之类的概念 —— 它不做这种事。
+            prompt = self._render(convo, tools=self.tools.openai_schemas())
 
             flt = StreamFilter()
             raw_parts: List[str] = []

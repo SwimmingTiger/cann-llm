@@ -270,15 +270,25 @@ class TestAgentLoop(unittest.TestCase):
             for banned in ("请", "重新调用", "不要凭猜测", "must ", "should "):
                 self.assertNotIn(banned, done.result.content, f"{raw} → {banned}")
 
-    def test_max_steps_forces_final_without_tools(self):
+    def test_max_steps_terminates_but_does_not_edit_prompt(self):
+        """步数上限只决定何时停止，不去改模型看到的东西。
+
+        曾经在最后一轮撤掉工具声明，想逼模型收尾 —— 但那会破坏 KV 缓存：
+        工具声明在第一个 system 轮次内部（prompt 最开头），撤掉它等于从第 87
+        个字符起就与前面几轮不同。实测同一对话：
+            带声明 in=226 prefill=346ms（1.5ms/token）
+            撤掉   in= 94 prefill=771ms（8.2ms/token，慢 5.5 倍）
+        """
         calls = []
-        # 模型每轮都想调工具，永不收尾
         backend, events = run([CALL] * 6, make_registry(calls), max_steps=3)
         f = final_of(events)
-        self.assertEqual(f.steps, 3)
+        self.assertEqual(f.steps, 3)              # 仍然在上限处停下
         self.assertEqual(backend.call_count, 3)
-        # 最后一轮的 prompt 不应再包含工具声明
-        self.assertNotIn("<tools>", backend.prompts[-1])
+        # 每一轮的 prompt 开头必须一致（工具声明始终在）
+        for p in backend.prompts:
+            self.assertIn("<tools>", p)
+        # 也不该出现「最后一轮悄悄换掉开头」的情况
+        self.assertEqual(backend.prompts[0][:60], backend.prompts[-1][:60])
 
     def test_all_tool_calls_are_executed(self):
         """模型发了几个就执行几个 —— 截断等于丢弃模型输出。"""
