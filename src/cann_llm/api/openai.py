@@ -47,14 +47,6 @@ class ChatCompletionRequest:
                 out.append(str(fn["name"]))
         return out
 
-    @property
-    def requires_tool_call(self) -> bool:
-        return self.tool_choice == "required"
-
-    @property
-    def forbids_tool_call(self) -> bool:
-        return self.tool_choice == "none"
-
 
 #: 永远拒绝：这些字段一旦被忽略，调用方会拿到"看起来正常但答案是错的"结果。
 #:   * image_url —— 模型看不见图片，照常回答等于骗人

@@ -105,8 +105,13 @@
   显式兜底，进入后端后参数原样使用。
 - **不再截断模型的工具调用**。原先 `max_calls_per_step`（默认 4）会丢弃
   第 5 个之后的调用 —— 那是在丢模型输出。现在发几个执行几个。
-- **`force_tool_use` 改为默认关闭**。它会往 prompt 里塞调用方没写的指令，
-  属于改变模型行为。实测有效（0/4 → 4/4），但要不要用应由调用方决定。
+- **`force_tool_use` 已删除**。它会往 prompt 里塞调用方没写的指令，属于改变
+  模型行为。查证了 llama.cpp 的做法（`common/chat-auto-parser-generator.cpp`）：
+  工具格式说明来自**模型自带的 chat template**，框架只负责应用；「强制调用」
+  用 **grammar 做 token 级约束**，且只在调用方要求 `tool_choice: required` 时
+  启用（`auto` 下是 lazy grammar，从不强迫模型）。llama.cpp 里搜不到任何框架
+  自撰的「你必须调用工具」文字。想强化工具使用请写在调用方自己的 system prompt。
+  同时删除了从未被使用的 `requires_tool_call` / `forbids_tool_call` 两个属性。
 - **引擎非零返回不再断言原因**。原先会猜「输入超出上下文」并返回 400
   `context_length_exceeded`；我们其实区分不出是超长、含无法分词的字符还是
   引擎内部错误。现在如实报告返回码 + 列出可能性，状态码回到 500。

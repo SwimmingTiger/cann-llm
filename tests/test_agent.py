@@ -298,15 +298,19 @@ class TestAgentLoop(unittest.TestCase):
         self.assertEqual(f.messages[3].tool_call_id, f.messages[2].tool_calls[0].id)
         self.assertEqual(f.messages[-1].content, "最终答案")
 
-    def test_prompt_is_not_edited_by_default(self):
-        """默认不往 prompt 里塞调用方没写的指令 —— 那属于改变模型行为。"""
-        backend, _ = run([CALL, "ok"], make_registry([]))
-        self.assertNotIn("MUST emit the tool call", backend.prompts[0])
-        self.assertFalse(AgentConfig().force_tool_use)
+    def test_prompt_is_never_edited(self):
+        """框架不往 prompt 里塞任何指令 —— 那是调用方 system prompt 的地方。
 
-    def test_force_tool_use_is_opt_in(self):
-        backend, _ = run([CALL, "ok"], make_registry([]), force_tool_use=True)
-        self.assertIn("MUST emit the tool call", backend.prompts[0])
+        llama.cpp 可作对照：工具格式说明来自**模型自带的 chat template**
+        （框架只负责应用），「强制调用」走 grammar 且只在调用方要求
+        tool_choice=required 时启用。没有主流框架会自己写「你必须调用工具」。
+        """
+        backend, _ = run([CALL, "ok"], make_registry([]))
+        prompt = backend.prompts[0]
+        self.assertNotIn("MUST emit the tool call", prompt)
+        self.assertNotIn("IMPORTANT:", prompt)
+        # 工具声明本身仍在（它来自模型自带的 chat template，不是我们编的）
+        self.assertIn("# Tools", prompt)
 
 
 if __name__ == "__main__":

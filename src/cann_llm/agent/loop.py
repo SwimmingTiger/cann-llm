@@ -185,12 +185,6 @@ class AgentConfig:
     max_steps: int = 4
     #: 是否把工具调用过程也流给用户（作为提示，不含协议标记）
     announce_tool_calls: bool = True
-    #: 在工具说明后追加"该用就用、别向用户索要工具能给的信息"的强指令。
-    #:
-    #: **默认关闭**：这会往 prompt 里塞调用方没写的指令，属于改变模型行为。
-    #: 实测它对小模型很有效（同一问题 0/4 → 4/4），但那是"让模型表现得更好"，
-    #: 不是"如实传递模型的行为" —— 想要就显式打开。
-    force_tool_use: bool = False
 
 
 # ------------------------------------------------------------------ 主循环
@@ -351,23 +345,21 @@ class AgentLoop:
                     tool_calls=pending_calls, steps=steps, stats=last_stats,
                     messages=convo)
 
-    #: 追加在工具说明之后的强指令（针对小模型"向用户索要工具能提供的信息"的失败模式）
-    TOOL_USE_DIRECTIVE = (
-        "\n\nIMPORTANT: If the user's request can be answered by any of the tools above, "
-        "you MUST emit the tool call immediately. Never ask the user for information that "
-        "a tool can provide, and never answer from memory when a tool applies."
-    )
-
     def _render(self, messages: Sequence[Message],
                 tools: Optional[List[Dict[str, Any]]]) -> str:
-        """渲染完整消息（**不做任何裁剪**）。
+        """渲染完整消息 —— **不裁剪历史，也不追加任何指令**。
 
-        静默丢弃历史会让模型在调用方不知情的情况下换掉上下文。长度控制交给
-        调用方（CLI 用 /reset，服务端由客户端自己管理 messages）。
+        两件事都不做，都是有意的：
+
+        * **不裁剪历史**：静默丢弃会让模型在调用方不知情的情况下换掉上下文。
+        * **不追加「你必须调用工具」之类的文字**：那等于往 prompt 里塞调用方
+          没写的指令。查过 llama.cpp 的做法（源码见文档）：工具格式说明来自
+          **模型自带的 chat template**，框架只负责应用；而「强制调用」用
+          grammar 做 token 级约束，且只在调用方明确要求 `tool_choice: required`
+          时启用（`auto` 下是 lazy grammar，从不强迫模型）。框架自己在 prompt
+          里塞「你必须」既没有先例，又只是建议而非保证。
+
+        想让模型更爱用工具，请写在调用方自己的 system prompt 里 —— 那是
+        调用方的地方。
         """
-        if tools and self.config.force_tool_use:
-            tools = [dict(t) for t in tools]
-            # 把指令挂在最后一个工具的 description 上（模板会原样渲染）
-            fn = tools[-1].setdefault("function", {})
-            fn["description"] = (fn.get("description", "") or "") + self.TOOL_USE_DIRECTIVE
         return self.template.render(messages, tools=tools or None)

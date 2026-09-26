@@ -166,16 +166,43 @@ def query_db(order_id: str) -> str:
 | 工具失败（语法错等） | **会**把错误回给模型；加上显式重试指令后能自我修正 |
 | 提问很短、工具参数全可选 | **可能不调用**，转而向用户索要信息 |
 
-最后一条是最常见的失败模式。缓解办法（已内建）：
+最后一条是最常见的失败模式。**框架不提供任何「强制调用」开关** —— 缓解只能
+从两处入手，都在调用方自己手里：
 
-* `AgentConfig.force_tool_use = True`（**默认关闭，需显式打开**）会在工具说明后追加：
-  *"If the user's request can be answered by any of the tools above, you MUST
-  emit the tool call immediately. Never ask the user for information that a tool
-  can provide…"* —— 同一问题实测从 **0/4 提升到 4/4**。
+* **把工具的 `description` 写具体**（说明「无需参数，可直接调用」之类）。
+  实测这对模型的影响很大。
+* **在调用方自己的 system prompt 里写清期望**。框架不会替你加这类文字。
 
-  之所以默认关闭：这是往 prompt 里塞调用方没写的指令，本质是"改变模型行为"
-  而非"如实传递模型行为"。框架不该替调用方做这个决定 —— 需要就打开。
-* 把工具的 `description` 写具体（说明"无需参数，可直接调用"之类）。
+### 为什么框架不写「你必须调用工具」
+
+曾经加过一个 `force_tool_use`（往工具说明后面追加 *"you MUST emit the tool
+call immediately…"*），实测对小模型很有效（同一问题 **0/4 → 4/4**）。但它被
+移除了，因为它同时改了调用方的 prompt 和模型的行为。
+
+对照 llama.cpp 的源码（`common/chat-auto-parser-generator.cpp`、`common/chat.h`）：
+
+| | llama.cpp | 原先的 `force_tool_use` |
+|---|---|---|
+| 机制 | **grammar（约束解码，token 级硬约束）** | 往 prompt 里塞文字 |
+| 谁发起 | **调用方**要求 `tool_choice: required` | **框架**默认开启 |
+| `tool_choice: auto` 时 | **完全不强制** —— 用 lazy grammar，只在模型自己开始输出触发标记后才约束格式 | 塞了「你必须调用」 |
+
+```cpp
+bool include_grammar = has_response_format || (has_tools &&
+        ((tool_choice == AUTO && !trigger_marker.empty()) ||
+          tool_choice == REQUIRED));
+data.grammar_lazy = !has_response_format && tool_choice == AUTO;
+```
+
+而且 llama.cpp 里**搜不到任何框架自撰的「你必须调用工具」文字** —— 工具格式
+说明那段文字来自**模型自带的 chat template**（如
+`models/templates/Qwen-Qwen2.5-7B-Instruct.jinja`），框架只负责应用。
+本项目的 `render_tools_block()` 就是照抄那份模板，逐字一致。
+
+结论：**「强制调用」是调用方的诉求，且正统做法是约束解码而非提示词。**
+CANN 引擎没有 grammar 能力，所以我们做不到真正的强制；能做的只是如实告知
+`tool_choice: required` 不被支持（见响应头 `X-Cann-Llm-Ignored-Fields`），
+而不是用一段模型可以无视的文字假装做到了。
 
 **务必知道**：更大/更强的模型会显著更可靠。换模型只需改配置里的
 `model_dir`，agent 这一层不用动。

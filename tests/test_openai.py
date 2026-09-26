@@ -92,14 +92,24 @@ class TestUnsupportedFieldTiers(unittest.TestCase):
                 oa.parse_chat_request(
                     {"messages": [{"role": "user", "content": "x"}], "tools": bad})
 
-    def test_tool_choice_values(self):
+    def test_tool_choice_is_reported_honestly(self):
+        """只支持 auto 语义；其余取值如实回报为「被忽略」，不假装支持。
+
+        本引擎没有约束解码（grammar），`required` 无法保证 —— 与其假装支持，
+        不如在响应头 X-Cann-Llm-Ignored-Fields 里如实说明。
+        """
         base = {"messages": [{"role": "user", "content": "x"}],
                 "tools": [{"function": {"name": "f"}}]}
-        self.assertFalse(oa.parse_chat_request(base).requires_tool_call)
-        self.assertTrue(oa.parse_chat_request(
-            {**base, "tool_choice": "required"}).requires_tool_call)
-        self.assertTrue(oa.parse_chat_request(
-            {**base, "tool_choice": "none"}).forbids_tool_call)
+        # auto 就是本服务的默认行为，不算被忽略
+        self.assertNotIn("tool_choice", oa.parse_chat_request(base).ignored)
+        self.assertNotIn("tool_choice",
+                         oa.parse_chat_request({**base, "tool_choice": "auto"}).ignored)
+        # required / none 如实回报
+        self.assertIn("tool_choice",
+                      oa.parse_chat_request({**base, "tool_choice": "required"}).ignored)
+        self.assertIn("tool_choice",
+                      oa.parse_chat_request({**base, "tool_choice": "none"}).ignored)
+        # 取值本身非法则报错
         with self.assertRaises(InvalidRequestError):
             oa.parse_chat_request({**base, "tool_choice": "sometimes"})
 
