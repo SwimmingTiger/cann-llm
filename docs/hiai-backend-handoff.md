@@ -782,3 +782,63 @@ generate()  : ctx = Context_Create()
 
 **实测**：27B/33B(中文)/23B prompt 全部输出正确；逐 token 流式 30 分片；
 CLI、HTTP（含 SSE）、184 测试全过。
+
+---
+
+# 补充：第 4 个坑 —— **必须自己设停止序列**
+
+`Context_SetStopSeq` 的签名（反编译实锤，`0x109224`）：
+
+```c
+HIAI_LLMEngine_Context_SetStopSeq(ctx, const char** stopSeq, unsigned int stopSeqLen)
+// stopSeqLen 有效范围 1..9（否则报 STOP_SEQ_MAX_LEN 断言）；每个元素必须非空，否则 FAIL
+```
+
+**不设它的后果**：引擎生成完答案后**不会停**，会继续编出
+
+```
+"def add(a,b): return a+b<|im_end|>\n<|endoftext|><|endoftext|>Human: Can you …"
+```
+
+这种假对话（`out_tokens` 直接跑满 `max_tokens`）。设了之后同一 prompt 的
+`out_tokens` 从 40 变成 **9** —— 在 `<|im_end|>` 处**真停** ✓。
+
+停止序列**不用自己编**：官方模型的 `api_config.json` 里就有
+
+```json
+"stopSeq": ["<|im_end|>", "<|endoftext|>"]
+```
+
+实现里优先读它，读不到才用同款默认；读侧另做一次兜底截断（含 `<|im_start|>`），双保险。
+
+## 最终实现（全导出 API）
+
+```
+load()      : Executor_CreateFromJson(executor_json)；读 kv_cache_max_len / initTokenLen / stopSeq
+generate()  : ctx = Context_Create()
+              [try]  Context_SetPrefixPrompt(ctx, prompt 文本)
+                     Context_SetInitTokenLen(ctx, init_token_len)
+                     Context_SetStopSeq(ctx, stopSeq[], n)
+                     Context_SetMaxGenTokens(ctx, maxgen)
+                     三个回调（AllTokens / SomeToken / Failed）
+                     Executor_GenerateAsync(exec, ctx, prompt 文本)
+                     OnSomeToken 回调内读 GetAllGeneration → 增量 → Queue → yield
+              [finally] Context_Destroy
+```
+
+**用到的 15 个符号全部在 `nm -D` 导出表内**（可用下面的自查法复核）。
+
+## 一条可复用的自查法（本次踩坑后总结）
+
+```python
+# 1) 列出代码里调用的每个引擎符号
+called = set(re.findall(r'self\._bind\.lib\.(HIAI_LLMEngine_\w+)', src))
+# 2) 列出 SIGS 里声明过的
+declared = set(re.findall(r'"(HIAI_LLMEngine_\w+)":', src))
+# 3) 列出 .so 导出的
+exported = {nm -D ... 里 type 为 T/W 的符号}
+# 要求：called == declared ⊆ exported
+```
+
+三处任一不齐都会以 **segfault** 的形式表现出来（第 3 条踩过两次：
+漏声明 → 指针被当 int 截断；声明成 `c_void_p` → 传 bytes 不补 NUL）。
