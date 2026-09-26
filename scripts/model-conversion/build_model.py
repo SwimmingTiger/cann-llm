@@ -249,25 +249,56 @@ def main():
     if not args.skip_omg:
         omg_script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   "omg_convert.py")
+        # OMG 对环境很挑：缺 PATH(bisheng/package) 或没 source set_ascendc_env.sh
+        # 会以 "RmsNorm ... infershape func failed" 的形式失败（看着像算子问题，
+        # 其实是环境不全）。这里完整复刻实测可用的那套环境。
         env = dict(os.environ)
         lib = os.path.join(args.omg_dir, "master", "lib64")
-        plat = os.path.join(os.path.dirname(args.omg_dir), "platform", args.platform,
-                            "lib64")
-        env["LD_LIBRARY_PATH"] = f"{lib}:{plat}:" + env.get("LD_LIBRARY_PATH", "")
+        tools_root = os.path.dirname(args.omg_dir)
+        plat = os.path.join(tools_root, "platform", args.platform)
+        plat_lib = os.path.join(plat, "lib64")
+
+        # 解释器自带的 lib（glibc/libstdc++），从 base_prefix 推，避免写死路径
+        try:
+            base = subprocess.check_output(
+                [args.python, "-c", "import sys; print(sys.base_prefix)"],
+                text=True).strip()
+            py_lib = os.path.join(base, "lib")
+        except Exception:                                   # noqa: BLE001
+            py_lib = ""
+
+        ld = [lib, plat_lib] + ([py_lib] if py_lib and os.path.isdir(py_lib) else [])
+        env["LD_LIBRARY_PATH"] = ":".join(ld + [env.get("LD_LIBRARY_PATH", "")]).strip(":")
         env["SOC_VERSION"] = args.platform
-        env["PYTHONPATH"] = os.path.join(os.path.dirname(args.omg_dir), "platform",
-                                         args.platform, "ops", "impl")
+        env["PYTHONPATH"] = os.path.join(plat, "ops", "impl") + (
+            ":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        env["PATH"] = ":".join(filter(None, [
+            env.get("PATH", ""),
+            os.path.join(args.asc_dir, "bisheng", "bin"),
+            os.path.join(args.asc_dir, "package"),
+        ]))
         env.setdefault("TMPDIR", os.path.join(work, "tmp"))
         os.makedirs(env["TMPDIR"], exist_ok=True)
         os.makedirs(om_out, exist_ok=True)
-        run([args.python, omg_script,
-             "--onnx", onnx_file, "--out", omc_dir,
-             "--layers", str(layers), "--kv-len", str(args.kv_len),
-             "--hidden", str(hidden), "--kv-heads", str(kv_heads),
-             "--head-dim", str(head_dim), "--platform", args.platform,
-             "--weight-data-type", args.weight_data_type,
-             "--omg-dir", args.omg_dir, "--asc-dir", args.asc_dir],
-            cwd=args.omg_dir, env=env)
+
+        omg_cmd = [args.python, omg_script,
+                   "--onnx", onnx_file, "--out", omc_dir,
+                   "--layers", str(layers), "--kv-len", str(args.kv_len),
+                   "--hidden", str(hidden), "--kv-heads", str(kv_heads),
+                   "--head-dim", str(head_dim), "--platform", args.platform,
+                   "--weight-data-type", args.weight_data_type,
+                   "--omg-dir", args.omg_dir, "--asc-dir", args.asc_dir]
+
+        # 通过 bash 跑，好 source set_ascendc_env.sh（Python 里 source 不了）
+        setup = os.path.join(args.asc_dir, "set_ascendc_env.sh")
+        if os.path.exists(setup):
+            log(f"source {setup}")
+            wrapped = ["bash", "-c",
+                       f'source "{setup}" >/dev/null 2>&1 || true; exec "$@"', "--"]
+            run(wrapped + omg_cmd, cwd=args.omg_dir, env=env)
+        else:
+            log("警告：没找到 set_ascendc_env.sh，直接跑（可能因环境不全失败）")
+            run(omg_cmd, cwd=args.omg_dir, env=env)
 
     # ---- 4) 装配模型目录 ----
     os.makedirs(out_dir, exist_ok=True)

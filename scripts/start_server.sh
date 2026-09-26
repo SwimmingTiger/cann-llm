@@ -10,7 +10,32 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY="${PYTHON:-python3}"
+# 解释器选择：显式给了 PYTHON 就用它；否则在候选里挑第一个与 CANN NDK 库
+# **libc 兼容**的。本机系统 libc 是 musl、引擎按 musl 编；某些第三方 Python
+# （如 harmonybrew 的）是 glibc 构建 + libmusl_compat 垫片，加载引擎会段错误。
+py_libc_ok() {   # $1 = 解释器路径
+    "$1" - <<'PYEOF' 2>/dev/null
+import sys
+try:
+    maps = open("/proc/self/maps").read()
+except OSError:
+    raise SystemExit(0)          # 判不了就别拦
+raise SystemExit(1 if "libmusl_compat" in maps else 0)
+PYEOF
+}
+
+resolve_python() {
+    if [[ -n "${PYTHON:-}" ]]; then printf '%s' "$PYTHON"; return; fi
+    local cand
+    for cand in python3 /data/service/hnp/bin/python3; do
+        if command -v "$cand" >/dev/null 2>&1 && py_libc_ok "$cand"; then
+            printf '%s' "$cand"; return
+        fi
+    done
+    printf '%s' python3          # 都不兼容就原样返回，交给后端报清楚
+}
+
+PY="$(resolve_python)"
 RUNDIR="${CANN_LLM_RUNDIR:-$ROOT/.run}"
 PIDFILE="$RUNDIR/server.pid"
 STATEFILE="$RUNDIR/server.state"       # 记录启动时的 host/port，供 --status/--stop 使用

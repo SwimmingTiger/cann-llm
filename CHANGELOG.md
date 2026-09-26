@@ -5,6 +5,40 @@
 
 ## [Unreleased]
 
+### Fixed — 用第三方 Python（如 harmonybrew）启动会 segfault
+
+现象：`./scripts/start_chat.sh -d …` 在 brew 的 Python 下**直接 core dump**，
+换成 `export PATH=/data/service/hnp/bin:$PATH` 就正常。
+
+**根因（已查明）**：本机系统 libc 是 **musl**，`libcann_llm_engine.so` 也是按 musl
+编的；而 harmonybrew 提供的 Python 是 **glibc 构建**，靠 `libmusl_compat.so` 垫片在
+musl 系统上跑。把 musl 版的引擎加载进这种进程，调
+`HMS_LLMEngineExecutor_CreateFromExecutorJson` 时**直接段错误** ——
+在 Python 层**没有任何可捕获的异常**。
+
+实测对照（`faulthandler` 定位到 `backends/cann.py` 的 `executor_create` 那一行）：
+
+| 解释器 | `/proc/self/maps` 里有 libmusl_compat | 结果 |
+|---|---|---|
+| harmonybrew python 3.14.7 | 有 | **segfault，退出码 139** |
+| `/data/service/hnp/bin/python3` 3.12.8 | 无 | 正常 |
+
+**修法**：
+
+- `backends/cann.py` 新增 `interpreter_libc_conflict()`：判据是进程的
+  `/proc/self/maps` 里是否出现 `libmusl_compat`（实测可靠；非 Linux 读不到时不拦）。
+  `load()` 在碰 NDK 之前先检查，冲突就抛 `BackendUnavailableError` 并给出
+  可操作的建议（含 `PYTHON=/data/service/hnp/bin/python3 …` 的示例），
+  **把 core dump 变成一句人话**。
+- `start_chat.sh` / `start_server.sh` 新增 `resolve_python()`：没显式给 `PYTHON`
+  时，在候选里挑第一个与引擎 libc 兼容的（`python3` -> `/data/service/hnp/bin/python3`），
+  于是**不用再手工 export PATH**；显式指定的仍优先，不兼容时由后端报清楚。
+
+验证：
+- 默认 PATH（python3 = brew 3.14）下 `start_chat.sh` 自动改用 hnp，正常进入对话
+- `PYTHON=<brew python>` 显式指定时给出清晰报错，退出码 1（原来 139）
+- `make test` 184 个全过（新增 3 个用例）
+
 ### Added — 上下文长度/输出窗口现在都可配（各归其位）
 
 用户问"上下文只有 2K 吗，能提升吗"。结论：**能，但性质不同**——

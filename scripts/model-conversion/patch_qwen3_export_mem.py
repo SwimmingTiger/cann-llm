@@ -44,6 +44,37 @@ SIMPLIFY_NEW = '''    print("sim onnx model")
 '''
 
 
+# compress / uncompress 是**一对**：它们的存在只是为了给 simplify 省内存。
+# 跳过 simplify 时这一对毫无意义，却各自持一份完整模型副本（4B 约 16 GB ×2）。
+# 一起跳过。
+COMPRESS_ORIG = '''    size_th_kb = 1024
+    size_th_bytes = size_th_kb * 1024
+    onnx_model, removed_inits = compress_onnx_model(onnx_model, size_th_bytes=size_th_bytes)
+    print("compress model success")
+'''
+
+COMPRESS_NEW = '''    size_th_kb = 1024
+    size_th_bytes = size_th_kb * 1024
+    if os.environ.get("CANN_SKIP_ONNX_SIMPLIFY") == "1":
+        print("  [CANN_SKIP_ONNX_SIMPLIFY=1] 跳过 compress（省下一份完整模型副本）")
+        removed_inits = []
+    else:
+        onnx_model, removed_inits = compress_onnx_model(onnx_model, size_th_bytes=size_th_bytes)
+    print("compress model success")
+'''
+
+UNCOMPRESS_ORIG = '''    onnx_model = uncompress_onnx_model(onnx_model, removed_inits)
+    print("uncompress model success")
+'''
+
+UNCOMPRESS_NEW = '''    if os.environ.get("CANN_SKIP_ONNX_SIMPLIFY") == "1":
+        print("  [CANN_SKIP_ONNX_SIMPLIFY=1] 跳过 uncompress（与 compress 是一对）")
+    else:
+        onnx_model = uncompress_onnx_model(onnx_model, removed_inits)
+    print("uncompress model success")
+'''
+
+
 def patch_file(path, old, new, tag, revert):
     src = open(path).read()
     if revert:
@@ -90,6 +121,8 @@ def main() -> int:
     # 2) simplify 可跳过
     u = os.path.join(d, "onnx_utils.py")
     patch_file(u, SIMPLIFY_ORIG, SIMPLIFY_NEW, "onnxsim.simplify", args.revert)
+    patch_file(u, COMPRESS_ORIG, COMPRESS_NEW, "compress_onnx_model", args.revert)
+    patch_file(u, UNCOMPRESS_ORIG, UNCOMPRESS_NEW, "uncompress_onnx_model", args.revert)
 
     return 0
 

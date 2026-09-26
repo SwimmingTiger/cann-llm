@@ -25,6 +25,7 @@ import ctypes
 import json
 import os
 import queue
+import sys
 import threading
 import time
 from typing import Dict, Iterator, Optional, Tuple
@@ -44,6 +45,38 @@ from ..types import (
     GenerationStats,
     ModelInfo,
 )
+
+def interpreter_libc_conflict() -> Optional[str]:
+    """检测「当前解释器与 CANN NDK 库 libc 不匹配」的情况。
+
+    本机（HarmonyOS）的系统 libc 是 **musl**，``libcann_llm_engine.so`` 也是按 musl
+    编的。而某些第三方发行版（例如 harmonybrew）提供的 Python 是 **glibc 构建**，
+    靠 ``libmusl_compat.so`` 垫片在 musl 系统上跑 —— 把 musl 版的引擎加载进这种
+    进程去调 ``HMS_LLMEngineExecutor_*`` 会**直接段错误**，而且**没有 Python 层
+    异常可以捕获**，所以只能提前判断并拒绝。
+
+    判据：进程的 ``/proc/self/maps`` 里出现 ``libmusl_compat``。
+    实测：harmonybrew 的 python 3.14.7 有（必定 segfault，退出码 139），
+    ``/data/service/hnp/bin/python3`` 的 3.12.8 没有（正常工作）。
+
+    :return: 冲突说明（供调用方报错）；没有冲突返回 ``None``。
+    """
+    try:
+        with open("/proc/self/maps") as f:
+            maps = f.read()
+    except OSError:
+        return None                      # 不是 Linux / 读不到就别拦
+    if "libmusl_compat" not in maps:
+        return None
+    return (
+        f"当前 Python（{sys.version.split()[0]}）是 glibc 构建，靠 libmusl_compat "
+        f"垫片运行；而本机的 CANN NDK 库是按 musl 编译的。把引擎加载进这种进程会在 "
+        f"创建 Executor 时**直接段错误**（没有可捕获的异常）。\n"
+        f"      请改用系统自带的 Python，例如：\n"
+        f"          PYTHON=/data/service/hnp/bin/python3 ./scripts/start_chat.sh …\n"
+        f"      （或把该解释器放到 PATH 前面）"
+    )
+
 
 #: executor.json 读不到 kv_cache_max_len 时的回退值。
 #: 真正的大小是**编译期**决定的（见 docs/cann-engine-notes.md 第 9 节），
@@ -203,6 +236,11 @@ class CannNdkBackend(EngineBackend):
         for need in ("executor.json", "context.json", "tokenizer.json"):
             if not os.path.exists(os.path.join(self.model_dir, need)):
                 raise ModelLoadError(f"模型目录缺少 {need}：{self.model_dir}")
+
+        # libc 不匹配会段错误，没有 Python 异常可捕获 —— 必须提前拦
+        conflict = interpreter_libc_conflict()
+        if conflict:
+            raise BackendUnavailableError(conflict)
 
         self._ndk = _NdkBindings(self._lib_path)
 

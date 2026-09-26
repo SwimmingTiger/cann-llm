@@ -103,3 +103,35 @@ class TestContextLengthAutoDetect(unittest.TestCase):
             self._fake_model(d, 8192)
             be = CannNdkBackend(d, context_length=4096)
             self.assertEqual(be.context_length, 4096)
+
+
+class TestInterpreterLibcConflict(unittest.TestCase):
+    """解释器 libc 与引擎不匹配时必须能提前判出来（否则是段错误，无法捕获）。"""
+
+    def test_returns_none_or_message_never_raises(self):
+        from cann_llm.backends.cann import interpreter_libc_conflict
+        out = interpreter_libc_conflict()          # 不该抛异常
+        self.assertTrue(out is None or isinstance(out, str))
+
+    def test_message_mentions_the_fix(self):
+        """真有冲突时，提示里要给出可操作的解法。"""
+        from cann_llm.backends.cann import interpreter_libc_conflict
+        out = interpreter_libc_conflict()
+        if out is None:
+            self.skipTest("当前解释器本来就兼容（本机是 musl 原生 python）")
+        self.assertIn("musl", out)
+        self.assertIn("PYTHON=", out)
+
+    def test_non_linux_is_not_blocked(self):
+        """读不到 /proc/self/maps（非 Linux）时不应误拦。"""
+        import cann_llm.backends.cann as m
+        real_open = open
+        def fake_open(path, *a, **k):
+            if str(path) == "/proc/self/maps":
+                raise OSError("no procfs")
+            return real_open(path, *a, **k)
+        m.open = fake_open
+        try:
+            self.assertIsNone(m.interpreter_libc_conflict())
+        finally:
+            m.open = real_open
