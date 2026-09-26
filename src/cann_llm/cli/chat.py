@@ -66,7 +66,7 @@ def build_engine(cfg: AppConfig) -> EngineBackend:
                          "或配置文件里的 model.model_dir")
     kw = {
         "model_dir": mc.model_dir,
-        "model_id": mc.model_id,
+        "model_id": mc.resolved_id,
         "context_length": mc.context_length,
         "default_params": GenerationParams(
             max_tokens=mc.max_tokens, temperature=mc.temperature, top_k=mc.top_k,
@@ -183,6 +183,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description="华为 CANN LLM Engine 交互式对话（逐字流式 + 工具调用）",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-d", "--model-dir", help="模型目录")
+    ap.add_argument("--model-id",
+                    help="对外暴露的模型 id（默认取模型目录名）")
     ap.add_argument("-c", "--config", help="TOML 配置文件")
     ap.add_argument("-b", "--backend", help=f"后端，可用：{', '.join(available_backends())}")
     ap.add_argument("-t", "--template", help=f"对话模板，可用：{', '.join(available_templates())}")
@@ -217,7 +219,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # 配置合并：命令行 > 环境变量 > 文件 > 默认值
     cfg = load_config(args.config)
     over = {}
-    for key, val in (("model_dir", args.model_dir), ("backend", args.backend),
+    for key, val in (("model_dir", args.model_dir), ("model_id", args.model_id),
+                     ("backend", args.backend),
                      ("chat_template", args.template), ("system_prompt", args.system),
                      ("max_tokens", args.maxtok), ("temperature", args.temp),
                      ("top_k", args.topk), ("top_p", args.topp),
@@ -251,7 +254,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         system_prompt=cfg.model.system_prompt,
         tool_names=registry.names(),
         stream=not args.no_stream,
-        model_id=cfg.model.model_id, backend=cfg.model.backend)
+        model_id=cfg.model.resolved_id, backend=cfg.model.backend)
 
     if args.prompt:                     # 单轮模式
         try:
@@ -267,7 +270,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except ImportError:
         pass
 
-    print(f"cann-llm {version.__version__}  ·  {cfg.model.model_id}"
+    print(f"cann-llm {version.__version__}  ·  {cfg.model.resolved_id}"
           f"  ·  {cfg.model.backend}  ·  加载 {load_s:.1f}s")
     print_params(state)
     print("输入 /help 看命令，/quit 退出。\n")

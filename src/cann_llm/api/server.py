@@ -83,7 +83,7 @@ def build_state(cfg: AppConfig) -> AppState:
         raise SystemExit("未指定模型目录（-d / CANN_LLM_MODEL__MODEL_DIR / 配置文件）")
     kw: Dict[str, Any] = {
         "model_dir": mc.model_dir,
-        "model_id": mc.model_id,
+        "model_id": mc.resolved_id,
         "context_length": mc.context_length,
         "default_params": GenerationParams(
             max_tokens=mc.max_tokens, temperature=mc.temperature, top_k=mc.top_k,
@@ -271,7 +271,7 @@ class Handler(BaseHTTPRequestHandler):
             st = self.state
             self._send_json(200, {
                 "status": "ok",
-                "model": st.cfg.model.model_id,
+                "model": st.cfg.model.resolved_id,
                 "backend": st.cfg.model.backend,
                 "uptime_s": round(time.time() - st.started_at, 1),
                 "version": version.__version__,
@@ -281,7 +281,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "service": "cann-llm",
                 "version": version.__version__,
-                "model": self.state.cfg.model.model_id,
+                "model": self.state.cfg.model.resolved_id,
                 "endpoints": {
                     "GET /v1/models": "列出模型",
                     "POST /v1/chat/completions": "对话补全（支持 stream）",
@@ -295,7 +295,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authorized():
                 self._send_error_json(401, "鉴权失败", "invalid_api_key")
                 return
-            self._send_json(200, oa.models_response([self.state.cfg.model.model_id]))
+            self._send_json(200, oa.models_response([self.state.cfg.model.resolved_id]))
             return
         if path in ROUTES:
             self._method_not_allowed(path, ROUTES[path])
@@ -338,7 +338,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_chat(self, body: Dict[str, Any]) -> None:
         st = self.state
-        req = oa.parse_chat_request(body, default_model=st.cfg.model.model_id,
+        req = oa.parse_chat_request(body, default_model=st.cfg.model.resolved_id,
                                     strict=st.cfg.server.reject_unsupported,
                                     base_params=st.base_params())
         self._note_ignored(req.ignored)
@@ -365,7 +365,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = replace(result, text=parsed.text, finish_reason="tool_calls")
 
         self._send_json(200, oa.chat_completion_response(
-            req_id=oa.new_id("chatcmpl"), model=req.model or st.cfg.model.model_id,
+            req_id=oa.new_id("chatcmpl"), model=req.model or st.cfg.model.resolved_id,
             text=result.text, finish_reason=result.finish_reason,
             usage=oa.usage_payload(result.stats), tool_calls=tool_calls))
 
@@ -382,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
         st = self.state
         req_id = oa.new_id("chatcmpl")
         created = oa.now()
-        model = req.model or st.cfg.model.model_id
+        model = req.model or st.cfg.model.resolved_id
         include_usage = bool((req.raw.get("stream_options") or {}).get("include_usage"))
         use_tools = bool(req.tools)
 
@@ -446,7 +446,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_completion(self, body: Dict[str, Any]) -> None:
         st = self.state
-        req = oa.parse_completion_request(body, default_model=st.cfg.model.model_id,
+        req = oa.parse_completion_request(body, default_model=st.cfg.model.resolved_id,
                                           strict=st.cfg.server.reject_unsupported,
                                           base_params=st.base_params())
         self._note_ignored(req.ignored)
@@ -461,7 +461,7 @@ class Handler(BaseHTTPRequestHandler):
         result = aggregate(st.backend.generate(GenerationRequest(prompt=req.prompt,
                                                                 params=params)))
         self._send_json(200, oa.completion_response(
-            req_id=oa.new_id("cmpl"), model=req.model or st.cfg.model.model_id,
+            req_id=oa.new_id("cmpl"), model=req.model or st.cfg.model.resolved_id,
             text=result.text, finish_reason=result.finish_reason,
             usage=oa.usage_payload(result.stats)))
 
@@ -473,7 +473,7 @@ class Handler(BaseHTTPRequestHandler):
         st = self.state
         req_id = oa.new_id("cmpl")
         created = oa.now()
-        model = req.model or st.cfg.model.model_id
+        model = req.model or st.cfg.model.resolved_id
 
         self._sse_start()
         try:
@@ -516,7 +516,7 @@ def serve(cfg: AppConfig) -> int:
     shown = "127.0.0.1" if host in ("", "0.0.0.0") else host
 
     base = f"http://{shown}:{port}/v1"
-    print(f"cann-llm {version.__version__}  ·  {cfg.model.model_id}  "
+    print(f"cann-llm {version.__version__}  ·  {cfg.model.resolved_id}  "
           f"({cfg.model.backend}/{cfg.model.chat_template})")
     print(f"  监听      : http://{shown}:{port}")
     print(f"  base_url  : {base}      ← OpenAI 客户端的 base_url 填这个")

@@ -70,7 +70,7 @@ def _toggle_tools(arg: str, state: CliState) -> None:
 def _save(path: str, state: CliState, cfg: AppConfig) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write("# 对话记录\n\n")
-        f.write(f"- 模型：`{cfg.model.model_id}`\n")
+        f.write(f"- 模型：`{cfg.model.resolved_id}`\n")
         f.write(f"- 后端：`{cfg.model.backend}`\n")
         f.write(f"- 模板：`{cfg.model.chat_template}`\n")
         if state.tool_names:

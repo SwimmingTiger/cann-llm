@@ -42,8 +42,9 @@ class ServerConfig:
 class ModelConfig:
     #: 模型目录：需包含 omc / SubGraph_0.weight / embedding / tokenizer / json
     model_dir: Optional[str] = None
-    #: 对外暴露的模型 id（OpenAI 的 model 字段）
-    model_id: str = "qwen2.5-1.5b"
+    #: 对外暴露的模型 id（OpenAI 的 model 字段）。
+    #: 留空则**自动取模型目录名**（见 :attr:`resolved_id`）—— 换模型时不用手工改。
+    model_id: Optional[str] = None
     backend: str = "cann"
     chat_template: str = "chatml"
     system_prompt: str = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
@@ -54,6 +55,22 @@ class ModelConfig:
     repetition_penalty: float = 1.1
     #: 上下文长度（用于 /v1/models 展示）
     context_length: int = 2048
+
+    @property
+    def resolved_id(self) -> str:
+        """实际对外暴露的模型 id。
+
+        优先用显式设置的 ``model_id``；没设就取 ``model_dir`` 的目录名
+        （例如 ``/path/to/models/qwen3_4b`` -> ``qwen3_4b``）。
+        这样 ``-d`` 换模型时名字会跟着变，不需要额外参数。
+        """
+        if self.model_id:
+            return self.model_id
+        if self.model_dir:
+            name = os.path.basename(os.path.normpath(self.model_dir))
+            if name:
+                return name
+        return "cann-llm"
 
 
 @dataclass(frozen=True)
