@@ -29,6 +29,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import time
 from typing import Any, Dict, Iterator, List, Optional
 
 from ..errors import BackendUnavailableError, GenerationError, ModelLoadError
@@ -195,6 +196,20 @@ class _HiaiBindings:
         "HIAI_LLMEngine_Prompt_Create": (ctypes.c_void_p, []),
         "HIAI_LLMEngine_Prompt_SetText": (
             ctypes.c_int, [ctypes.c_void_p, ctypes.c_char_p]),
+        "HIAI_LLMEngine_Context_GetAllTokenGenerationLen": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]),
+        # ★ 注意：token 是 int32 数组，不是文本（实测 GetOneTokenGeneration 只给一个 token）
+        "HIAI_LLMEngine_Context_GetAllTokenGeneration": (
+            ctypes.c_int,
+            [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.c_int]),
+        "HIAI_LLMEngine_Context_SetOnAllTokensGenerateDoneFunc": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_void_p]),
+        "HIAI_LLMEngine_Context_SetOnGenerateAsyncFailed": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_void_p]),
+        "HIAI_LLMEngine_Context_Create": (ctypes.c_void_p, []),
+        "HIAI_LLMEngine_Prompt_Create": (ctypes.c_void_p, []),
+        "HIAI_LLMEngine_Context_SetMaxGenTokens": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_int]),
         # ★ 避开 Prompt_SetText 的 std::string 堆分配缺陷（见模块 docstring）
         "HIAI_LLMEngine_Prompt_SetTokenIds": (
             ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.c_uint]),
@@ -219,6 +234,24 @@ class _HiaiBindings:
             fn.argtypes = args
 
 
+def _module_base() -> int:
+    """libhiai_llm_engine.so 的加载基址（内部函数地址 = 基址 + 静态偏移）。"""
+    lo = None
+    with open("/proc/self/maps") as fh:
+        for line in fh:
+            if HIAI_LIB.rsplit("/", 1)[-1] in line:
+                a = int(line.split("-", 1)[0], 16)
+                lo = a if lo is None else min(lo, a)
+    if lo is None:
+        raise BackendUnavailableError(f"{HIAI_LIB} 未加载")
+    return lo
+
+
+#: 引擎内部函数静态偏移（已反编译确认，见模块 docstring 与 docs/hiai-backend-handoff.md）
+OFF_PUSH_PROMPT = 0xFDA28   # vector<Prompt336>::push_back —— 原样搬 336 字节，保住 tokenids
+OFF_RUN_GENERATE = 0x118704  # 真正的执行入口（GenerateAsync 的内部调用）
+
+
 @register_backend("hiai")
 class HiaiBackend(EngineBackend):
     """驱动系统内部引擎，认**官方模型目录结构**。"""
@@ -238,6 +271,8 @@ class HiaiBackend(EngineBackend):
         self._exec: Optional[int] = None
         self._ctx_json: bytes = b""               # 每请求用它新建 Context
         self._tok: Optional[QwenTokenizer] = None
+        self._cb_done = None                       # 回调需长期持有，勿被 GC
+        self._cb_fail = None
         self._bos: int = -1                        # 引擎期望的 BOS（缺它会 Generate 失败）
         # 显式给的优先；没给则 load() 时从合成的 executor JSON 里读
         self._context_length = context_length or 0
@@ -246,7 +281,7 @@ class HiaiBackend(EngineBackend):
     # ---------------------------------------------------------------- 生命周期
 
     def load(self) -> ModelInfo:
-        if self._ctx and self._exec:
+        if self._exec:
             assert self._info is not None
             return self._info
 
@@ -267,12 +302,10 @@ class HiaiBackend(EngineBackend):
         #     复用时第二次 Generate 就会产出垃圾（实测：in 变成 1，输出固定胡话）。
         #     这里只保存 context JSON，每次 generate 新建一个 Context，
         #     与已验证可用的 C 程序做法一致。
+        # ★ 只建 Executor —— 验证过的配方里【不】预先建 Context（预建会 SIGTRAP）。
+        #   Context 每请求用 Context_Create()（无参）新建。
         self._ctx_json = json.dumps(context_cfg).encode()
-        probe = self._bind.lib.HIAI_LLMEngine_Context_CreateFromContextJson(self._ctx_json)
-        if not probe:
-            raise ModelLoadError("Context 创建失败（检查合成的 context JSON）")
-        self._ctx = probe
-
+        self._ctx = None
         self._exec = self._bind.lib.HIAI_LLMEngine_Executor_CreateFromJson(
             json.dumps(executor_cfg).encode())
         if not self._exec:
@@ -314,13 +347,17 @@ class HiaiBackend(EngineBackend):
     # ------------------------------------------------------------------ 生成
 
     def generate(self, request: GenerationRequest) -> Iterator[GenerationChunk]:
-        if not (self._ctx and self._exec):
+        if not self._exec:                      # Context 每请求新建，不参与判断
             raise GenerationError("引擎尚未 load()")
         assert self._bind is not None
         p = request.params if request.params is not None else self.default_params
 
         # ★ 每次请求新建 Context（不复用 —— 见 load() 里的说明）
-        ctx = self._bind.lib.HIAI_LLMEngine_Context_CreateFromContextJson(self._ctx_json)
+        print("    [g1] ctx 前", flush=True)
+        ctx = self._bind.lib.HIAI_LLMEngine_Context_Create()
+        print(f"    [g1] ctx={ctx}", flush=True)
+        if not ctx:
+            raise GenerationError("Context 创建失败")
         if not ctx:
             raise GenerationError("Context 创建失败")
         self._ctx = ctx
@@ -329,32 +366,73 @@ class HiaiBackend(EngineBackend):
         maxgen = int(getattr(p, "max_tokens", 0) or 128)
         self._bind.lib.HIAI_LLMEngine_Context_SetMaxGenTokens(ctx, maxgen)
 
+        # ★★ 必须注册回调：流水线在完成时通过 std::function 回调，
+        #    未注册时引擎调用空的 std::function → libc++abi "Pure virtual function called!" 直接 abort。
+        # 回调驱动完成（★ 不能在生成期间轮询 —— 与工作线程竞态会触发
+        # libc++abi "Pure virtual function called!" 而 abort）
+        import threading
+        _ev_done = threading.Event()
+        _ev_fail = threading.Event()
+        _CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+        self._cb_done = _CB(lambda _p: _ev_done.set())
+        self._cb_fail = _CB(lambda _p: _ev_fail.set())
+        self._bind.lib.HIAI_LLMEngine_Context_SetOnAllTokensGenerateDoneFunc(
+            ctx, ctypes.cast(self._cb_done, ctypes.c_void_p))
+        self._bind.lib.HIAI_LLMEngine_Context_SetOnGenerateAsyncFailed(
+            ctx, ctypes.cast(self._cb_fail, ctypes.c_void_p))
+
+        print("    [g2] prompt 前", flush=True)
         prompt = self._bind.lib.HIAI_LLMEngine_Prompt_Create()
+        print(f"    [g2] prompt={prompt}", flush=True)
         if not prompt:
             raise GenerationError("Prompt 创建失败")
         try:
             # ★ 走 token ids：Prompt_SetText 的 std::string 堆路径在本机不可用
             #   （实测边界精确在 22 字节 = libc++ SSO 容量，超过就只剩 1 个 token）
             assert self._tok is not None
+            print("    [g3] 编码", flush=True)
             ids = self._tok.encode(request.prompt)
+            print(f"    [g3] ids={len(ids)}", flush=True)
             if not ids:
                 raise GenerationError("分词结果为空")
             if self._bos >= 0 and ids[0] != self._bos:
                 ids = [self._bos] + ids          # ★ 补 BOS
             # ★ 告知引擎本prompt要 prefill 多少 token（服务在 SetTokenIds 前设它）
-            self._bind.lib.HIAI_LLMEngine_Context_SetInitTokenLen(ctx, len(ids))
+            # 注：不要自己调 SetInitTokenLen（流水线内部会设 base.cpp:401）
+            print("    [g4] SetTokenIds 前", flush=True)
             arr = (ctypes.c_int32 * len(ids))(*ids)
+            print("    [g4] arr 就绪", flush=True)
             if self._bind.lib.HIAI_LLMEngine_Prompt_SetTokenIds(
                     prompt, arr, len(ids)) != 0:
                 raise GenerationError("Prompt_SetTokenIds 失败")
-            # ★ 第 3 参传 Prompt 对象（不是文本）
-            rc = self._bind.lib.HIAI_LLMEngine_Executor_Generate(
-                self._exec, ctx, prompt)
+            # ★★ 不走 Executor_Generate / GenerateAsync —— 二者都会丢 tokenids：
+            #    实测 GenerateAsync 内部的 Prompt→params 转换会让流水线看到空 tokenids
+            #    （证据：CheckPromptType 写入的 ctx+920 恒为 3 = "两者都空"）。
+            #    这里自己组 params 向量，用引擎的 push_back 原样搬 336 字节的 Prompt。
+            base = _module_base()
+            push = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)(
+                base + OFF_PUSH_PROMPT)
+            run = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p,
+                                   ctypes.c_void_p)(base + OFF_RUN_GENERATE)
+            print("    [g5] 构造 push/run", flush=True)
+            print(f"    [g6] base=0x{base:x} push=0x{base+OFF_PUSH_PROMPT:x} run=0x{base+OFF_RUN_GENERATE:x}", flush=True)
+            vec = (ctypes.c_uint64 * 3)(0, 0, 0)
+            print("    [g7] push 前", flush=True)
+            push(ctypes.byref(vec), prompt)
+            print(f"    [g7] push 后 vec={vec[0]:#x}/{vec[1]:#x}", flush=True)
+            print("    [g8] run 前", flush=True)
+            rc = run(self._exec, ctx, ctypes.byref(vec))
+            print(f"    [g8] run 后 rc={rc}", flush=True)
+            if rc == 0:
+                # ★ 等回调（不轮询！）—— 生成期间读 Context 会与工作线程竞态而 abort
+                _ev_done.wait(timeout=300)
+                if _ev_fail.is_set():
+                    raise GenerationError("引擎报告生成失败（OnGenerateAsyncFailed）")
             if rc != 0:
                 raise GenerationError(
                     f"引擎 Generate 返回 {rc}（本模型 KV 缓存 {self._context_length} token）")
 
-            out = self._read_generation()
+            out = self._read_tokens()
             stats = self._read_stats(len(out))
             yield GenerationChunk(text=out, finish_reason="stop", stats=stats)
         finally:
@@ -363,6 +441,24 @@ class HiaiBackend(EngineBackend):
             # Context 每请求一个，用完即销毁（内部引擎的 Destroy 收指针的指针）
             self._bind.lib.HIAI_LLMEngine_Context_Destroy(
                 ctypes.byref(ctypes.c_void_p(ctx)))
+
+    def _read_tokens(self) -> str:
+        """取生成结果：引擎给的是 **token id 数组**（不是文本），用自带分词器解码。"""
+        assert self._bind is not None and self._ctx and self._tok is not None
+        n = ctypes.c_int(0)
+        if self._bind.lib.HIAI_LLMEngine_Context_GetAllTokenGenerationLen(
+                self._ctx, ctypes.byref(n)) != 0 or n.value <= 0:
+            return ""
+        buf = (ctypes.c_int32 * (n.value + 8))()
+        if self._bind.lib.HIAI_LLMEngine_Context_GetAllTokenGeneration(
+                self._ctx, buf, n.value + 8) != 0:
+            return ""
+        ids = [int(x) for x in buf[:n.value]]
+        # 去掉终止 token
+        for stop in (151645, 151643):          # <|im_end|> / <|endoftext|>
+            while ids and ids[-1] == stop:
+                ids.pop()
+        return self._tok.decode(ids)
 
     def _read_generation(self) -> str:
         assert self._bind is not None and self._ctx
