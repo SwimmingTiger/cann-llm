@@ -35,9 +35,7 @@ class ServerConfig:
     #:                    把 tool_calls 返回给客户端自行执行
     #:   "off"         —— 永远按 OpenAI 标准返回 tool_calls
     #:   "on"          —— 永远由服务端执行（未注册的工具会作为错误回给模型）
-    agent_tools: str = "auto"
-    #: agent 循环最多几轮
-    agent_max_steps: int = 4
+
 
 
 @dataclass(frozen=True)
@@ -61,9 +59,28 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class AgentSettings:
+    """agent 循环的配置。
+
+    注意：HTTP 层**不**执行工具，只按 OpenAI 标准把 tool_calls 返回给客户端；
+    这个配置只作用于 CLI 交互式对话（以及直接调用 AgentLoop 的场合）。
+    """
+
+    #: 最多迭代几轮（含最后一轮强制收尾）
+    max_steps: int = 4
+    #: 单步内最多执行几次工具调用
+    max_calls_per_step: int = 4
+    #: 工具结果回填时的截断长度
+    max_result_chars: int = 4000
+    #: 在工具说明后追加「该用就用」的强指令（实测对小模型是决定性的）
+    force_tool_use: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     model: ModelConfig = ModelConfig()
     server: ServerConfig = ServerConfig()
+    agent: AgentSettings = AgentSettings()
 
     def merged(self, **sections: Any) -> "AppConfig":
         """返回覆盖了若干字段的新配置，例如 ``merged(model={"port": 1})`` 非法，
@@ -73,10 +90,13 @@ class AppConfig:
             out = replace(out, model=replace(out.model, **sections["model"]))
         if "server" in sections:
             out = replace(out, server=replace(out.server, **sections["server"]))
+        if "agent" in sections:
+            out = replace(out, agent=replace(out.agent, **sections["agent"]))
         return out
 
 
-_SECTION_TYPES = {"model": ModelConfig, "server": ServerConfig}
+_SECTION_TYPES = {"model": ModelConfig, "server": ServerConfig,
+                  "agent": AgentSettings}
 
 
 def _coerce(cls, data: dict) -> Any:

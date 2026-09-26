@@ -96,20 +96,27 @@ you> 帮我算一下 (23*7+11)/4
     ✓ 0ms  {"expression": "(23*7+11)/4", "result": 43.0}
 bot> 计算结果是 43.0。
 
-# HTTP：客户端声明工具，服务端自动执行（agent 模式）
+# HTTP：按 OpenAI 标准，声明工具后返回 tool_calls 由客户端执行
 curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
-  "messages": [{"role": "user", "content": "现在几点？"}],
-  "tools": [{"type": "function", "function": {"name": "get_current_time",
-             "description": "获取当前日期与时间。",
-             "parameters": {"type": "object", "properties": {}}}}]}'
+  "messages": [{"role": "user", "content": "2 的 10 次方是多少？"}],
+  "tools": [{"type": "function", "function": {"name": "calculator",
+             "description": "计算算术表达式",
+             "parameters": {"type": "object",
+                            "properties": {"expression": {"type": "string"}},
+                            "required": ["expression"]}}}]}'
+# → {"finish_reason": "tool_calls", "message": {"tool_calls": [...]}}
 ```
+
+**HTTP 层只实现 OpenAI 标准语义**（服务端不执行工具）—— 你的应用能访问的
+东西（数据库、内部 API）和本服务注册的工具不是一回事，把执行权交给客户端
+才通用。**CLI 是例外**：它没有"客户端"可以代劳，所以直接用 agent 循环执行。
 
 内置工具：`get_current_time`、`calculator`（默认启用）、`http_get`（带 SSRF
 防护，标记 `dangerous` 需显式开启）。**框架刻意不内置 shell / 文件读写工具** ——
 要加请自行注册并评估风险。加工具只需一个装饰器，见 docs/agent.md。
 
-若客户端声明的工具本服务没有，则按 **OpenAI 标准**返回 `tool_calls` 交给
-客户端自己执行（两种语义都支持，由 `server.agent_tools` 切换）。
+**HTTP 层不执行工具**，只按标准返回 `tool_calls`；执行循环由你的客户端负责
+（用 `openai` SDK 的话就是十来行，见 docs/agent.md 的完整示例）。
 
 ## 项目结构
 

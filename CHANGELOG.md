@@ -47,10 +47,12 @@
   内置工具（`get_current_time` / `calculator` / `http_get` 带 SSRF 防护）
 - `agent/parser.py`：容错的 tool_call 解析（12 种畸形输出）
 - `agent/loop.py`：agent 循环 + `StreamFilter`（流式时隐藏工具协议标记）
-- API 两种语义：服务端执行（agent 模式，带 `x_agent` 轨迹）与
-  客户端执行（OpenAI 标准 `tool_calls`），由 `server.agent_tools` 切换
+- HTTP 层按 **OpenAI 标准**返回 `tool_calls` 由客户端执行；流式时过滤掉
+  `<tool_call>` 协议标记并按标准发 `delta.tool_calls`
 - CLI：`--tools all|<名字>`、`--list-tools`、`/tools` 命令、调用过程可视化
-- `server.agent_max_steps`（默认 4）、`AgentConfig.force_tool_use`（默认开）
+  （CLI 没有"客户端"可代劳，所以直接用 `AgentLoop` 执行工具）
+- 新增 `[agent]` 配置段（`max_steps` / `max_calls_per_step` /
+  `max_result_chars` / `force_tool_use`），只作用于 CLI
 - 文档 `docs/agent.md`
 
 ### Changed

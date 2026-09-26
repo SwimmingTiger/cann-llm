@@ -118,7 +118,10 @@ def run_turn(engine: EngineBackend, cfg: AppConfig, state: CliState,
     state.messages.append(Message("user", text))
     loop = AgentLoop(
         engine, get_template(cfg.model.chat_template), registry,
-        config=AgentConfig(max_steps=cfg.server.agent_max_steps),
+        config=AgentConfig(max_steps=cfg.agent.max_steps,
+                           max_calls_per_step=cfg.agent.max_calls_per_step,
+                           max_result_chars=cfg.agent.max_result_chars,
+                           force_tool_use=cfg.agent.force_tool_use),
         system_prompt=state.system_prompt, params=state.params,
         max_prompt_tokens=cfg.model.max_prompt_tokens)
 

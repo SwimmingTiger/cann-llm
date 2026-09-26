@@ -24,22 +24,13 @@ import time
 from dataclasses import dataclass, field, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 from .. import version
 from ..backends import available_backends, create_backend
 from ..backends.base import EngineBackend, SerializedBackend
-from ..agent.loop import (
-    AgentConfig,
-    AgentLoop,
-    Final,
-    TextDelta,
-    ToolCallDone,
-    ToolCallReady,
-)
 from ..chat.template import get_template
-from ..tools import default_registry
 from ..config import AppConfig, load_config
 from ..agent.loop import StreamFilter
 from ..agent.parser import parse_tool_calls
@@ -340,28 +331,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(status, payload)
 
     # ---- 工具模式 ----
-    def _local_tools_for(self, req) -> Optional[Any]:
-        """决定由服务端执行工具还是返回给客户端。
-
-        :return: 可执行的 :class:`ToolRegistry`；``None`` 表示走 OpenAI 标准
-            （把 tool_calls 返回给客户端自行执行）。
-        """
-        mode = (self.state.cfg.server.agent_tools or "auto").lower()
-        if not req.tools or mode == "off":
-            return None
-        local = default_registry()
-        names = req.tool_names
-        unknown = [n for n in names if n not in local]
-        if mode == "on":
-            known = [n for n in names if n in local]
-            return local.select(known) if known else None
-        # auto：只有「客户端声明的工具本服务全都有」时才自己执行，
-        # 否则交给客户端（避免一半我执行一半你执行的混乱）
-        if unknown or not names:
-            return None
-        return local.select(names)
-
-    # ---- 业务 ----
     def _note_ignored(self, fields) -> None:
         """记录本轮被忽略的字段：写响应头 + 日志一行（便于排查客户端行为）。"""
         self.ignored_fields = tuple(fields or ())
@@ -374,18 +343,10 @@ class Handler(BaseHTTPRequestHandler):
                                     strict=st.cfg.server.reject_unsupported)
         self._note_ignored(req.ignored)
         params = req.params if req.params != GenerationParams() else st.base_params()
-
-        registry = self._local_tools_for(req)
-        if registry is not None:                     # 服务端执行工具（agent）
-            self._agent_chat(req, params, registry)
-            return
-
         prompt = st.template.render(req.messages, tools=req.tools or None)
+
         if req.stream:
-            if req.tools:
-                self._stream_tool_chat(req, prompt, params)    # 客户端执行工具
-            else:
-                self._stream_chat(req, prompt, params)
+            self._stream_chat(req, prompt, params)
             return
 
         from ..types import GenerationRequest, aggregate
@@ -398,148 +359,21 @@ class Handler(BaseHTTPRequestHandler):
             parsed = parse_tool_calls(result.text)
             tool_calls = parsed.tool_calls or None
             if tool_calls:
-                result = replace(result, text=parsed.text,
-                                 finish_reason="tool_calls")
+                result = replace(result, text=parsed.text, finish_reason="tool_calls")
 
         self._send_json(200, oa.chat_completion_response(
             req_id=oa.new_id("chatcmpl"), model=req.model or st.cfg.model.model_id,
             text=result.text, finish_reason=result.finish_reason,
             usage=oa.usage_payload(result.stats), tool_calls=tool_calls))
 
-    def _agent_chat(self, req, params, registry) -> None:
-        """服务端执行工具的 agent 模式。"""
-        st = self.state
-        loop = AgentLoop(st.backend, st.template, registry,
-                         config=AgentConfig(max_steps=st.cfg.server.agent_max_steps),
-                         system_prompt=st.cfg.model.system_prompt,
-                         params=params, max_prompt_tokens=st.cfg.model.max_prompt_tokens)
-
-        if req.stream:
-            self._stream_agent(req, loop)
-            return
-
-        trace = []
-        text = ""
-        final = None
-        for ev in loop.run(req.messages, stream=False):
-            if isinstance(ev, ToolCallReady):
-                trace.append({"name": ev.call.name, "arguments": ev.call.arguments,
-                              "step": ev.step})
-            elif isinstance(ev, ToolCallDone):
-                if trace:
-                    trace[-1]["ok"] = ev.result.ok
-                    trace[-1]["duration_ms"] = round(ev.duration_ms, 1)
-                    trace[-1]["content_preview"] = ev.result.content[:200]
-            elif isinstance(ev, Final):
-                final = ev
-                text = ev.text
-
-        payload = oa.chat_completion_response(
-            req_id=oa.new_id("chatcmpl"), model=req.model or st.cfg.model.model_id,
-            text=text, finish_reason="stop",
-            usage=oa.usage_payload(final.stats if final else None),
-            extra={"x_agent": {"mode": "server", "steps": final.steps if final else 0,
-                               "tool_calls": trace}})
-        self._send_json(200, payload,
-                        extra_headers=(("X-Cann-Llm-Agent-Mode", "server"),))
-
-    def _stream_agent(self, req, loop) -> None:
-        """agent 模式的 SSE：正文照常流式，工具调用轨迹放在末尾的 x_agent 里。"""
-        req_id = oa.new_id("chatcmpl")
-        created = oa.now()
-        model = req.model or self.state.cfg.model.model_id
-
-        self.extra_headers = (("X-Cann-Llm-Agent-Mode", "server"),)
-        self._sse_start()
-        try:
-            self._sse_write(oa.sse_data(oa.chat_completion_chunk(
-                req_id=req_id, model=model, created=created,
-                delta={"role": "assistant", "content": ""})))
-            trace, final = [], None
-            for ev in loop.run(req.messages, stream=True):
-                if isinstance(ev, TextDelta) and ev.text:
-                    self._sse_write(oa.sse_data(oa.chat_completion_chunk(
-                        req_id=req_id, model=model, created=created,
-                        delta={"content": ev.text})))
-                elif isinstance(ev, ToolCallReady):
-                    trace.append({"name": ev.call.name, "arguments": ev.call.arguments,
-                                  "step": ev.step})
-                elif isinstance(ev, ToolCallDone):
-                    if trace:
-                        trace[-1]["ok"] = ev.result.ok
-                        trace[-1]["duration_ms"] = round(ev.duration_ms, 1)
-                elif isinstance(ev, Final):
-                    final = ev
-
-            last = oa.chat_completion_chunk(req_id=req_id, model=model, created=created,
-                                            delta={}, finish_reason="stop")
-            last["x_agent"] = {"mode": "server", "steps": final.steps if final else 0,
-                               "tool_calls": trace}
-            self._sse_write(oa.sse_data(last))
-            self._sse_write(oa.SSE_DONE)
-            self._sse_end()
-        except (BrokenPipeError, ConnectionResetError):
-            self.close_connection = True
-        except Exception as e:               # noqa: BLE001
-            self.log_message("agent 流式失败: %r", e)
-            self._sse_abort(e)
-
-    def _stream_tool_chat(self, req, prompt, params) -> None:
-        """OpenAI 标准的流式工具调用：把 tool_calls 交给客户端执行。"""
-        from ..types import GenerationRequest
-
-        st = self.state
-        req_id = oa.new_id("chatcmpl")
-        created = oa.now()
-        model = req.model or st.cfg.model.model_id
-
-        self._sse_start()
-        try:
-            self._sse_write(oa.sse_data(oa.chat_completion_chunk(
-                req_id=req_id, model=model, created=created,
-                delta={"role": "assistant", "content": ""})))
-
-            raw, visible, stats, finish = [], [], None, "stop"
-            flt = StreamFilter()
-            for chunk in st.backend.generate(GenerationRequest(prompt=prompt, params=params)):
-                if chunk.text:
-                    raw.append(chunk.text)
-                    piece = flt.feed(chunk.text)
-                    if piece:
-                        visible.append(piece)
-                        self._sse_write(oa.sse_data(oa.chat_completion_chunk(
-                            req_id=req_id, model=model, created=created,
-                            delta={"content": piece})))
-                if chunk.stats is not None:
-                    stats = chunk.stats
-                if chunk.finish_reason:
-                    finish = chunk.finish_reason
-
-            parsed = parse_tool_calls("".join(raw))
-            if parsed.tool_calls:
-                deltas = [oa.tool_call_delta(i, call_id=tc.id, name=tc.name,
-                                             arguments=json.dumps(tc.arguments,
-                                                                 ensure_ascii=False))
-                          for i, tc in enumerate(parsed.tool_calls)]
-                self._sse_write(oa.sse_data(oa.chat_completion_chunk(
-                    req_id=req_id, model=model, created=created,
-                    delta={"tool_calls": deltas})))
-                finish = "tool_calls"
-
-            self._sse_write(oa.sse_data(oa.chat_completion_chunk(
-                req_id=req_id, model=model, created=created, delta={},
-                finish_reason=finish)))
-            self._sse_write(oa.SSE_DONE)
-            self._sse_end()
-        except (BrokenPipeError, ConnectionResetError):
-            self.close_connection = True
-        except Exception as e:               # noqa: BLE001
-            self.log_message("工具流式失败: %r", e)
-            self._sse_abort(e)
-
     def _stream_chat(self, req: oa.ChatCompletionRequest, prompt: str,
                      params: GenerationParams) -> None:
-        """SSE 流式 chat.completion.chunk。"""
+        """SSE 流式 chat.completion.chunk。
+
+        声明了 tools 时，会把工具协议标记从流里过滤掉 —— 客户端不该看到
+        ``<tool_call>`` 这种内部格式；解析出的调用放到末尾的 delta.tool_calls 里，
+        按 OpenAI 标准交给客户端执行。
+        """
         from ..types import GenerationRequest
 
         st = self.state
@@ -547,6 +381,7 @@ class Handler(BaseHTTPRequestHandler):
         created = oa.now()
         model = req.model or st.cfg.model.model_id
         include_usage = bool((req.raw.get("stream_options") or {}).get("include_usage"))
+        use_tools = bool(req.tools)
 
         self._sse_start()
         try:
@@ -557,15 +392,35 @@ class Handler(BaseHTTPRequestHandler):
 
             finish_reason = "stop"
             stats = None
+            raw_parts: List[str] = []
+            flt = StreamFilter() if use_tools else None
             for chunk in st.backend.generate(GenerationRequest(prompt=prompt, params=params)):
                 if chunk.text:
-                    self._sse_write(oa.sse_data(oa.chat_completion_chunk(
-                        req_id=req_id, model=model, created=created,
-                        delta={"content": chunk.text})))
+                    if flt is not None:
+                        raw_parts.append(chunk.text)
+                        piece = flt.feed(chunk.text)
+                    else:
+                        piece = chunk.text
+                    if piece:
+                        self._sse_write(oa.sse_data(oa.chat_completion_chunk(
+                            req_id=req_id, model=model, created=created,
+                            delta={"content": piece})))
                 if chunk.stats is not None:
                     stats = chunk.stats
                 if chunk.finish_reason:
                     finish_reason = chunk.finish_reason
+
+            if flt is not None:
+                parsed = parse_tool_calls("".join(raw_parts))
+                if parsed.tool_calls:
+                    self._sse_write(oa.sse_data(oa.chat_completion_chunk(
+                        req_id=req_id, model=model, created=created,
+                        delta={"tool_calls": [
+                            oa.tool_call_delta(i, call_id=tc.id, name=tc.name,
+                                               arguments=json.dumps(tc.arguments,
+                                                                    ensure_ascii=False))
+                            for i, tc in enumerate(parsed.tool_calls)]})))
+                    finish_reason = "tool_calls"
 
             self._sse_write(oa.sse_data(oa.chat_completion_chunk(
                 req_id=req_id, model=model, created=created,
@@ -584,6 +439,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:               # noqa: BLE001
             self.log_message("流式生成失败: %r", e)
             self._sse_abort(e)
+
 
     def _handle_completion(self, body: Dict[str, Any]) -> None:
         st = self.state

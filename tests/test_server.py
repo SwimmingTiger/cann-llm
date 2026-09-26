@@ -380,24 +380,24 @@ if __name__ == "__main__":
 
 
 class TestToolCalling(unittest.TestCase):
-    """API 层两种工具语义：服务端执行（agent）与客户端执行（OpenAI 标准）。"""
+    """HTTP 层只按 OpenAI 标准返回 tool_calls，由客户端执行。
 
-    CALL = '<tool_call>\n{"name": "calculator", "arguments": {"expression": "1+1"}}\n</tool_call>'
+    服务端**不**执行工具（CLI 走 AgentLoop，那是另一条路径）。
+    """
+
+    CALL = '<tool_call>\n{"name": "client_tool", "arguments": {"a": 1}}\n</tool_call>'
+    TOOL = {"type": "function", "function": {
+        "name": "client_tool", "description": "客户端自己的工具",
+        "parameters": {"type": "object", "properties": {"a": {"type": "integer"}}}}}
     CALC_TOOL = {"type": "function", "function": {
-        "name": "calculator", "description": "计算算术表达式",
-        "parameters": {"type": "object",
-                       "properties": {"expression": {"type": "string"}},
-                       "required": ["expression"]}}}
-    UNKNOWN_TOOL = {"type": "function", "function": {
-        "name": "client_side_tool", "description": "只有客户端才有",
-        "parameters": {"type": "object", "properties": {}}}}
+        "name": "calculator", "description": "计算", "parameters": {"type": "object"}}}
 
-    def _server(self, replies, **server_kw):
+    def _server(self, replies):
         from .fakes import ScriptedBackend
         inner = ScriptedBackend(replies)
         inner.load()
         cfg = AppConfig(model=ModelConfig(model_id="m", backend="fake"),
-                        server=ServerConfig(host="127.0.0.1", port=0, **server_kw))
+                        server=ServerConfig(host="127.0.0.1", port=0))
         state = AppState(cfg=cfg, backend=SerializedBackend(inner),
                          template=get_template("chatml"))
         httpd = LlmHttpServer(("127.0.0.1", 0), state)
@@ -413,97 +413,91 @@ class TestToolCalling(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.status, dict(r.headers), r.read().decode()
 
-    def test_server_side_agent_executes_tools(self):
-        base, inner = self._server([self.CALL, "答案是 2"])
+    def test_tool_call_returned_to_client(self):
+        base, inner = self._server([self.CALL])
         status, headers, body = self._post_full(base + "/v1/chat/completions", {
-            "messages": [{"role": "user", "content": "1+1=?"}],
-            "tools": [self.CALC_TOOL]})
+            "messages": [{"role": "user", "content": "x"}], "tools": [self.TOOL]})
         self.assertEqual(status, 200)
-        self.assertEqual(headers.get("X-Cann-Llm-Agent-Mode"), "server")
         d = json.loads(body)
-        # agent 模式由服务端执行完，返回最终答案，不把 tool_calls 抛给客户端
-        self.assertEqual(d["choices"][0]["message"]["content"], "答案是 2")
-        self.assertNotIn("tool_calls", d["choices"][0]["message"])
-        self.assertEqual(d["choices"][0]["finish_reason"], "stop")
-        trace = d["x_agent"]["tool_calls"]
-        self.assertEqual(trace[0]["name"], "calculator")
-        self.assertTrue(trace[0]["ok"])
-        self.assertEqual(inner.call_count, 2)      # 两轮：调用 + 收尾
-
-    def test_client_side_tool_returns_tool_calls(self):
-        base, inner = self._server(["忽略"])
-        status, headers, body = self._post_full(base + "/v1/chat/completions", {
-            "messages": [{"role": "user", "content": "x"}],
-            "tools": [self.UNKNOWN_TOOL]})
-        self.assertEqual(status, 200)
-        self.assertNotIn("X-Cann-Llm-Agent-Mode", headers)
-        d = json.loads(body)
-        self.assertEqual(inner.call_count, 1)      # 只生成一次，不跑循环
-        ch = d["choices"][0]
-        self.assertEqual(ch["finish_reason"], "stop")   # 没有调用，就是普通回答
-        self.assertIsNone(ch["message"].get("tool_calls"))
-
-    def test_client_side_tool_call_shape(self):
-        base, _ = self._server(['<tool_call>{"name": "client_side_tool", '
-                                '"arguments": {"a": 1}}</tool_call>'])
-        _status, _headers, body = self._post_full(base + "/v1/chat/completions", {
-            "messages": [{"role": "user", "content": "x"}],
-            "tools": [self.UNKNOWN_TOOL]})
-        d = json.loads(body)
+        # 只生成一次 —— 服务端不跑循环
+        self.assertEqual(inner.call_count, 1)
         ch = d["choices"][0]
         self.assertEqual(ch["finish_reason"], "tool_calls")
         self.assertIsNone(ch["message"]["content"])
         tc = ch["message"]["tool_calls"][0]
         self.assertEqual(tc["type"], "function")
-        self.assertEqual(tc["function"]["name"], "client_side_tool")
+        self.assertEqual(tc["function"]["name"], "client_tool")
         self.assertEqual(json.loads(tc["function"]["arguments"]), {"a": 1})
         self.assertTrue(tc["id"])
 
-    def test_agent_tools_off_always_defers_to_client(self):
-        base, inner = self._server([self.CALL], agent_tools="off")
-        _status, headers, body = self._post_full(base + "/v1/chat/completions", {
-            "messages": [{"role": "user", "content": "1+1=?"}],
-            "tools": [self.CALC_TOOL]})
+    def test_no_agent_mode_artifacts(self):
+        """服务端执行模式已移除：不应再出现 agent 头或 x_agent 字段。"""
+        base, _ = self._server([self.CALL])
+        _s, headers, body = self._post_full(base + "/v1/chat/completions", {
+            "messages": [{"role": "user", "content": "x"}], "tools": [self.TOOL]})
         self.assertNotIn("X-Cann-Llm-Agent-Mode", headers)
+        self.assertNotIn("x_agent", json.loads(body))
+
+    def test_plain_request_without_tools_is_untouched(self):
+        base, inner = self._server(["普通回答"])
+        _s, _h, body = self._post_full(base + "/v1/chat/completions",
+                                       {"messages": [{"role": "user", "content": "x"}]})
         d = json.loads(body)
-        self.assertEqual(d["choices"][0]["finish_reason"], "tool_calls")
+        self.assertEqual(d["choices"][0]["message"]["content"], "普通回答")
+        self.assertIsNone(d["choices"][0]["message"].get("tool_calls"))
         self.assertEqual(inner.call_count, 1)
 
-    def test_streaming_agent_mode(self):
-        base, _ = self._server([self.CALL, "答案是 2"])
-        _status, headers, body = self._post_full(base + "/v1/chat/completions", {
-            "messages": [{"role": "user", "content": "1+1=?"}],
-            "tools": [self.CALC_TOOL], "stream": True})
-        self.assertEqual(headers.get("X-Cann-Llm-Agent-Mode"), "server")
-        frames = [json.loads(l[6:]) for l in body.splitlines()
-                  if l.startswith("data: ") and l[6:] != "[DONE]"]
-        text = "".join(f["choices"][0]["delta"].get("content", "") for f in frames)
-        self.assertIn("答案是 2", text)
-        # 工具协议不应出现在流给客户端的内容里
-        self.assertNotIn("<tool_call>", text)
-        last = frames[-1]
-        self.assertEqual(last["x_agent"]["tool_calls"][0]["name"], "calculator")
+    def test_tool_protocol_not_leaked_into_content(self):
+        """工具协议标记不能出现在 message.content 里。"""
+        base, _ = self._server([self.CALL])
+        _s, _h, body = self._post_full(base + "/v1/chat/completions", {
+            "messages": [{"role": "user", "content": "x"}], "tools": [self.TOOL]})
+        content = json.loads(body)["choices"][0]["message"]["content"]
+        self.assertIsNone(content)
 
-    def test_streaming_client_mode_emits_tool_call_deltas(self):
-        base, _ = self._server(['<tool_call>{"name": "client_side_tool", "arguments": {"a": 1}}</tool_call>'])
-        _status, _headers, body = self._post_full(base + "/v1/chat/completions", {
+    def test_text_alongside_tool_call_is_kept(self):
+        base, _ = self._server(["我先查一下。" + self.CALL])
+        _s, _h, body = self._post_full(base + "/v1/chat/completions", {
+            "messages": [{"role": "user", "content": "x"}], "tools": [self.TOOL]})
+        ch = json.loads(body)["choices"][0]
+        self.assertEqual(ch["finish_reason"], "tool_calls")
+        self.assertIn("我先查一下", ch["message"]["content"])
+
+    def test_no_tool_call_means_normal_answer(self):
+        base, _ = self._server(["直接回答"])
+        _s, _h, body = self._post_full(base + "/v1/chat/completions", {
+            "messages": [{"role": "user", "content": "x"}], "tools": [self.TOOL]})
+        ch = json.loads(body)["choices"][0]
+        self.assertEqual(ch["finish_reason"], "stop")
+        self.assertEqual(ch["message"]["content"], "直接回答")
+        self.assertIsNone(ch["message"].get("tool_calls"))
+
+    def test_streaming_emits_tool_call_deltas(self):
+        base, _ = self._server([self.CALL])
+        _s, _h, body = self._post_full(base + "/v1/chat/completions", {
             "messages": [{"role": "user", "content": "x"}],
-            "tools": [self.UNKNOWN_TOOL], "stream": True})
+            "tools": [self.TOOL], "stream": True})
         frames = [json.loads(l[6:]) for l in body.splitlines()
                   if l.startswith("data: ") and l[6:] != "[DONE]"]
         with_calls = [f for f in frames if f["choices"][0]["delta"].get("tool_calls")]
         self.assertEqual(len(with_calls), 1)
         tc = with_calls[0]["choices"][0]["delta"]["tool_calls"][0]
-        self.assertEqual(tc["function"]["name"], "client_side_tool")
+        self.assertEqual(tc["function"]["name"], "client_tool")
         self.assertEqual(frames[-1]["choices"][0]["finish_reason"], "tool_calls")
         delivered = "".join(f["choices"][0]["delta"].get("content", "") for f in frames)
         self.assertNotIn("<tool_call>", delivered)
 
-    def test_tool_result_not_leaked_as_text(self):
-        """工具调用的协议文本不能出现在最终回答里。"""
-        base, _ = self._server([self.CALL, "最终答复"])
-        _s, _h, body = self._post_full(base + "/v1/chat/completions", {
-            "messages": [{"role": "user", "content": "1+1=?"}],
-            "tools": [self.CALC_TOOL]})
-        content = json.loads(body)["choices"][0]["message"]["content"]
-        self.assertEqual(content, "最终答复")
+    def test_streaming_without_tools_passes_text_through(self):
+        """没声明工具时不做过滤，正文原样流出。"""
+        base, _ = self._server(["你好呀"])
+        _s, _h, body = self._post_full(base + "/v1/chat/completions",
+                                       {"messages": [{"role": "user", "content": "x"}],
+                                        "stream": True})
+        frames = [json.loads(l[6:]) for l in body.splitlines()
+                  if l.startswith("data: ") and l[6:] != "[DONE]"]
+        text = "".join(f["choices"][0]["delta"].get("content", "") for f in frames)
+        self.assertEqual(text, "你好呀")
+
+
+if __name__ == "__main__":
+    unittest.main()

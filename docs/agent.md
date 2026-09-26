@@ -126,45 +126,83 @@ python3 -m cann_llm.cli.chat --list-tools
 
 ### HTTP（OpenAI 兼容）
 
-两种语义都支持，由 `server.agent_tools` 决定（默认 `auto`）：
-
-**① 服务端执行（agent 模式）** —— 客户端声明的工具本服务都注册过时：
+HTTP 层**只实现 OpenAI 标准语义**：服务端不执行工具，只把模型表达的调用
+返回给客户端，由客户端执行后再把结果发回来。
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
-  "messages": [{"role": "user", "content": "现在几点？"}],
+  "messages": [{"role": "user", "content": "2 的 10 次方是多少？"}],
   "tools": [{"type": "function", "function": {
-      "name": "get_current_time", "description": "获取当前日期与时间。",
-      "parameters": {"type": "object", "properties": {}}}}]
-}'
+      "name": "calculator", "description": "计算算术表达式",
+      "parameters": {"type": "object",
+                     "properties": {"expression": {"type": "string"}},
+                     "required": ["expression"]}}}]}'
 ```
 
-响应头 `X-Cann-Llm-Agent-Mode: server`；响应体是非标准的 `x_agent`
-（步数 + 每次调用与结果）。**消息里不放 `tool_calls`** —— 否则 OpenAI
-客户端会以为需要自己再执行一遍。
-
-**② 客户端执行（OpenAI 标准）** —— 声明了本服务没有的工具时：
+声明的工具会渲染进 prompt；模型如果发起调用，响应就是：
 
 ```json
 {
-  "finish_reason": "tool_calls",
-  "message": {
-    "role": "assistant", "content": null,
-    "tool_calls": [{"id": "call_xxx", "type": "function",
-                    "function": {"name": "your_tool", "arguments": "{\"a\": 1}"}}]
-  }
+  "choices": [{
+    "finish_reason": "tool_calls",
+    "message": {
+      "role": "assistant", "content": null,
+      "tool_calls": [{"id": "call_3f2a1b9c", "type": "function",
+                      "function": {"name": "calculator",
+                                   "arguments": "{\"expression\": \"2**10\"}"}}]
+    }
+  }]
 }
 ```
 
-客户端执行后把 `role: "tool"` 消息（带 `tool_call_id`）发回来，服务端继续。
+客户端执行后把结果发回来，服务端继续：
 
-`server.agent_tools` 取值：
+```json
+{"messages": [
+  {"role": "user", "content": "2 的 10 次方是多少？"},
+  {"role": "assistant", "content": null, "tool_calls": [{...}]},
+  {"role": "tool", "tool_call_id": "call_3f2a1b9c", "content": "{\"result\": 1024}"}
+], "tools": [{...}], "model": "qwen2.5-1.5b"}
+```
 
-| 值 | 行为 |
-|---|---|
-| `auto`（默认） | 工具全都在本地注册 → 服务端执行；否则交给客户端 |
-| `off` | 永远按 OpenAI 标准返回 `tool_calls` |
-| `on` | 永远由服务端执行（未注册的工具会作为错误回给模型） |
+流式时同样按标准发 `delta.tool_calls`，并且 **`<tool_call>` 协议标记会被
+过滤掉**，不会出现在 `delta.content` 里。
+
+> 为什么服务端不替你执行工具：本服务注册的工具（`get_current_time` 等）
+> 和你的应用能访问的东西（数据库、内部 API）不是一回事。让客户端执行是
+> OpenAI 的既定语义，也更通用。CLI 是例外 —— 它没有"客户端"可以代劳，
+> 所以直接走 `AgentLoop`。
+
+### Python 客户端示例
+
+```python
+import json
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="x")
+
+TOOLS = [{"type": "function", "function": {
+    "name": "calculator", "description": "计算算术表达式",
+    "parameters": {"type": "object",
+                   "properties": {"expression": {"type": "string"}},
+                   "required": ["expression"]}}}]
+
+def calculator(expression: str) -> str:
+    return json.dumps({"result": eval(expression)})     # 示例，别在生产里用 eval
+
+messages = [{"role": "user", "content": "2 的 10 次方是多少？"}]
+while True:
+    resp = client.chat.completions.create(
+        model="qwen2.5-1.5b", messages=messages, tools=TOOLS)
+    msg = resp.choices[0].message
+    if not msg.tool_calls:
+        print(msg.content)
+        break
+    messages.append(msg)
+    for call in msg.tool_calls:
+        out = calculator(**json.loads(call.function.arguments))
+        messages.append({"role": "tool", "tool_call_id": call.id, "content": out})
+```
 
 ## 性能
 
@@ -176,7 +214,8 @@ curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/jso
 | 普通回答（几十 token） | 2–4 s |
 | 一次工具调用 + 收尾 | 6–17 s |
 
-`server.agent_max_steps`（默认 4）限制最多几轮，防止长尾。
+HTTP 层不跑循环，所以没有"轮数"概念；CLI 的 `agent.max_steps`
+（默认 4）限制最多几轮，防止长尾。
 
 ## 代码结构
 
@@ -186,10 +225,10 @@ curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/jso
 | `tools/registry.py` | 工具注册表、`dangerous` 门禁 |
 | `tools/builtin.py` | 内置工具 + SSRF 防护 |
 | `agent/parser.py` | 从模型输出解析 tool_call（容错） |
-| `agent/loop.py` | agent 循环、`StreamFilter` |
+| `agent/loop.py` | agent 循环（CLI 用）、`StreamFilter` |
 | `chat/template.py` | 把工具声明/调用/结果渲染成 Qwen 官方格式 |
 | `api/openai.py` | OpenAI 协议映射（tools 解析、tool_calls 响应） |
-| `api/server.py` | 两种模式的 HTTP 入口 |
+| `api/server.py` | HTTP 入口（按 OpenAI 标准返回 `tool_calls`） |
 
 ## 扩展点
 
