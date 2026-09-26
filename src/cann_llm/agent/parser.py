@@ -175,12 +175,25 @@ def extract_json_objects(text: str) -> List[Tuple[str, Any]]:
 
 
 def parse_tool_calls(text: str, *,
-                     allow_bare_json: bool = True) -> ParsedOutput:
+                     allow_bare_json: bool = False) -> ParsedOutput:
     """解析模型输出。
 
-    :param allow_bare_json: 是否接受不带 ``<tool_call>`` 标签的裸 JSON
-        （模型偶尔会忘记标签；默认接受，代价是需要额外判断"这段 JSON 是不是
-        普通回答"——所以只用「含 name + arguments 形状」的对象才算）。
+    :param allow_bare_json: 是否把**没有 ``<tool_call>`` 标签**的裸 JSON
+        也当成工具调用（默认**关闭**）。
+
+        ⚠ 打开它有实实在在的误判代价，实测：
+
+        * ``调用格式是这样的：{"name": "w", "arguments": {...}}``
+          → 被判成调用，**且这段 JSON 会从正文里删掉**，用户看到的是被挖空的句子；
+        * ``The tool takes {"name": "search", "arguments": {...}} as input.``
+          → 同上，正文变成 ``The tool takes  as input.``。
+
+        即使输出恰好只有一个这种 JSON 对象也仍有歧义：用户问"给我一个函数调用
+        的 JSON 示例"时，模型产出的就是这个形状。
+
+        根因是它做了两件越权的事：在模型**没有表达调用意图**时替它认定意图，
+        并把模型写下的文本从输出里抹掉。模型忘记标签属于它自身的行为偏离，
+        推理框架应当如实呈现而不是替它补全 —— 所以默认关闭，要开请自行承担。
     """
     if not text:
         return ParsedOutput()
@@ -217,7 +230,7 @@ def parse_tool_calls(text: str, *,
             calls.append(ToolCall(name="", arguments={"__unparsable__": inner},
                                   raw=inner))
 
-    # 裸 JSON 兜底：只在没有标签块时尝试，避免把 assistant 的正常 JSON 回答当成调用
+    # 裸 JSON 兜底：默认关闭，见 parse_tool_calls 的说明（会误判并抹掉正文）
     if not calls and allow_bare_json:
         for frag, obj in extract_json_objects(text):
             tc = _to_tool_call(obj, frag)

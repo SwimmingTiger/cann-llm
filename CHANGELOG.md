@@ -38,6 +38,24 @@
 - `Makefile`、`examples/config.example.toml`
 - `docs/architecture.md`、`docs/cann-engine-notes.md`、`docs/openai-api.md`
 
+### Changed — 关闭「裸 JSON 兜底」
+
+`parse_tool_calls` 原先默认把**不带 `<tool_call>` 标签**的裸 JSON 也当成工具
+调用。实测它会扭曲输出并且**抹掉正文**：
+
+```
+输入:  The tool takes {"name": "search", "arguments": {"q": "x"}} as input.
+原先:  判成调用 + 从正文删掉该 JSON → 用户看到 "The tool takes  as input."
+现在:  不判为调用，正文原样保留
+```
+
+根因是它做了两件越权的事：在模型**没有表达调用意图**时替它认定意图，并把
+模型写下的文本从输出里抹掉。模型忘记标签属于它自身的格式偏离，推理框架应当
+如实呈现而不是替它补全 —— 与 `force_tool_use`、`_merge_params` 同类问题，
+且因为有信息丢失而更严重。
+
+改为默认关闭（`allow_bare_json=True` 可显式打开）。
+
 ### Docs — 两处「启发式」的依据已查实
 
 用户要求核实：`_finish_reason` 的推断是什么、`StreamFilter` 删掉 `<tool_call>`

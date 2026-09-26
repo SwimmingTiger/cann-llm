@@ -99,9 +99,32 @@ class TestParser(unittest.TestCase):
         arr = '<tool_call>[{"name":"a","arguments":{"x":1}},{"name":"b","arguments":{}}]</tool_call>'
         self.assertEqual([c.name for c in parse_tool_calls(arr).tool_calls], ["a", "b"])
 
-    def test_bare_json(self):
-        r = parse_tool_calls('{"name": "echo", "arguments": {"s": "hi"}}')
+    def test_bare_json_is_not_a_call_by_default(self):
+        """模型没写标签就是没表达调用意图 —— 不替它认定。"""
+        text = '{"name": "echo", "arguments": {"s": "hi"}}'
+        r = parse_tool_calls(text)
+        self.assertEqual(r.tool_calls, [])
+        self.assertEqual(r.text, text)          # 正文一字不动
+
+    def test_bare_json_opt_in(self):
+        r = parse_tool_calls('{"name": "echo", "arguments": {"s": "hi"}}',
+                             allow_bare_json=True)
         self.assertEqual(len(r.tool_calls), 1)
+
+    def test_bare_json_default_does_not_eat_prose(self):
+        """原先的默认行为会把回答里举例的 JSON 删掉、句子被挖空。"""
+        text = 'The tool takes {"name": "search", "arguments": {"q": "x"}} as input.'
+        r = parse_tool_calls(text)
+        self.assertEqual(r.tool_calls, [])
+        self.assertIn('"name": "search"', r.text)
+        self.assertEqual(r.text, text)
+
+    def test_opt_in_still_eats_prose(self):
+        """打开该选项确实会抹正文 —— 这就是它默认关闭的原因，行为如实记录。"""
+        text = 'The tool takes {"name": "search", "arguments": {"q": "x"}} as input.'
+        r = parse_tool_calls(text, allow_bare_json=True)
+        self.assertEqual(len(r.tool_calls), 1)
+        self.assertNotIn('"name": "search"', r.text)
 
     def test_plain_text_and_plain_json_not_calls(self):
         self.assertFalse(parse_tool_calls("巴黎是法国的首都。").tool_calls)
