@@ -24,6 +24,11 @@ class ServerConfig:
     request_timeout_s: float = 600.0
     api_key: Optional[str] = None          # 非空则要求 Authorization: Bearer
     cors_allow_origin: str = "*"
+    #: True = 本服务实现不了的字段一律 400；
+    #: False（默认）= 只忽略并在响应头 X-Cann-Llm-Ignored-Fields 回报。
+    #: 默认宽容是有意的：多数现代客户端即使普通聊天也会带 tools，
+    #: 一律报错会让它们完全用不了。想「宁可报错也别给我假象」就设 True。
+    reject_unsupported: bool = False
 
 
 @dataclass(frozen=True)

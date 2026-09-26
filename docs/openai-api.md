@@ -79,22 +79,46 @@ for chunk in client.chat.completions.create(
 | `top_k` | top-k 采样。OpenAI 无此字段，但本引擎支持且很有用 |
 | `repetition_penalty` | 重复惩罚，默认 1.1 |
 
-### 接受但忽略
+### 接受但忽略（默认）
 
-`frequency_penalty`、`presence_penalty`、`response_format`、`user`、
-`logit_bias`、`parallel_tool_calls`
+`tools`、`functions`、`tool_choice`、`function_call`、`parallel_tool_calls`、
+`frequency_penalty`、`presence_penalty`、`response_format`、`logit_bias`、`user`
 
-引擎没有对应能力。**请求里出现这些字段不会报错**，但会在服务端日志的
-`ignored` 列表里记录，避免调用方误以为生效。
+引擎没有对应能力。**这些字段不会导致报错**，服务端会：
 
-### 明确拒绝（400）
+1. 在响应头回报被忽略的字段名：
+   ```
+   X-Cann-Llm-Ignored-Fields: tools, tool_choice, frequency_penalty
+   ```
+2. 在服务端日志里记一行 `忽略字段: tools, tool_choice`
 
-`tools`、`functions`、`tool_choice`、`function_call`、`logprobs`、
-`top_logprobs`、`n > 1`、批量 `prompt`、`content` 里的 `image_url`
+**为什么默认是忽略而不是报错**：绝大多数现代客户端（Continue / Cline /
+Roo Code / LangChain / 各类 agent 框架）**即使只是普通聊天也会带上
+`tools`**。一律 400 会让这些客户端完全无法使用本服务。
 
-**为什么要报错而不是忽略**：这些字段一旦被静默忽略，调用方会拿到
-"看起来正常但少了一半能力"的结果（例如以为函数调用生效了），
-排查成本远高于直接报错。
+代价是：模型不会真的调用函数，它只会用普通文本回答。客户端通常能接受
+（当作一次最终回答），但**不要指望本服务完成 function calling 闭环**。
+
+### 明确拒绝（400，任何模式）
+
+| 字段 | 为什么必须拒绝 |
+|---|---|
+| `logprobs` / `top_logprobs` | 响应里不会出现 `logprobs` 字段，客户端解析会出错 |
+| `content` 里的 `image_url` | 模型看不见图片，照常回答等于骗人 |
+| `n > 1` | 引擎一次只产一路，返回的 `choices` 数量会对不上 |
+| 批量 `prompt` | 同上 |
+
+### 严格模式
+
+如果你更希望「宁可报错，也别给我"看起来正常"的假象」：
+
+```toml
+[server]
+reject_unsupported = true
+```
+
+或 `CANN_LLM_SERVER__REJECT_UNSUPPORTED=true`。开启后「接受但忽略」那一组
+也会返回 400。上表里的字段**无论哪种模式都拒绝**。
 
 ## 响应示例
 

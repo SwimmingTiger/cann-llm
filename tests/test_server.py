@@ -120,8 +120,14 @@ class TestServer(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body)["error"]["type"], "invalid_request_error")
 
+        # tools 默认被忽略而不是报错（否则现代客户端用不了），仍返回 200
+        status, body = _post(self.base + "/v1/chat/completions",
+                             {"messages": [{"role": "user", "content": "x"}], "tools": [{}]})
+        self.assertEqual(status, 200)
+
+        # logprobs 这种「忽略就会给出错误结果」的字段任何时候都拒绝
         status, _ = _post(self.base + "/v1/chat/completions",
-                          {"messages": [{"role": "user", "content": "x"}], "tools": [{}]})
+                          {"messages": [{"role": "user", "content": "x"}], "logprobs": True})
         self.assertEqual(status, 400)
 
         status, body = _get(self.base + "/v1/nope")
@@ -217,6 +223,80 @@ class TestBusy(unittest.TestCase):
         httpd.server_close()
 
 
+
+
+class TestIgnoredFields(unittest.TestCase):
+    """被忽略的字段要在响应头里回报，不能让调用方蒙在鼓里。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd, cls.base = _start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def _post_with_headers(self, body):
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(self.base + "/v1/chat/completions", data=data,
+                                     headers={"Content-Type": "application/json"},
+                                     method="POST")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, dict(r.headers), r.read()
+
+    def test_header_lists_ignored_fields(self):
+        status, headers, _ = self._post_with_headers(
+            {"messages": [{"role": "user", "content": "hi"}],
+             "tools": [{}], "tool_choice": "auto"})
+        self.assertEqual(status, 200)
+        got = headers.get("X-Cann-Llm-Ignored-Fields", "")
+        self.assertIn("tools", got)
+        self.assertIn("tool_choice", got)
+
+    def test_header_absent_when_nothing_ignored(self):
+        _status, headers, _ = self._post_with_headers(
+            {"messages": [{"role": "user", "content": "hi"}]})
+        self.assertNotIn("X-Cann-Llm-Ignored-Fields", headers)
+
+    def test_streaming_carries_header(self):
+        _status, headers, _ = self._post_with_headers(
+            {"messages": [{"role": "user", "content": "hi"}], "stream": True, "tools": [{}]})
+        self.assertIn("tools", headers.get("X-Cann-Llm-Ignored-Fields", ""))
+
+
+class TestStrictMode(unittest.TestCase):
+    """server.reject_unsupported = True 时恢复「宁可报错」的行为。"""
+
+    @classmethod
+    def setUpClass(cls):
+        inner = FakeBackend("ok")
+        inner.load()
+        cfg = AppConfig(model=ModelConfig(model_id="m", backend="fake"),
+                        server=ServerConfig(host="127.0.0.1", port=0,
+                                            reject_unsupported=True))
+        state = AppState(cfg=cfg, backend=SerializedBackend(inner),
+                         template=get_template("chatml"))
+        cls.httpd = LlmHttpServer(("127.0.0.1", 0), state)
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def test_tools_rejected(self):
+        status, body = _post(self.base + "/v1/chat/completions",
+                             {"messages": [{"role": "user", "content": "x"}],
+                              "tools": [{}]})
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error"]["type"], "invalid_request_error")
+
+    def test_plain_request_still_ok(self):
+        status, _ = _post(self.base + "/v1/chat/completions",
+                          {"messages": [{"role": "user", "content": "x"}]})
+        self.assertEqual(status, 200)
 
 
 class TestRoutingHelpfulness(unittest.TestCase):

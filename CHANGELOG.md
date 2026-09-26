@@ -38,6 +38,17 @@
 - `Makefile`、`examples/config.example.toml`
 - `docs/architecture.md`、`docs/cann-engine-notes.md`、`docs/openai-api.md`
 
+### Changed
+
+- **不支持的字段改为默认「接受但忽略」**（原为一律 400）。
+  绝大多数现代客户端即使普通聊天也会带 `tools`，一律报错会让它们完全不可用。
+  现在会忽略并在响应头 `X-Cann-Llm-Ignored-Fields` 回报、日志记一行；
+  新增 `server.reject_unsupported = true` 可恢复严格模式。
+  `logprobs` 与 `image_url` 仍然始终拒绝 —— 忽略它们会产出错误结果。
+- 启动横幅改为显式打印 **base_url**（`http://host:port/v1`），
+  端点单独列出，避免把端点路径误当成 base_url。
+- 404/405 给出可操作提示（base_url 写法、允许的方法），不再只有一句"未知路径"。
+
 ### 说明
 
 - **核心零第三方依赖**：目标环境（鸿蒙设备）上没有 FastAPI/uvicorn/pytest，

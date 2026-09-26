@@ -27,3 +27,8 @@ queue_timeout_s = 120.0
 request_timeout_s = 600.0
 cors_allow_origin = "*"
 # api_key = "sk-xxx"     # 非空则要求 Authorization: Bearer sk-xxx
+
+# True  = 本服务实现不了的字段一律 400
+# False（默认）= 忽略并在响应头 X-Cann-Llm-Ignored-Fields 回报
+# 默认宽容是有意的：多数客户端即使普通聊天也会带 tools，一律报错会让它们用不了。
+# reject_unsupported = false

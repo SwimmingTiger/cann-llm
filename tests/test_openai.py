@@ -55,7 +55,6 @@ class TestParseChat(unittest.TestCase):
             ({"messages": "x"}, "非数组"),
             ({"messages": [{"content": "x"}]}, "缺 role"),
             ({"messages": [{"role": "user", "content": "x"}], "n": 3}, "n=3"),
-            ({"messages": [{"role": "user", "content": "x"}], "tools": [1]}, "tools"),
             ({"messages": [{"role": "user", "content": "x"}], "logprobs": True}, "logprobs"),
             ({"messages": [{"role": "user", "content": [{"type": "image_url"}]}]}, "image"),
             ({"messages": [{"role": "user", "content": "x"}], "temperature": -5}, "温度"),
@@ -70,6 +69,53 @@ class TestParseChat(unittest.TestCase):
         r = oa.parse_chat_request({"messages": [{"role": "user", "content": "x"}]},
                                   default_model="fallback")
         self.assertEqual(r.model, "fallback")
+
+
+class TestUnsupportedFieldTiers(unittest.TestCase):
+    """默认宽容（带 tools 的客户端要能用），但绝不静默给出错误结果。"""
+
+    def test_tools_accepted_and_reported_by_default(self):
+        r = oa.parse_chat_request({
+            "messages": [{"role": "user", "content": "x"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+            "tool_choice": "auto", "parallel_tool_calls": True,
+        })
+        self.assertIn("tools", r.ignored)
+        self.assertIn("tool_choice", r.ignored)
+        self.assertIn("parallel_tool_calls", r.ignored)
+
+    def test_tools_rejected_in_strict_mode(self):
+        with self.assertRaises(InvalidRequestError):
+            oa.parse_chat_request(
+                {"messages": [{"role": "user", "content": "x"}], "tools": [{}]},
+                strict=True)
+
+    def test_logprobs_always_rejected(self):
+        for strict in (False, True):
+            with self.assertRaises(InvalidRequestError, msg=f"strict={strict}"):
+                oa.parse_chat_request(
+                    {"messages": [{"role": "user", "content": "x"}], "logprobs": True},
+                    strict=strict)
+
+    def test_image_url_always_rejected(self):
+        for strict in (False, True):
+            with self.assertRaises(InvalidRequestError, msg=f"strict={strict}"):
+                oa.parse_chat_request({"messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "x"}}]}]}, strict=strict)
+
+    def test_ignored_empty_when_nothing_unsupported(self):
+        r = oa.parse_chat_request({"messages": [{"role": "user", "content": "x"}]})
+        self.assertEqual(r.ignored, [])
+
+    def test_completion_request_tiers(self):
+        r = oa.parse_completion_request({"prompt": "x", "frequency_penalty": 1.0})
+        self.assertIn("frequency_penalty", r.ignored)
+        with self.assertRaises(InvalidRequestError):
+            oa.parse_completion_request({"prompt": "x", "logprobs": 1}, strict=True)
+
+    def test_describe_ignored(self):
+        self.assertEqual(oa.describe_ignored([]), "")
+        self.assertIn("tools", oa.describe_ignored(["tools"]))
 
 
 class TestParseCompletion(unittest.TestCase):

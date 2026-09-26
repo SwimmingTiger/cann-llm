@@ -105,6 +105,13 @@ class Handler(BaseHTTPRequestHandler):
     server_version = f"cann-llm/{version.__version__}"
     protocol_version = "HTTP/1.1"
 
+    #: 本轮请求里被忽略的字段（由 parse_* 填充），会在响应头回报
+    ignored_fields: Tuple[str, ...] = ()
+
+    def _emit_ignored(self) -> None:
+        if self.ignored_fields:
+            self.send_header("X-Cann-Llm-Ignored-Fields", ", ".join(self.ignored_fields))
+
     # ---- 工具 ----
     @property
     def state(self) -> AppState:
@@ -123,6 +130,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self._cors()
+        self._emit_ignored()
         self.end_headers()
         self.wfile.write(body)
 
@@ -140,6 +148,7 @@ class Handler(BaseHTTPRequestHandler):
         # 让 nginx 之类的反代不要缓冲
         self.send_header("X-Accel-Buffering", "no")
         self._cors()
+        self._emit_ignored()
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
 
@@ -196,6 +205,7 @@ class Handler(BaseHTTPRequestHandler):
             err_type="method_not_allowed"), ensure_ascii=False).encode()
         self.send_header("Content-Length", str(len(body)))
         self._cors()
+        self._emit_ignored()
         self.end_headers()
         self.wfile.write(body)
 
@@ -310,9 +320,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(status, payload)
 
     # ---- 业务 ----
+    def _note_ignored(self, fields) -> None:
+        """记录本轮被忽略的字段：写响应头 + 日志一行（便于排查客户端行为）。"""
+        self.ignored_fields = tuple(fields or ())
+        if self.ignored_fields:
+            self.log_message("忽略字段: %s", ", ".join(self.ignored_fields))
+
     def _handle_chat(self, body: Dict[str, Any]) -> None:
         st = self.state
-        req = oa.parse_chat_request(body, default_model=st.cfg.model.model_id)
+        req = oa.parse_chat_request(body, default_model=st.cfg.model.model_id,
+                                    strict=st.cfg.server.reject_unsupported)
+        self._note_ignored(req.ignored)
         prompt = st.template.render(req.messages)
         params = req.params if req.params != GenerationParams() else st.base_params()
 
@@ -378,7 +396,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_completion(self, body: Dict[str, Any]) -> None:
         st = self.state
-        req = oa.parse_completion_request(body, default_model=st.cfg.model.model_id)
+        req = oa.parse_completion_request(body, default_model=st.cfg.model.model_id,
+                                          strict=st.cfg.server.reject_unsupported)
+        self._note_ignored(req.ignored)
         params = req.params if req.params != GenerationParams() else st.base_params()
 
         if req.stream:

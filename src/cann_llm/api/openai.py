@@ -36,19 +36,30 @@ class ChatCompletionRequest:
     n: int = 1
 
 
-#: 明确不支持、需要报错的字段
-_UNSUPPORTED = {
-    "logprobs": "本服务不支持 logprobs",
-    "top_logprobs": "本服务不支持 logprobs",
-    "tools": "本服务暂不支持 function calling / tools",
-    "functions": "本服务暂不支持 function calling",
-    "tool_choice": "本服务暂不支持 tools",
-    "function_call": "本服务暂不支持 function calling",
+#: 永远拒绝：这些字段一旦被忽略，调用方会拿到"看起来正常但答案是错的"结果。
+#:   * image_url —— 模型看不见图片，照常回答等于骗人
+#:   * logprobs  —— 响应里不会出现该字段，客户端解析会出错
+_ALWAYS_REJECT = {
+    "logprobs": "本服务不返回 logprobs（响应里不会有该字段）",
+    "top_logprobs": "本服务不返回 logprobs",
 }
 
-#: 接受但忽略（引擎无对应能力），会记入 ignored
-_IGNORED = ("frequency_penalty", "presence_penalty", "response_format",
-            "user", "logit_bias", "parallel_tool_calls")
+#: 默认「接受但忽略」，并在响应头 X-Cann-Llm-Ignored-Fields 里回报、服务端日志记一行。
+#: 之所以不直接报错：绝大多数现代客户端（Continue / Cline / LangChain 等）
+#: 即使只是普通聊天也会带上 tools，一律 400 会让这些客户端完全用不了。
+#: 需要「宁可报错也别给我假象」的场景，把 server.reject_unsupported 设成 true。
+_IGNORABLE = {
+    "tools": "暂不支持 function calling",
+    "functions": "暂不支持 function calling",
+    "tool_choice": "暂不支持 tools",
+    "function_call": "暂不支持 function calling",
+    "parallel_tool_calls": "暂不支持 tools",
+    "frequency_penalty": "引擎无对应能力",
+    "presence_penalty": "引擎无对应能力",
+    "response_format": "本服务不强制输出格式",
+    "logit_bias": "引擎无对应能力",
+    "user": "无实际作用",
+}
 
 
 def _as_text(content: Any) -> str:
@@ -71,15 +82,19 @@ def _as_text(content: Any) -> str:
     raise InvalidRequestError(f"content 类型不支持: {type(content).__name__}")
 
 
-def parse_chat_request(body: Dict[str, Any], *, default_model: str = "") -> ChatCompletionRequest:
+def parse_chat_request(body: Dict[str, Any], *, default_model: str = "",
+                       strict: bool = False) -> ChatCompletionRequest:
     """把 OpenAI 风格的请求体解析成本项目的类型。
 
-    对不支持的字段采取「明确报错」而不是静默忽略，避免调用方误以为生效了。
+    :param strict: ``True`` 时，所有本服务无法实现的字段都直接报错；
+        默认 ``False`` 则把 :data:`_IGNORABLE` 里的字段记录到 ``ignored``
+        并继续（否则带 tools 的客户端会完全用不了）。
+        :data:`_ALWAYS_REJECT` 里的字段无论哪种模式都报错。
     """
     if not isinstance(body, dict):
         raise InvalidRequestError("请求体必须是 JSON 对象")
 
-    for key, why in _UNSUPPORTED.items():
+    for key, why in _ALWAYS_REJECT.items():
         if body.get(key) not in (None, False, [], {}):
             raise InvalidRequestError(f"字段 {key} 不支持：{why}")
 
@@ -105,7 +120,13 @@ def parse_chat_request(body: Dict[str, Any], *, default_model: str = "") -> Chat
         if isinstance(so, dict) and set(so) - {"include_usage"}:
             pass
 
-    ignored = [k for k in _IGNORED if body.get(k) not in (None, [], {})]
+    ignored: List[str] = []
+    for key, why in _IGNORABLE.items():
+        if body.get(key) in (None, [], {}):
+            continue
+        if strict:
+            raise InvalidRequestError(f"字段 {key} 不支持：{why}")
+        ignored.append(key)
 
     params = _params_from_body(body)
 
@@ -168,10 +189,20 @@ class CompletionRequest:
 
 
 def parse_completion_request(body: Dict[str, Any], *,
-                             default_model: str = "") -> CompletionRequest:
-    for key, why in _UNSUPPORTED.items():
+                             default_model: str = "",
+                             strict: bool = False) -> CompletionRequest:
+    if not isinstance(body, dict):
+        raise InvalidRequestError("请求体必须是 JSON 对象")
+    for key, why in _ALWAYS_REJECT.items():
         if body.get(key) not in (None, False, [], {}):
             raise InvalidRequestError(f"字段 {key} 不支持：{why}")
+    ignored_fields = []
+    for key, why in _IGNORABLE.items():
+        if body.get(key) in (None, [], {}):
+            continue
+        if strict:
+            raise InvalidRequestError(f"字段 {key} 不支持：{why}")
+        ignored_fields.append(key)
     prompt = body.get("prompt")
     if isinstance(prompt, list):
         if len(prompt) != 1:
@@ -187,11 +218,17 @@ def parse_completion_request(body: Dict[str, Any], *,
         prompt=prompt,
         stream=bool(body.get("stream", False)),
         params=_params_from_body(body),
-        ignored=[k for k in _IGNORED if body.get(k) not in (None, [], {})],
+        ignored=ignored_fields,
     )
 
 
 # ------------------------------------------------------------------ 响应
+
+
+def describe_ignored(fields: Iterable[str]) -> str:
+    """把被忽略的字段拼成一句人话，用于日志。"""
+    msgs = [f"{f}（{_IGNORABLE.get(f, '')}）" for f in fields]
+    return "已忽略：" + "、".join(msgs) if msgs else ""
 
 
 def new_id(prefix: str = "chatcmpl") -> str:
