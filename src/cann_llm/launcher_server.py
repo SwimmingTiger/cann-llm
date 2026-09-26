@@ -332,6 +332,10 @@ def run_server(root: str, argv: "List[str]") -> int:
         info("前台启动（Ctrl-C 停止），正在加载模型…")
         print()
         # 不在这里打印监听地址 —— 此刻还没 bind，交给 serve() 在绑定成功后自己打印
+        # ★ execve 会换掉整个进程，Python 的 stdout 缓冲区不会自动 flush；
+        #   重定向/接管道时（块缓冲）上面那些提示会全丢，必须手动刷。
+        sys.stdout.flush()
+        sys.stderr.flush()
         os.execve(py, [py, "-X", "faulthandler"] + args, env)
         return 0
 

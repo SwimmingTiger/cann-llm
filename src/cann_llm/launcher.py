@@ -159,6 +159,11 @@ def run_chat(root: str, argv: "List[str]") -> int:
               f"与按 musl 编译的引擎不兼容，加载引擎时大概率段错误。\n"
               f"    请改用 /data/service/hnp/bin/python3，或用 PYTHON=… 指定。", file=sys.stderr)
 
+    # 与 start_server.sh 保持一致：把最终选中的解释器和版本打出来 ——
+    # 否则用户看不出"到底用了哪一个 python"，而"为什么不是更靠前的那个"
+    # 只能从 shell 打印的跳过行反推。
+    ok(f"Python {sys.version.split()[0]}  ·  {py}")
+
     if not os.path.isfile(lib):
         die(f"找不到 {kind} {lib}\n    后端 {backend} 需要鸿蒙设备（NPU）环境。")
     ok(f"{kind}: {lib}")
@@ -179,6 +184,11 @@ def run_chat(root: str, argv: "List[str]") -> int:
     env["PYTHONPATH"] = os.path.join(root, "src") + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env[var] = lib
+    # ★ execve 会把整个进程换掉，**Python 的 stdout 缓冲区不会自动 flush**。
+    #   终端里是行缓冲所以看着没问题；一旦重定向到文件或接管道（块缓冲），
+    #   上面那些 ✓/› 提示就会【全部丢失】。必须手动刷。
+    sys.stdout.flush()
+    sys.stderr.flush()
     os.execve(py, [py, "-X", "faulthandler", "-m", "cann_llm.cli.chat"] + rest, env)
     return 0
 
