@@ -68,3 +68,38 @@ class TestLoadConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestContextLengthAutoDetect(unittest.TestCase):
+    """context_length 应从模型的 executor.json 自动读，而不是写死 2048。"""
+
+    def _fake_model(self, d, kv):
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "executor.json"), "w") as f:
+            import json as _j
+            _j.dump({"llm_config": {"kv_cache_max_len": kv}}, f)
+        return d
+
+    def test_reads_from_executor_json(self):
+        from cann_llm.backends.cann import CannNdkBackend
+        with tempfile.TemporaryDirectory() as d:
+            self._fake_model(d, 8192)
+            self.assertEqual(CannNdkBackend._read_context_length(d), 8192)
+
+    def test_none_when_missing_or_broken(self):
+        from cann_llm.backends.cann import CannNdkBackend
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(CannNdkBackend._read_context_length(d))
+            with open(os.path.join(d, "executor.json"), "w") as f:
+                f.write("{ not json")
+            self.assertIsNone(CannNdkBackend._read_context_length(d))
+            with open(os.path.join(d, "executor.json"), "w") as f:
+                f.write('{"llm_config": {}}')
+            self.assertIsNone(CannNdkBackend._read_context_length(d))
+
+    def test_explicit_wins(self):
+        from cann_llm.backends.cann import CannNdkBackend
+        with tempfile.TemporaryDirectory() as d:
+            self._fake_model(d, 8192)
+            be = CannNdkBackend(d, context_length=4096)
+            self.assertEqual(be.context_length, 4096)

@@ -44,6 +44,11 @@ from ..types import (
     GenerationStats,
     ModelInfo,
 )
+
+#: executor.json 读不到 kv_cache_max_len 时的回退值。
+#: 真正的大小是**编译期**决定的（见 docs/cann-engine-notes.md 第 9 节），
+#: 这里只是给元信息展示用一个保守默认值，不参与任何限制判断。
+DEFAULT_CONTEXT_LEN = 2048
 from ..version import CANN_NDK_LIB
 from .base import EngineBackend, register_backend
 
@@ -126,7 +131,10 @@ class CannNdkBackend(EngineBackend):
     :param model_dir: 模型目录，需含 ``executor.json`` / ``context.json`` /
         ``tokenizer.json`` / ``*.omc`` / ``SubGraph_0.weight`` / embedding 文件。
     :param model_id: 对外暴露的模型 id（OpenAI ``model`` 字段）。
-    :param context_length: 上下文长度，仅用于元信息展示。
+    :param context_length: 上下文长度（KV 缓存大小），仅用于元信息展示与提示文案。
+        传 ``None`` 表示**自动读模型目录里的 executor.json**（推荐）—— 那样这个数
+        永远与模型一致；写死一个不匹配的值会让出错提示误导人。
+        注意它**是编译期属性**：改它必须重新导出 ONNX 并重跑 OMG，运行时不生效。
     """
 
     def __init__(
@@ -134,11 +142,12 @@ class CannNdkBackend(EngineBackend):
         model_dir: str,
         model_id: str = "qwen2.5-1.5b",
         lib_path: str = CANN_NDK_LIB,
-        context_length: int = 2048,
+        context_length: Optional[int] = None,
         default_params: Optional[GenerationParams] = None,
     ):
         self.model_dir = os.path.abspath(model_dir) if model_dir else ""
         self.model_id = model_id
+        # 显式给了就用；没给就等 load() 时从 executor.json 里读
         self.context_length = context_length
         self.default_params = default_params or GenerationParams()
 
@@ -151,8 +160,28 @@ class CannNdkBackend(EngineBackend):
         self._sink = None                          # 当前请求的增量消费者
         self._emitted = ""
         self._info = ModelInfo(id=model_id, backend="cann", path=self.model_dir,
-                               context_length=context_length, chat_template="chatml")
+                               context_length=context_length or DEFAULT_CONTEXT_LEN,
+                               chat_template="chatml")
         self._loaded = False
+
+    @staticmethod
+    def _read_context_length(model_dir: str) -> Optional[int]:
+        """从模型目录的 executor.json 读 ``kv_cache_max_len``。
+
+        读不到就返回 None，由调用方决定回退值 —— 不要在这里猜一个数字，
+        否则出错提示会拿错误的上限误导人。
+        """
+        path = os.path.join(model_dir, "executor.json")
+        try:
+            with open(path) as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            return None
+        val = (cfg.get("llm_config") or {}).get("kv_cache_max_len")
+        try:
+            return int(val) if val is not None else None
+        except (TypeError, ValueError):
+            return None
 
     # ------------------------------------------------------------ 生命周期
 
@@ -161,6 +190,16 @@ class CannNdkBackend(EngineBackend):
             return self._info
         if not self.model_dir or not os.path.isdir(self.model_dir):
             raise ModelLoadError(f"模型目录不存在: {self.model_dir!r}")
+        # context_length 没显式给就按模型自己的 executor.json 来 ——
+        # 这样 /v1/models 的元信息与"输入超出 KV 缓存"的提示文案永远是对的。
+        if self.context_length is None:
+            self.context_length = (self._read_context_length(self.model_dir)
+                                   or DEFAULT_CONTEXT_LEN)
+            self._info = ModelInfo(id=self.model_id, backend="cann",
+                                   path=self.model_dir,
+                                   context_length=self.context_length,
+                                   chat_template="chatml")
+
         for need in ("executor.json", "context.json", "tokenizer.json"):
             if not os.path.exists(os.path.join(self.model_dir, need)):
                 raise ModelLoadError(f"模型目录缺少 {need}：{self.model_dir}")

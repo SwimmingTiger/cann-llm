@@ -5,6 +5,38 @@
 
 ## [Unreleased]
 
+### Added — 上下文长度/输出窗口现在都可配（各归其位）
+
+用户问"上下文只有 2K 吗，能提升吗"。结论：**能，但性质不同**——
+
+| | 上下文长度（KV 缓存） | 输出窗口（max_tokens） |
+|---|---|---|
+| 性质 | **编译期**属性，写进 .omc 的静态形状 | 运行时参数 |
+| 配置方式 | 转换时用 `--kv-len` 指定，需重跑导出+OMG | CLI / 配置 / API 请求体 |
+
+**上下文长度**：新增 `scripts/model-conversion/build_model.py`，把整条链路收敛成
+一个 `--kv-len` 参数。它从 HF config 自动推断架构/层数/hidden/KV 头数，生成导出
+yaml，跑导出，跑 OMG（`omg_convert.py --kv-len`），再装配模型目录 —— 保证
+**三处 KV 长度始终一致**（yaml / OMG input_shape / executor.json），这是之前手工
+改三处最容易漏的地方。支持 `--dry-run` / `--only-yaml` / `--skip-export` /
+`--skip-omg` 分步执行，并会在 dry-run 里报出内存开销与每 token 的 KV 大小。
+
+内存不是瓶颈（4B 每 token 144 KB：8K=1.1 GB、32K=4.5 GB，设备有 14~18 GB 可用）；
+真正的代价是**速度** —— 图里 KV 是静态形状，每个 token 都要读完整个 KV 张量，
+与实际用了多少上下文无关，所以解码时间随 KV 长度线性上升。
+
+**输出窗口**：本来就可配（配置文件 `max_tokens` / CLI `--maxtok` / 交互 `/maxtok` /
+API 请求体的 `max_tokens`），这次给 **server 补上了 `--max-tokens`** 命令行开关
+（chat 早就有，server 一直缺）。
+
+**顺带修正**：`CannNdkBackend.context_length` 原本写死默认 2048，与实际模型无关，
+会让 `/v1/models` 的元信息和"输入超出 KV 缓存（本模型 2048 token）"这类提示误导人。
+改为**默认从模型目录的 `executor.json` 读 `kv_cache_max_len`**（显式传参仍优先），
+读不到才回退 `DEFAULT_CONTEXT_LEN`。
+
+新增 `tests/test_config.py` 里 3 个用例覆盖自动读取（正常/缺失或损坏/显式优先）。
+测试 178 -> 181，全过。
+
 ### Fixed — 服务启动信息重复打印，且在绑定成功前就宣称"监听"
 
 前台启动时，端点信息打印了两遍：`start_server.sh` 在 `exec` 服务之前先

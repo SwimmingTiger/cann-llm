@@ -560,6 +560,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--port", type=int, help="监听端口（默认 8000）")
     ap.add_argument("--api-key", help="非空则要求 Authorization: Bearer <key>")
     ap.add_argument("--model-id", help="对外暴露的模型 id")
+    ap.add_argument("--max-tokens", type=int, dest="max_tokens",
+                    help="默认输出窗口（单轮最多生成多少 token；请求里的 max_tokens 优先）")
     ap.add_argument("--workers", type=int, help="忽略，保留参数位（兼容习惯）")
     ap.add_argument("-V", "--version", action="version", version=f"cann-llm {version.__version__}")
     args = ap.parse_args(argv)
@@ -567,7 +569,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     cfg = load_config(args.config)
     over = {}
     for key, val in (("model_dir", args.model_dir), ("backend", args.backend),
-                     ("model_id", args.model_id)):
+                     ("model_id", args.model_id), ("max_tokens", args.max_tokens)):
         if val is not None:
             over[key] = val
     if over:
