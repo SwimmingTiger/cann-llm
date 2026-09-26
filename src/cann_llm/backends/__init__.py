@@ -21,3 +21,11 @@ except Exception as _e:  # pragma: no cover
     import warnings
 
     warnings.warn(f"CANN 后端不可用: {_e}", RuntimeWarning, stacklevel=2)
+
+# --- hiai 后端：驱动系统内部引擎（libhiai_llm_engine.so），认官方模型目录结构 ---
+try:  # pragma: no cover - 平台相关
+    from . import hiai  # noqa: F401
+except Exception as _e:  # pragma: no cover
+    import warnings
+
+    warnings.warn(f"hiai 后端不可用: {_e}", RuntimeWarning, stacklevel=2)
