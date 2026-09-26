@@ -196,6 +196,11 @@ class _HiaiBindings:
         "HIAI_LLMEngine_Prompt_Create": (ctypes.c_void_p, []),
         "HIAI_LLMEngine_Prompt_SetText": (
             ctypes.c_int, [ctypes.c_void_p, ctypes.c_char_p]),
+        # 流式所需（签名照已验证脚本 scripts/streaming_reference.py）
+        "HIAI_LLMEngine_Context_SetOnSomeTokenGenerateDoneFunc": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_void_p]),
+        "HIAI_LLMEngine_Context_GetOneTokenGeneration": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]),
         "HIAI_LLMEngine_Context_GetAllTokenGenerationLen": (
             ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]),
         # ★ 注意：token 是 int32 数组，不是文本（实测 GetOneTokenGeneration 只给一个 token）
@@ -273,6 +278,8 @@ class HiaiBackend(EngineBackend):
         self._tok: Optional[QwenTokenizer] = None
         self._cb_done = None                       # 回调需长期持有，勿被 GC
         self._cb_fail = None
+        self._cb_some = None
+        self._ids = []
         self._bos: int = -1                        # 引擎期望的 BOS（缺它会 Generate 失败）
         # 显式给的优先；没给则 load() 时从合成的 executor JSON 里读
         self._context_length = context_length or 0
@@ -340,9 +347,10 @@ class HiaiBackend(EngineBackend):
 
     @property
     def supports_streaming(self) -> bool:
-        # 内部引擎没有 SetOnOneTokenGenerateDoneFunc；流式要走 GenerateAsync + 轮询
-        # GetOneGeneration。v1 先不假装支持。
-        return False
+        # ★ 流式：SetOnSomeTokenGenerateDoneFunc 每生成一个 token 回调一次。
+        #   回调里只用轻量的 GetOneTokenGeneration 取单 token 并 append；
+        #   增量由主线程轮询列表后解码（已被 scripts/streaming_reference.py 验证）。
+        return True
 
     # ------------------------------------------------------------------ 生成
 
@@ -354,8 +362,6 @@ class HiaiBackend(EngineBackend):
 
         # ★ 每次请求新建 Context（不复用 —— 见 load() 里的说明）
         ctx = self._bind.lib.HIAI_LLMEngine_Context_Create()
-        if not ctx:
-            raise GenerationError("Context 创建失败")
         if not ctx:
             raise GenerationError("Context 创建失败")
         self._ctx = ctx
@@ -374,10 +380,27 @@ class HiaiBackend(EngineBackend):
         _CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
         self._cb_done = _CB(lambda _p: _ev_done.set())
         self._cb_fail = _CB(lambda _p: _ev_fail.set())
+        _acc: list = []
+        _one_fn = self._bind.lib.HIAI_LLMEngine_Context_GetOneTokenGeneration
+        _byref, _cast, _i32, _cp = (ctypes.byref, ctypes.cast,
+                                    ctypes.c_int32, ctypes.c_char_p)
+
+        def _on_some(p: object) -> None:
+            # ★ 只用局部名，绝不触碰 self（引擎工作线程上访问 Python 对象属性会 segfault）
+            try:
+                _v = _i32(0)
+                if _one_fn(p, _cast(_byref(_v), _cp), 4) == 0:
+                    _acc.append(int(_v.value))
+            except Exception:      # noqa: BLE001
+                pass
+        self._cb_some = _CB(_on_some)
+        self._ids = _acc
         self._bind.lib.HIAI_LLMEngine_Context_SetOnAllTokensGenerateDoneFunc(
             ctx, ctypes.cast(self._cb_done, ctypes.c_void_p))
         self._bind.lib.HIAI_LLMEngine_Context_SetOnGenerateAsyncFailed(
             ctx, ctypes.cast(self._cb_fail, ctypes.c_void_p))
+        self._bind.lib.HIAI_LLMEngine_Context_SetOnSomeTokenGenerateDoneFunc(
+            ctx, ctypes.cast(self._cb_some, ctypes.c_void_p))
 
         prompt = self._bind.lib.HIAI_LLMEngine_Prompt_Create()
         if not prompt:
@@ -406,29 +429,53 @@ class HiaiBackend(EngineBackend):
                 base + OFF_PUSH_PROMPT)
             run = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p,
                                    ctypes.c_void_p)(base + OFF_RUN_GENERATE)
-            print(f"    [g6] base=0x{base:x} push=0x{base+OFF_PUSH_PROMPT:x} run=0x{base+OFF_RUN_GENERATE:x}", flush=True)
             vec = (ctypes.c_uint64 * 3)(0, 0, 0)
             push(ctypes.byref(vec), prompt)
-            print("    [g8] run 前", flush=True)
             rc = run(self._exec, ctx, ctypes.byref(vec))
+            _idx = 0
+            _emitted = ""
+            _seen = 0
             if rc == 0:
-                # ★ 等回调（不轮询！）—— 生成期间读 Context 会与工作线程竞态而 abort
-                _ev_done.wait(timeout=300)
+                # ★ 流式：主线程轮询回调累积的 token 列表（纯 Python，不碰引擎）
+                while not _ev_done.is_set():
+                    if len(_acc) > _seen:
+                        _seen = len(_acc)
+                        _txt = self._decode_ids(list(_acc))
+                        if len(_txt) > len(_emitted):
+                            yield GenerationChunk(text=_txt[len(_emitted):], index=_idx)
+                            _emitted = _txt
+                            _idx += 1
+                    if _ev_fail.is_set():
+                        raise GenerationError("引擎报告生成失败（OnGenerateAsyncFailed）")
+                    _ev_done.wait(timeout=0.02)
                 if _ev_fail.is_set():
                     raise GenerationError("引擎报告生成失败（OnGenerateAsyncFailed）")
+                _txt = self._decode_ids(list(_acc))
+                if len(_txt) > len(_emitted):
+                    yield GenerationChunk(text=_txt[len(_emitted):], index=_idx)
+                    _emitted = _txt
+                    _idx += 1
             if rc != 0:
                 raise GenerationError(
                     f"引擎 Generate 返回 {rc}（本模型 KV 缓存 {self._context_length} token）")
 
-            out = self._read_tokens()
-            stats = self._read_stats(len(out))
-            yield GenerationChunk(text=out, finish_reason="stop", stats=stats)
+            _full = self._decode_ids(list(_acc))
+            stats = self._read_stats(len(_full))
+            yield GenerationChunk(index=_idx, finish_reason="stop", stats=stats)
         finally:
             self._bind.lib.HIAI_LLMEngine_Prompt_Destroy(
                 ctypes.byref(ctypes.c_void_p(prompt)))
             # Context 每请求一个，用完即销毁（内部引擎的 Destroy 收指针的指针）
             self._bind.lib.HIAI_LLMEngine_Context_Destroy(
                 ctypes.byref(ctypes.c_void_p(ctx)))
+
+    def _decode_ids(self, ids: list) -> str:
+        """token id 列表 → 文本（去掉尾部终止 token）。"""
+        assert self._tok is not None
+        for stop in (151645, 151643):      # <|im_end|> / <|endoftext|>
+            while ids and ids[-1] == stop:
+                ids.pop()
+        return self._tok.decode(ids)
 
     def _read_tokens(self) -> str:
         """取生成结果：引擎给的是 **token id 数组**（不是文本），用自带分词器解码。"""
