@@ -108,6 +108,40 @@ class Handler(BaseHTTPRequestHandler):
                          err_type: str = "invalid_request_error") -> None:
         self._send_json(status, oa.error_payload(message, err_type=err_type))
 
+    # ---- SSE ----
+    def _sse_start(self) -> None:
+        """开始一个 text/event-stream 响应（chunked 传输，保持连接）。"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        # 让 nginx 之类的反代不要缓冲
+        self.send_header("X-Accel-Buffering", "no")
+        self._cors()
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+    def _sse_raw(self, data: bytes) -> None:
+        self.wfile.write(b"%X\r\n" % len(data) + data + b"\r\n")
+        self.wfile.flush()
+
+    def _sse_write(self, data: bytes) -> None:
+        self._sse_raw(data)
+
+    def _sse_end(self) -> None:
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+    def _sse_abort(self, exc: BaseException) -> None:
+        """流已经开始、无法再改状态码时的错误上报。"""
+        _status, payload = oa.error_from_exception(exc)
+        try:
+            self._sse_write(oa.sse_data(payload))
+            self._sse_write(oa.SSE_DONE)
+            self._sse_end()
+        except OSError:
+            pass
+
     def _cors(self) -> None:
         origin = self.state.cfg.server.cors_allow_origin
         if origin:
@@ -206,9 +240,7 @@ class Handler(BaseHTTPRequestHandler):
         params = req.params if req.params != GenerationParams() else st.base_params()
 
         if req.stream:
-            self._send_error_json(
-                400, "本服务尚未实现流式输出（stream=true），请用 stream=false",
-                "invalid_request_error")
+            self._stream_chat(req, prompt, params)
             return
 
         from ..types import GenerationRequest, aggregate
@@ -219,15 +251,61 @@ class Handler(BaseHTTPRequestHandler):
             text=result.text, finish_reason=result.finish_reason,
             usage=oa.usage_payload(result.stats)))
 
+    def _stream_chat(self, req: oa.ChatCompletionRequest, prompt: str,
+                     params: GenerationParams) -> None:
+        """SSE 流式 chat.completion.chunk。"""
+        from ..types import GenerationRequest
+
+        st = self.state
+        req_id = oa.new_id("chatcmpl")
+        created = oa.now()
+        model = req.model or st.cfg.model.model_id
+        include_usage = bool((req.raw.get("stream_options") or {}).get("include_usage"))
+
+        self._sse_start()
+        try:
+            # 首个分块先声明角色（与 OpenAI 行为一致）
+            self._sse_write(oa.sse_data(oa.chat_completion_chunk(
+                req_id=req_id, model=model, created=created,
+                delta={"role": "assistant", "content": ""})))
+
+            finish_reason = "stop"
+            stats = None
+            for chunk in st.backend.generate(GenerationRequest(prompt=prompt, params=params)):
+                if chunk.text:
+                    self._sse_write(oa.sse_data(oa.chat_completion_chunk(
+                        req_id=req_id, model=model, created=created,
+                        delta={"content": chunk.text})))
+                if chunk.stats is not None:
+                    stats = chunk.stats
+                if chunk.finish_reason:
+                    finish_reason = chunk.finish_reason
+
+            self._sse_write(oa.sse_data(oa.chat_completion_chunk(
+                req_id=req_id, model=model, created=created,
+                delta={}, finish_reason=finish_reason)))
+            if include_usage:
+                usage_chunk = oa.chat_completion_chunk(
+                    req_id=req_id, model=model, created=created, delta={})
+                usage_chunk["choices"] = []
+                usage_chunk["usage"] = oa.usage_payload(stats)
+                self._sse_write(oa.sse_data(usage_chunk))
+            self._sse_write(oa.SSE_DONE)
+            self._sse_end()
+        except (BrokenPipeError, ConnectionResetError):
+            # 客户端提前断开（例如 Ctrl-C），不算错误
+            self.close_connection = True
+        except Exception as e:               # noqa: BLE001
+            self.log_message("流式生成失败: %r", e)
+            self._sse_abort(e)
+
     def _handle_completion(self, body: Dict[str, Any]) -> None:
         st = self.state
         req = oa.parse_completion_request(body, default_model=st.cfg.model.model_id)
         params = req.params if req.params != GenerationParams() else st.base_params()
 
         if req.stream:
-            self._send_error_json(
-                400, "本服务尚未实现流式输出（stream=true），请用 stream=false",
-                "invalid_request_error")
+            self._stream_completion(req, params)
             return
 
         from ..types import GenerationRequest, aggregate
@@ -238,6 +316,37 @@ class Handler(BaseHTTPRequestHandler):
             req_id=oa.new_id("cmpl"), model=req.model or st.cfg.model.model_id,
             text=result.text, finish_reason=result.finish_reason,
             usage=oa.usage_payload(result.stats)))
+
+    def _stream_completion(self, req: oa.CompletionRequest,
+                           params: GenerationParams) -> None:
+        """SSE 流式 text_completion。"""
+        from ..types import GenerationRequest
+
+        st = self.state
+        req_id = oa.new_id("cmpl")
+        created = oa.now()
+        model = req.model or st.cfg.model.model_id
+
+        self._sse_start()
+        try:
+            finish_reason = "stop"
+            for chunk in st.backend.generate(GenerationRequest(prompt=req.prompt,
+                                                               params=params)):
+                if chunk.text:
+                    self._sse_write(oa.sse_data(oa.completion_chunk(
+                        req_id=req_id, model=model, created=created, text=chunk.text)))
+                if chunk.finish_reason:
+                    finish_reason = chunk.finish_reason
+            self._sse_write(oa.sse_data(oa.completion_chunk(
+                req_id=req_id, model=model, created=created, text="",
+                finish_reason=finish_reason)))
+            self._sse_write(oa.SSE_DONE)
+            self._sse_end()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        except Exception as e:               # noqa: BLE001
+            self.log_message("流式生成失败: %r", e)
+            self._sse_abort(e)
 
 
 class LlmHttpServer(ThreadingHTTPServer):
