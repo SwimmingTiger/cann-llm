@@ -70,8 +70,13 @@ class ModelConfig:
         if self.model_id:
             return self.model_id
         if self.model_dir:
-            name = os.path.basename(os.path.normpath(self.model_dir))
-            if name:
+            # ★ 用 derive_model_name 而不是 basename(model_dir)：
+            #   basename(".") 会返回 "."，于是 `-d .` 时模型名变成一个点。
+            #   derive_model_name 会先 abspath（`-d .` → 真实目录名），
+            #   必要时再从 <model>.json / api_config.json 的 modelPath 推。
+            from .modelpkg import derive_model_name
+            name = derive_model_name(self.model_dir)
+            if name and name != "unknown":
                 return name
         return "cann-llm"
 
