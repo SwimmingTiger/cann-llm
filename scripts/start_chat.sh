@@ -69,7 +69,23 @@ else
         IFS=$_oldifs
         [ -n "$PY" ] && break
     done
-    [ -n "$PY" ] || PY="${first:-python3}"
+    if [ -z "$PY" ]; then
+        # 一个兼容的都没找到：**仍然回退**（免得用户什么都干不了），但必须把
+        # 问题和该怎么解决说清楚 —— 否则后面就是一句没头没尾的段错误。
+        PY="${first:-python3}"
+        printf '\n\033[33m!\033[0m \033[33m解释器兼容性提示\033[0m\n' >&2
+        printf '%s\n' "上面这些 Python 都不能用来加载引擎，已回退到 $PY（大概率会段错误）。" >&2
+        printf '%s\n' "" >&2
+        printf '%s\n' "原因：本机系统 libc 是 musl，引擎 libcann_llm_engine.so / libhiai_llm_engine.so" >&2
+        printf '%s\n' "      按 musl 编译；而 glibc 构建的 Python（靠 libmusl_compat 垫片运行）" >&2
+        printf '%s\n' "      把 musl 版引擎加载进来就会崩。" >&2
+        printf '%s\n' "" >&2
+        printf '%s\n' "★ 鸿蒙 PC 不预装 Python。请到【应用市场】安装「Python安装器」，" >&2
+        printf '%s\n' "  装完重新运行本脚本即可（它会装到 /data/service/hnp/bin/python3，" >&2
+        printf '%s\n' "  脚本会自动把它加到 PATH 末尾并选中它）。" >&2
+        printf '%s\n' "  也可以用 PYTHON=/path/to/python3 显式指定一个可用的解释器。" >&2
+        printf '\n' >&2
+    fi
 fi
 
 command -v "$PY" >/dev/null 2>&1 || {
