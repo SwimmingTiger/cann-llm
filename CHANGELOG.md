@@ -49,6 +49,26 @@
 现在完全不截断：工具返回多少，模型就看到多少，调用方也拿到多少。
 需要控制长度请在工具实现里自己分块/摘要/返回引用。
 
+### Changed — finish_reason 不再被改写
+
+`AgentLoop` 里曾把「最后一轮被截断」改写成「模型想调工具」：
+
+```python
+if finish_reason == "length" and pending_calls:
+    finish_reason = "tool_calls"
+```
+
+两个问题：`pending_calls` 累积的是整个运行过程的调用，而 `finish_reason`
+描述的是最后一轮 —— 两件不同的事被混在一起；后果是**被截断的半截回答**
+被报成 `tool_calls`，按 pi-ai 的映射（`tool_calls` → `stopReason: "toolUse"`）
+等于告诉调用方「模型还想执行工具」。
+
+现在如实透传最后一轮的引擎推断值；本次运行用过哪些工具看 `Final.tool_calls`。
+
+另：`max_steps` 用尽时最后一轮不传工具声明这一行为**保留**（它是 agent 循环
+自身的控制流，不是对模型输出的解释），但已在文档中写明 —— 用满步数时模型
+看到的最后一轮 prompt 与前面不同。
+
 ### Changed — 工具失败只陈述事实
 
 工具失败时不再追加「请修正参数后重新调用同一个工具；在拿到成功结果之前不要

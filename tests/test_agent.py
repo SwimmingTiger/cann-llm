@@ -342,3 +342,58 @@ class TestAgentLoop(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFinishReasonIsNotRewritten(unittest.TestCase):
+    """finish_reason 必须如实反映**最后一轮**怎么结束的。
+
+    曾经有过 `if finish_reason == "length" and pending_calls:
+    finish_reason = "tool_calls"` —— 它把「整个运行里发起过工具调用」和
+    「最后一轮为什么停下」混为一谈，导致被截断的半截回答被报成 tool_calls
+    （pi-ai 映射成 stopReason "toolUse"，等于说模型还想跑工具）。
+    """
+
+    class _Backend:
+        name = "trunc"
+
+        def __init__(self):
+            self.n = 0
+
+        def load(self):
+            return None
+
+        def close(self):
+            pass
+
+        def count_prompt_tokens(self, text):
+            return 0
+
+        @property
+        def supports_streaming(self):
+            return True
+
+        def generate(self, request):
+            from cann_llm.types import GenerationChunk, GenerationStats
+            self.n += 1
+            if self.n == 1:
+                for i, ch in enumerate(CALL):
+                    yield GenerationChunk(text=ch, index=i)
+                yield GenerationChunk(finish_reason="stop", stats=GenerationStats())
+            else:
+                for i, ch in enumerate("半截话"):
+                    yield GenerationChunk(text=ch, index=i)
+                yield GenerationChunk(finish_reason="length",
+                                      stats=GenerationStats(completion_tokens=64))
+
+    def test_truncated_final_turn_stays_length(self):
+        reg = ToolRegistry()
+        reg.register("echo", "回显", {"type": "object"})(lambda **k: "ok")
+        be = self._Backend()
+        loop = AgentLoop(be, get_template("chatml"), reg,
+                         config=AgentConfig(max_steps=3), system_prompt="SYS",
+                         params=GenerationParams(max_tokens=64))
+        final = [e for e in loop.run([Message("user", "x")]) if isinstance(e, Final)][0]
+        # 最后一轮被截断 → 如实报 length，不因为前面调过工具就改写
+        self.assertEqual(final.finish_reason, "length")
+        # 但工具调用记录仍然保留给调用方
+        self.assertEqual([c.name for c in final.tool_calls], ["echo"])

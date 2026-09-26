@@ -173,6 +173,37 @@ def query_db(order_id: str) -> str:
   实测这对模型的影响很大。
 * **在调用方自己的 system prompt 里写清期望**。框架不会替你加这类文字。
 
+### `finish_reason` 如实透传
+
+`Final.finish_reason` 用的是**最后一轮**引擎推断出的值，不做任何改写。
+
+曾经有过这样一段：
+
+```python
+if finish_reason == "length" and pending_calls:
+    finish_reason = "tool_calls"
+```
+
+它是错的，两个原因：
+
+1. `pending_calls` 累积的是**整个运行过程**中发起过的调用，而 `finish_reason`
+   描述的是**最后一轮**怎么结束的 —— 两件不同的事被混在一起；
+2. 后果是误导：最后一轮明明被 `max_tokens` 截断（半句话），却被报成
+   `tool_calls`。按 pi-ai 的映射 `tool_calls` → `stopReason: "toolUse"`，
+   等于告诉调用方「模型还想执行工具」，而实际是输出被截断了。
+
+想知道本次运行用过哪些工具，看 `Final.tool_calls`（那个字段保留）。
+
+### 最后一轮不再传工具声明
+
+`max_steps` 用尽时，最后一轮渲染的 prompt 里**不含工具声明** —— 目的是逼模型
+用自然语言收尾，避免无限调用下去。
+
+这一条**保留**，因为它和上面几处性质不同：它是 agent 循环**自身的控制流**
+（决定循环何时必须结束、怎么结束），不是在解释或改写模型的行为。但它确实
+改变了模型看到的 prompt，所以在这里写明：**用满 `max_steps` 时，模型看到的
+最后一轮 prompt 与前面几轮不同**（没有 `<tools>` 段）。
+
 ### 工具失败：只陈述事实
 
 工具抛异常、参数不符 schema、工具名不存在、调用格式无法解析 —— 这四种情况

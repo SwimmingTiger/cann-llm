@@ -282,6 +282,7 @@ class AgentLoop:
         last_stats: Optional[GenerationStats] = None
         final_text = ""
         finish_reason = "stop"
+        #: 本轮运行里累计发起过的工具调用（供调用方查看，**不影响 finish_reason**）
         pending_calls: List[ToolCall] = []
 
         for step in range(1, self.config.max_steps + 1):
@@ -342,8 +343,17 @@ class AgentLoop:
                                      tool_call_id=result.tool_call_id, name=result.name))
                 yield ToolCallDone(result=result, duration_ms=ms, step=step)
 
-        if finish_reason == "length" and pending_calls:
-            finish_reason = "tool_calls"
+        # finish_reason 如实使用**最后一轮**的引擎推断值，不做任何改写。
+        #
+        # 曾经有过 `if finish_reason == "length" and pending_calls:
+        # finish_reason = "tool_calls"` —— 那是错的，两个原因：
+        #   1. pending_calls 累积的是整个运行过程的调用，而 finish_reason
+        #      描述的是最后一轮怎么结束的 —— 两件不同的事被混在一起；
+        #   2. 后果是误导：最后一轮明明是被 max_tokens 截断（半句话），
+        #      却被报成 tool_calls。按 pi-ai 的映射 tool_calls → stopReason
+        #      "toolUse"，等于告诉调用方「模型还想执行工具」。
+        #
+        # 调用方若需要知道本次运行用过哪些工具，看 Final.tool_calls 即可。
         yield Final(text=final_text, finish_reason=finish_reason,
                     tool_calls=pending_calls, steps=steps, stats=last_stats,
                     messages=convo)
