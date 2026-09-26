@@ -225,7 +225,8 @@ def register_into(registry: ToolRegistry) -> None:
             },
             "required": ["expression"],
         },
-        notes="只做算术，不能访问变量或调用其它函数。",
+        notes="只做算术，不能访问变量或调用其它函数。"
+              "注意：百分数请写成 15/100 这样的除法，不要写 15%（后者不是合法表达式）。",
         tags=("math",),
     )(_calculator)
 
