@@ -5,13 +5,14 @@
 直接以 `ctypes` 调用系统自带的 NDK 库 `/system/lib64/ndk/libcann_llm_engine.so`，
 **不需要 HAP、不需要 root、核心零第三方依赖**。
 
-> ### 📖 还没有模型？先看 [模型转换指南](docs/model-conversion.md)
-> 📥 **官方模型怎么下载**（含网页点击步骤、选包提醒）：见 [docs/get-models.md](docs/get-models.md)
-
+> 📦 **模型还没准备好？两步走 —— 先下载，再转换：**
 >
-> 从 HuggingFace 检查点到能在 NPU 上跑的模型，**完整可照着做的步骤**：
-> dopt 三阶段量化 → 导出 ONNX → OMG 转换 → 装配模型目录 → 验证。
-> **全程官方标准流程，不需任何自定义脚本改图。**
+> 1. 📥 **下载官方模型** —— [docs/get-models.md](docs/get-models.md)
+>    Matrix 模型库的**网页点击步骤**、选包提醒（认准 `OMC` 包）、SHA256 校验。
+> 2. 🔧 **转换自己的模型** —— [docs/model-conversion.md](docs/model-conversion.md)
+>    从 HuggingFace 检查点到能在 NPU 上跑的**完整可照着做的步骤**：
+>    dopt 三阶段量化 → 导出 ONNX → OMG 转换 → 装配模型目录 → 验证。
+>    **全程官方标准流程，不需任何自定义脚本改图。**
 >
 > ⚠️ 有一个配置项容易写错：`quant_param_2` 必须按平台设 ——
 > **kirinx90 用 `False`**。写成 `True` 会让量化把权重负半轴钳成 0，
@@ -176,6 +177,7 @@ src/cann_llm/
 
 | 文档 | 内容 |
 |---|---|
+| **[docs/get-models.md](docs/get-models.md)** | **下载官方模型**（Matrix 模型库网页点击步骤、选包提醒、SHA256） |
 | **[docs/model-conversion.md](docs/model-conversion.md)** | **模型转换全流程**（从 HF 检查点到能上 NPU，含最容易踩的量化坑） |
 | `docs/architecture.md` | 分层、数据流、为什么这样设计 |
 | `docs/cann-engine-notes.md` | **引擎笔记**：API 调用约定、回调签名、必须避开的崩溃点、上下文上限 |
