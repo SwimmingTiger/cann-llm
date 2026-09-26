@@ -183,8 +183,8 @@ data: [DONE]
 3. **`finish_reason` 是近似值**。引擎没有直接暴露"因何而停"，
    实现上用"输出 token 数是否顶到 `max_tokens`"判断 `length`，否则 `stop`。
 4. **不支持函数调用、多模态、logprobs**（引擎无对应能力）。
-5. **没有 `/v1/embeddings`**。模型未导出 embedding 接口。
-   将来要加时，在 `EngineBackend` 上扩一个方法即可。
+5. **没有 `/v1/embeddings`**。模型未导出 embedding 接口；
+   若要增加，在 `EngineBackend` 上扩一个方法即可。
 
 
 ## 排错
