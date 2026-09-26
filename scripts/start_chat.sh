@@ -165,14 +165,6 @@ fi
 
 command -v "$PY" >/dev/null 2>&1 || die "找不到 $PY；可用 PYTHON=/path/to/python3 指定"
 
-# NPU 访问权限预检：有些终端（如 MKCode 的）拿不到 /dev/npu* —— 早点说清楚。
-# 只警告不阻断：设备节点可能因环境而异，真失败时后端还会再报一次更明确的错。
-_npu="$(PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" "$PY" -c "from cann_llm.npucheck import npu_unavailable_reason as f; print(f() or '')" 2>/dev/null || true)"
-if [[ -n "$_npu" ]]; then
-    info "NPU 访问权限提示"
-    printf '%s\n\n' "$_npu" >&2
-fi
-
 
 # 记录解释器选择结果：路径、版本，以及"为什么是它"
 PY_PATH="$(command -v "$PY" 2>/dev/null || printf '%s' "$PY")"
