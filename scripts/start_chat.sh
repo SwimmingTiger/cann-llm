@@ -130,7 +130,7 @@ usage() {
       --topk N          top-k
       --topp F          top-p
       --rep F           重复惩罚
-      --maxtok N        单轮最大生成 token 数
+      --max-tokens N    单轮最大生成 token 数（--maxtok 亦可）
       --no-stream       关闭逐字输出
       --list-backends   列出可用后端与模板
   -h, --help            显示本帮助
@@ -192,6 +192,14 @@ if [[ -z "$MODEL_DIR" ]]; then
     info "未指定模型目录，将交由程序提示。用 -d 指定，或把模型放到 $ROOT/models/<名字>/ 下。"
 else
     ok "模型目录: $MODEL_DIR"
+    # 上下文窗口 / 最大输出 —— 填别的工具（如 DSH）的模型配置时要用
+    _mi="$("$PY" "$ROOT/scripts/model_info.py" "$MODEL_DIR" 2>/dev/null || true)"
+    _win="$(printf '%s\n' "$_mi" | sed -n 's/^context_window=//p')"
+    if [ -n "$_win" ]; then
+        ok "上下文窗口: ${_win} token  (= kv_cache_max_len，输入 + 输出之和)"
+        info "最大输出没有固定值：= 窗口 − 本次输入长度"
+        info "改单轮上限：--max-tokens <n>   例：scripts/start_chat.sh -d … --max-tokens 512"
+    fi
 fi
 
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"

@@ -344,6 +344,16 @@ fi
 ok "模型目录: $MODEL_DIR"
 ok "模型文件: $(basename "${omc[0]}") + $(basename "${weights[0]}")"
 
+# 上下文窗口 / 最大输出 —— 填别的工具（如 DSH）的模型配置时要用
+_mi="$("$PY" "$ROOT/scripts/model_info.py" "$MODEL_DIR" 2>/dev/null || true)"
+_win="$(printf '%s\n' "$_mi" | sed -n 's/^context_window=//p')"
+if [ -n "$_win" ]; then
+    ok "上下文窗口: ${_win} token  (= kv_cache_max_len，输入 + 输出之和)"
+    info "最大输出没有固定值：= 窗口 − 本次输入长度"
+    info "改默认输出窗口：--max-tokens <n>   例：scripts/start_server.sh -d … --max-tokens 512"
+    info "（请求体里的 max_tokens 优先生效）"
+fi
+
 # 端口占用
 if "$PY" - "$HOST" "$PORT" <<'PY'
 import socket, sys

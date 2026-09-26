@@ -16,6 +16,7 @@ _PARAM_FIELDS = {
     "topp": ("top_p", float),
     "rep": ("repetition_penalty", float),
     "maxtok": ("max_tokens", int),
+    "max-tokens": ("max_tokens", int),      # 与 CLI 参数名统一
 }
 
 

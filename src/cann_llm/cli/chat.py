@@ -49,7 +49,7 @@ HELP = """\
   /topk <n>              top-k（推荐 20）
   /topp <f>              top-p（推荐 0.95）
   /rep <f>               重复惩罚（推荐 1.1）
-  /maxtok <n>            单轮最大生成 token 数
+  /max-tokens <n>        单轮最大生成 token 数（/maxtok 亦可）
   /stream on|off         开关逐字输出
   /params                查看当前采样参数
   /stats                 上一轮耗时与用量
@@ -197,7 +197,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--topk", type=int, help="top-k")
     ap.add_argument("--topp", type=float, help="top-p")
     ap.add_argument("--rep", type=float, help="重复惩罚")
-    ap.add_argument("--maxtok", type=int, help="单轮最大生成 token 数")
+    ap.add_argument("--max-tokens", "--maxtok", type=int, dest="maxtok",
+                    help="单轮最大生成 token 数")
     ap.add_argument("--no-stream", action="store_true", help="关闭逐字输出")
     ap.add_argument("--list-backends", action="store_true", help="列出可用后端后退出")
     ap.add_argument("--list-tools", action="store_true", help="列出可用工具后退出")

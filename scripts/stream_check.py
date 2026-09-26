@@ -26,7 +26,7 @@ def main() -> int:
     ap.add_argument("-d", "--model-dir", required=True)
     ap.add_argument("-b", "--backend", default="cann")
     ap.add_argument("--temp", type=float, default=0.2)
-    ap.add_argument("--maxtok", type=int, default=64)
+    ap.add_argument("--max-tokens", "--maxtok", type=int, dest="maxtok", default=64)
     args = ap.parse_args()
 
     backend = create_backend(args.backend, model_dir=args.model_dir)

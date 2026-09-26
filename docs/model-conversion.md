@@ -480,7 +480,7 @@ scripts/start_chat.sh -d /path/to/my-model -p "The capital of France is" --temp 
 
 # ③ 长一点，看是否通顺（不只是短答案对）
 scripts/start_chat.sh -d /path/to/my-model \
-    -p "Explain what a large language model is in three sentences." --temp 0 --maxtok 80
+    -p "Explain what a large language model is in three sentences." --temp 0 --max-tokens 80
 
 # ④ 是不是逐字流式
 PYTHONPATH=src python3 scripts/stream_check.py -d /path/to/my-model
