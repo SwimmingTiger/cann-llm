@@ -118,6 +118,10 @@ past_value_in{i} fp32  [2048, 2, 1, 128]
 输出 lm_logits    fp32  [1, 64, 151936]
 ```
 
+> 其中 `past_key_in{i}` / `past_value_in{i}` 的**第 0 维就是 KV 缓存上限**。
+> 上面这两个 2048 属于 **Qwen2.5-1.5B** 这个模型 —— 它由转换/量化时的
+> `kv_cache_max_len` 决定并固化进形状，**不是引擎常量**（详见第 9 节）。
+
 引擎读 logits 的位置是 `lmLogits + (vaildLenLast_ - 1) * vocabAlignSize_`
 （lldb 实测：`vaildLenLast_ = 5` 时指针 = 基址 + `4 × 151936 × 4` 字节 ✓）。
 
