@@ -267,7 +267,6 @@ def run_server(root: str, argv: "List[str]") -> int:
     host, port = str(o["host"]), int(o["port"])
     p = paths(root)
 
-    info("检查运行环境…")
     py = os.environ.get("CANN_LLM_RESOLVED_PYTHON") or sys.executable or "python3"
     if sys.version_info < (3, 9):
         die("Python 版本过低（需要 >= 3.9，因为用到了 tomllib）")
