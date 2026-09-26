@@ -697,3 +697,88 @@ GetOneTokenGeneration(p)  →  _acc.append(id)
 | 3 | CLI + HTTP 端到端（含 OpenAI 兼容流式响应）| ✅ |
 | 4 | 测试通过不回归（**184 passed**）| ✅ |
 | 5 | 提交到 git | ✅ |
+
+---
+
+# ★★★★★ 重大更正（重构完成）：**完全不需要内部函数**
+
+本文档前述章节记录的「绕道内部函数（`0xFDA28` / `0x118704`）」是**基于错误前提**的做法，
+现已**全部删除**。正确序列来自系统服务自己的实现。
+
+## 证据来源：系统服务怎么调引擎
+
+`/system/lib64/libhm_model_engine_service.z.so`（11434 服务）里
+`AIMM::HIAI::HiaiSession`（源文件名 `hiai_session.cpp`）**只按名字直接导入 49 个
+`HIAI_LLMEngine_*` 符号**（`.dynsym` UND），**全部是导出符号**，一个内部函数都没碰：
+
+```
+Prompt_*  : 只有 Prompt_Create / Prompt_Destroy      ← 没有 SetText、没有 SetTokenIds
+Context_* : 41 个（含 SetPrefixPrompt / GetOneGeneration / GetGenerateStatus …）
+Executor_*: Create / Deinit / Destroy / GenerateAsync / Init_Use_Option / SetInferencePerfMode
+InitOption_*: Create / Destroy / SetInferType / SetModel / SetTokenizer
+```
+
+**反编译实锤的调用序列**（`svc_call.txt` / `svc_gen.txt`，均在 x570 `~/re/`）：
+
+```c
+// HiaiSessionRun（hiai_session.cpp:1419-1434）
+ApplyChatTemplate(req, …) → promptStr
+Context_SetPrefixPrompt(ctx, promptStr.c_str())            // :1429  ★ 输入＝文本
+Context_SetInitTokenLen(ctx, param.initTokenLen)           // :1431  ★ 两个参数（调用点实锤）
+HiaiSession::LLMEngineRun(this, param)                     // :1434
+
+// LLMEngineGenerateAsync（:786-811）
+Context_SetOnAllTokensGenerateDoneFunc(ctx, …)             // :786
+Context_SetOnSomeTokenGenerateDoneFunc(ctx, …)             // :793
+Context_SetOnGenerateAsyncFailed(ctx, …)                   // :800
+Executor_GenerateAsync(exec, ctx, str.c_str())             // :811  ★ 第 3 参＝文本，不是 Prompt*
+
+// OnSomeTokensGenerated（回调，0x16c034）—— 流式的读就在回调里
+Context_GetOneGenerationLen(ctx, &len)
+Context_GetOneGeneration(ctx, buf, len)
+```
+
+上下文/执行器句柄在 `HiaiSession` 里是 `*(this + 376)`（context）与 `*(this + 384)`（executor）。
+`Context_SetPrefixPrompt` 内部只是 `std::string::operator=(ctx + 576)`（`sub_15B0B0`）——
+**它不分词**，分词由引擎自己做（tokenizer 在模型配置里，`InitOption_SetTokenizer` 告诉它）。
+
+## 我此前错在哪
+
+| 我原来的判断 | 真相 |
+|---|---|
+| `GenerateAsync` 第 3 参必须是 `Prompt*` | 是 `std::string::c_str()` **文本** |
+| 输入只能靠 `Prompt_SetTokenIds` | 是 `Context_SetPrefixPrompt(ctx, 文本)` |
+| 22 字节 SSO 缺陷逼我绕道 | 那条通道本就不该用；正确通道不涉及它 |
+| 所以要直调内部 `0xFDA28` / `0x118704` | **完全不需要** |
+
+**教训**：反编译单个函数得到的原型常常不完整（`SetInitTokenLen` 就骗过我一次）；
+**调用点才是硬证据** —— 而「系统服务怎么调」是现成的、权威的答案。
+
+## 三个实现坑（都踩过，已修）
+
+1. **ctypes 的 `argtypes` 必须完整**：`GenerateAsync` 第 3 参要声明成 `c_char_p`
+   （`c_void_p` + Python `bytes` 不会补 NUL → 引擎读越界 → segfault）；
+   漏了声明（默认 `c_int`）会把指针截成 32 位 → 同样 segfault。
+   自查办法：列出代码里 `self._bind.lib.X` 用到的每个符号，逐个核对 SIGS 里有声明。
+2. **`Get*Generation` 家族的返回值不是成败标志**：实测 `GetAllGeneration` 返回 **1**
+   而文本完全正确（`GetOneGeneration` 同样）。**只按长度与缓冲区内容判断**，别用 `!= 0` 当失败
+   —— 这个坑让输出一直是空字符串。
+3. **流式的读必须在回调里**（同线程，安全）；从外部主线程读会与引擎工作线程竞态，
+   轻则读到空、重则 `libc++abi: Pure virtual function called!` abort。
+
+## 现在的实现
+
+```
+load()      : Executor_CreateFromJson(executor_json)              // 保留
+generate()  : ctx = Context_Create()
+              Context_SetPrefixPrompt(ctx, prompt 文本)
+              Context_SetInitTokenLen(ctx, init_token_len)
+              Context_SetMaxGenTokens(ctx, maxgen)
+              三个回调（AllTokens / SomeToken / Failed）
+              Executor_GenerateAsync(exec, ctx, prompt 文本)
+              OnSomeToken 回调内读 GetAllGeneration → 增量化 → Queue → 主线程 yield
+              Context_Destroy
+```
+
+**实测**：27B/33B(中文)/23B prompt 全部输出正确；逐 token 流式 30 分片；
+CLI、HTTP（含 SSE）、184 测试全过。
