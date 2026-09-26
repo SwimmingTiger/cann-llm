@@ -86,6 +86,12 @@ DEFAULT_CONTEXT_LEN = 2048
 from ..version import CANN_NDK_LIB
 from .base import EngineBackend, register_backend
 
+def _ctx_desc(n: int) -> str:
+    """把 KV 上限渲染成人读的说法；0 表示未知，别假装知道。"""
+    return (f"本模型 {n} token，含输出" if n else
+            "本模型的上限未知 —— 模型目录里没找到 kv_cache_max_len")
+
+
 #: Qwen 系列结束符（由设备 tokenizer.json 的 added_tokens 确认 = 151645）
 IM_END = "<|im_end|>"
 
@@ -194,28 +200,24 @@ class CannNdkBackend(EngineBackend):
         self._sink = None                          # 当前请求的增量消费者
         self._emitted = ""
         self._info = ModelInfo(id=model_id, backend="cann", path=self.model_dir,
-                               context_length=context_length or DEFAULT_CONTEXT_LEN,
+                               context_length=context_length or 0,   # 0 = 未知，load() 里再探测
                                chat_template="chatml")
         self._loaded = False
 
     @staticmethod
     def _read_context_length(model_dir: str) -> Optional[int]:
-        """从模型目录的 executor.json 读 ``kv_cache_max_len``。
+        """从模型目录读 ``kv_cache_max_len``（= NPU 上真正可用的窗口）。
 
-        读不到就返回 None，由调用方决定回退值 —— 不要在这里猜一个数字，
-        否则出错提示会拿错误的上限误导人。
+        走 :func:`cann_llm.modelcfg.read_kv_cache_max_len`：**优先模型自带的**
+        扁平 ``<model>.json``，本工具链生成的 ``executor.json`` 只作兜底 ——
+        派生物是旧的就会给出过时的上限。
+
+        读不到返回 ``None``，由调用方决定怎么呈现 —— **不要在这里猜一个数字**，
+        否则 ``/v1/models`` 与出错提示会拿错误的上限误导人。
         """
-        path = os.path.join(model_dir, "executor.json")
-        try:
-            with open(path) as f:
-                cfg = json.load(f)
-        except (OSError, ValueError):
-            return None
-        val = (cfg.get("llm_config") or {}).get("kv_cache_max_len")
-        try:
-            return int(val) if val is not None else None
-        except (TypeError, ValueError):
-            return None
+        from ..modelcfg import read_kv_cache_max_len
+        val, _src = read_kv_cache_max_len(model_dir)
+        return val
 
     # ------------------------------------------------------------ 生命周期
 
@@ -224,11 +226,12 @@ class CannNdkBackend(EngineBackend):
             return self._info
         if not self.model_dir or not os.path.isdir(self.model_dir):
             raise ModelLoadError(f"模型目录不存在: {self.model_dir!r}")
-        # context_length 没显式给就按模型自己的 executor.json 来 ——
-        # 这样 /v1/models 的元信息与"输入超出 KV 缓存"的提示文案永远是对的。
+        # context_length 没显式给就按模型自己的配置来 ——
+        # 这样 /v1/models 的元信息与"输入超出 KV 缓存"的提示文案才是对的。
+        # 读不到就保持 0（= 未知）并如实呈现；**不猜默认值**，
+        # 否则提示里会写一个属于别个模型的上限，反而误导。
         if self.context_length is None:
-            self.context_length = (self._read_context_length(self.model_dir)
-                                   or DEFAULT_CONTEXT_LEN)
+            self.context_length = self._read_context_length(self.model_dir) or 0
             self._info = ModelInfo(id=self.model_id, backend="cann",
                                    path=self.model_dir,
                                    context_length=self.context_length,
@@ -424,8 +427,10 @@ class CannNdkBackend(EngineBackend):
     def _check_prompt(self, prompt: str, params: GenerationParams) -> None:
         """只拦真正的输入错误，**不限制长度**。
 
-        本后端刻意不设上下文上限：引擎的 KV 缓存是 2048，超出后它不会报错，
-        而是静默产出垃圾（实测 in_tokens≈2086 时开始出现 '-' 之类的重复）。
+        本后端刻意不设上下文上限：KV 缓存就那么长（**该值随模型而变** ——
+        由转换时的 ``kv_cache_max_len`` 固化进张量形状，见 cann_llm.modelcfg），
+        超出后引擎不会报错，而是静默产出垃圾（实测 in_tokens≈2086 时开始出现
+        '-' 之类的重复；那组数据来自 2048 的模型）。
         这种"看起来成功但结果是错的"无法在客户端用任何启发式可靠预判
         （没有 tokenize 接口，按字节估算误差可达 2.3 倍），所以交给调用方
         自己观察输出、自己决定怎么控制长度。
@@ -450,8 +455,8 @@ class CannNdkBackend(EngineBackend):
             # 输入超长、含无法分词的字符，还是引擎内部错误。列出可能性即可。
             raise GenerationError(
                 f"引擎 Generate 返回 {status}。无法从返回码判断具体原因，"
-                f"常见可能：输入超出 KV 缓存（本模型 {self.context_length} token，"
-                f"含输出）、含无法分词的字符、引擎内部错误。")
+                f"常见可能：输入超出 KV 缓存（{_ctx_desc(self.context_length)}）、"
+                f"含无法分词的字符、引擎内部错误。")
 
         in_tok = ctypes.c_ulong(0)
         out_tok = ctypes.c_ulong(0)

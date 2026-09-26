@@ -239,6 +239,12 @@ class _HiaiBindings:
             fn.argtypes = args
 
 
+def _ctx_desc(n: int) -> str:
+    """把 KV 上限渲染成人读的说法；0 表示未知，别假装知道。"""
+    return (f"本模型 KV 缓存 {n} token" if n else
+            "本模型的上限未知 —— 模型目录里没找到 kv_cache_max_len")
+
+
 def _module_base(lib_path: "str | None" = None) -> int:
     """libhiai_llm_engine.so 的加载基址（内部函数地址 = 基址 + 静态偏移）。
 
@@ -331,9 +337,12 @@ class HiaiBackend(EngineBackend):
         print(f"  [hiai] 分词器就绪: vocab={len(self._tok.vocab)}", flush=True)
 
         llm = executor_cfg["llm_config"]
-        real = int(llm.get("kv_cache_max_len") or 0)
-        # 模型自带的优先：外部传来的可能只是配置默认值（2048），会误导人
-        self._context_length = real or self._context_length or 2048
+        # 优先模型自带的扁平 <model>.json；我们生成的 executor.json 只作兜底。
+        # 读不到就保持 0（= 未知）—— **不猜默认值**，否则提示里会写一个
+        # 属于别个模型的上限。该值随模型而变（实测 7B=4096 / 1.5B=2048）。
+        from ..modelcfg import read_kv_cache_max_len
+        real, _src = read_kv_cache_max_len(self.model_dir)
+        self._context_length = real or self._context_length or 0
         # 引擎期望 prompt 以 BOS 开头（实测：不加则 Generate 返回 1；
         # 且引擎对短 prompt 报的 in=7 比纯文本分词结果多 1，正是这个 BOS）
         try:
@@ -462,7 +471,7 @@ class HiaiBackend(EngineBackend):
                     _idx += 1
             if rc != 0:
                 raise GenerationError(
-                    f"引擎 Generate 返回 {rc}（本模型 KV 缓存 {self._context_length} token）")
+                    f"引擎 Generate 返回 {rc}（{_ctx_desc(self._context_length)}）")
 
             _full = self._decode_ids(list(_acc))
             stats = self._read_stats(len(_full))

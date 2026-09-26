@@ -20,6 +20,8 @@ import json
 import os
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+
 
 #: 我们生成的 executor/context 文件名的特征（这些是派生物，不是权威来源）
 _DERIVED_NAMES = ("executor.json", "context.json")
@@ -39,36 +41,30 @@ def _read_llm(name, path):
 
 
 def scan_all(model_dir):
-    """扫描目录，返回 [(文件, llm_config, 是否派生物)]，只保留有 kv_cache_max_len 的。"""
+    """返回 [(文件名, llm_config 视图, 是否本工具链生成的派生物)]。
+
+    判定逻辑与后端共用 ``cann_llm.modelcfg``，避免"脚本说 4096、后端认 2048"
+    这种两套标准漂移。
+    """
+    from cann_llm.modelcfg import scan as _scan
     out = []
-    for name in sorted(os.listdir(model_dir)):
-        if not name.endswith(".json"):
-            continue
-        try:
-            ll = _read_llm(name, os.path.join(model_dir, name))
-        except Exception:  # noqa: BLE001
-            continue
-        if ll.get("kv_cache_max_len"):
-            out.append((name, ll, _looks_derived(name)))
+    for name, _val, derived in _scan(model_dir):
+        out.append((name, _read_llm(name, os.path.join(model_dir, name)), derived))
     return out
 
 
 def _load_llm_config(model_dir):
-    """挑一份**权威**来源，并报告冲突。
+    """挑一份**权威**来源并报告冲突（详见 cann_llm.modelcfg 的说明）。
 
-    优先级：
-      1. **非派生的**（官方 `<model>.json` 等）—— 这是模型自带的真相
-      2. 我们生成的 executor.json —— 方便，但可能是旧的（陈旧风险）
-    同优先级里按文件名排序取第一个；若多份来源数值不一致，一并报告出来。
+    优先级：模型自带的（非派生）> 本工具链生成的 executor.json。
+    派生物若为旧文件会给出过时值，所以只作兜底。
     """
-    found = scan_all(model_dir)
-    if not found:
+    from cann_llm.modelcfg import read_kv_cache_max_len, scan as _scan
+    val, src = read_kv_cache_max_len(model_dir)
+    if not src:
         return {}, "", []
-    authoritative = [f for f in found if not f[2]]
-    chosen = authoritative[0] if authoritative else found[0]
-    conflicts = [(n, ll.get("kv_cache_max_len")) for n, ll, _ in found
-                 if ll.get("kv_cache_max_len") != chosen[1].get("kv_cache_max_len")]
-    return chosen[1], chosen[0], conflicts
+    conflicts = [(n, v) for n, v, _d in _scan(model_dir) if v != val]
+    return _read_llm(src, os.path.join(model_dir, src)), src, conflicts
 
 
 def main(argv):
