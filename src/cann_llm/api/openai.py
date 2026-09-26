@@ -102,13 +102,18 @@ def _as_text(content: Any) -> str:
 
 
 def parse_chat_request(body: Dict[str, Any], *, default_model: str = "",
-                       strict: bool = False) -> ChatCompletionRequest:
+                       strict: bool = False,
+                       base_params: Optional[GenerationParams] = None
+                       ) -> ChatCompletionRequest:
     """把 OpenAI 风格的请求体解析成本项目的类型。
 
     :param strict: ``True`` 时，所有本服务无法实现的字段都直接报错；
         默认 ``False`` 则把 :data:`_IGNORABLE` 里的字段记录到 ``ignored``
         并继续（否则带 tools 的客户端会完全用不了）。
         :data:`_ALWAYS_REJECT` 里的字段无论哪种模式都报错。
+    :param base_params: 请求体里**没写**的采样字段用什么值兜底（通常是服务端
+        配置的默认值）。解析后 ``request.params`` 里的每个字段都是确定的，
+        调用方不需要再做任何"是否等于默认值"的判断。
     """
     if not isinstance(body, dict):
         raise InvalidRequestError("请求体必须是 JSON 对象")
@@ -162,7 +167,7 @@ def parse_chat_request(body: Dict[str, Any], *, default_model: str = "",
             raise InvalidRequestError(f"字段 {key} 不支持：{why}")
         ignored.append(key)
 
-    params = _params_from_body(body)
+    params = _params_from_body(body, base=base_params)
 
     return ChatCompletionRequest(
         model=str(body.get("model") or default_model),
@@ -293,7 +298,9 @@ class CompletionRequest:
 
 def parse_completion_request(body: Dict[str, Any], *,
                              default_model: str = "",
-                             strict: bool = False) -> CompletionRequest:
+                             strict: bool = False,
+                             base_params: Optional[GenerationParams] = None
+                             ) -> CompletionRequest:
     if not isinstance(body, dict):
         raise InvalidRequestError("请求体必须是 JSON 对象")
     for key, why in _ALWAYS_REJECT.items():
@@ -320,7 +327,7 @@ def parse_completion_request(body: Dict[str, Any], *,
         model=str(body.get("model") or default_model),
         prompt=prompt,
         stream=bool(body.get("stream", False)),
-        params=_params_from_body(body),
+        params=_params_from_body(body, base=base_params),
         ignored=ignored_fields,
     )
 

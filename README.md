@@ -118,6 +118,25 @@ curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/jso
 **HTTP 层不执行工具**，只按标准返回 `tool_calls`；执行循环由你的客户端负责
 （用 `openai` SDK 的话就是十来行，见 docs/agent.md 的完整示例）。
 
+## 上下文长度
+
+**本框架不做任何长度限制，也不裁剪历史。** 推理框架的职责是把模型的行为如实
+传给调用方 —— 模型产出了什么就交出去什么，不替调用方判断输出"该不该"。
+
+长度控制由调用方决定：CLI 用 `/reset`，HTTP 由客户端自己管理 `messages`。
+真实 token 数看响应里的 `usage.prompt_tokens`（直接来自引擎的 `GetInputTokenCount`，准确）；
+`count_prompt_tokens()` 只是给日志看的粗估，不作为任何依据。
+
+引擎的实测行为（KV 缓存 2048 token，含输出）：
+
+| 输入规模 | 行为 |
+|---|---|
+| ≤ ~1708 | 输出正常 |
+| ~2086 – 3360 | 模型产出退化文本（重复的 `- - - -` 之类）—— 这是模型的真实输出，如实返回 |
+| 很大（如 31KB 英文） | 引擎返回码 1 → 服务端如实报 500（不替引擎断言原因） |
+
+详见 [cann-engine-notes](docs/cann-engine-notes.md) 第 9 节。
+
 ## 项目结构
 
 ```

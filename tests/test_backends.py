@@ -209,26 +209,28 @@ class TestNoContextLimit(unittest.TestCase):
         be._executor = 1
         return be
 
-    def test_oversized_input_maps_to_400_not_500(self):
-        """输入确实超长时是客户端错误（400），不该报成 500 让调用方以为该重试。"""
-        from cann_llm.errors import ContextLengthExceededError, GenerationError
+    def test_engine_failure_reports_raw_status_without_guessing(self):
+        """如实报告引擎返回码，不替它断言原因 —— 我们区分不出到底为什么失败。"""
+        from cann_llm.errors import GenerationError
         from cann_llm.types import GenerationParams
 
         be = self._fake_cann(status=1)
-        with self.assertRaises(ContextLengthExceededError) as cm:
-            be._run("x" * 40000, GenerationParams(), None)
-        self.assertEqual(cm.exception.http_status, 400)
-        self.assertEqual(cm.exception.error_type, "context_length_exceeded")
+        for prompt in ("x" * 40000, "short"):
+            with self.assertRaises(GenerationError) as cm:
+                be._run(prompt, GenerationParams(), None)
+            msg = str(cm.exception)
+            self.assertIn("返回 1", msg)
+            self.assertIn("无法从返回码判断", msg)
+            # 不应断言某个具体原因
+            self.assertNotIn("错误类型", msg)
+            self.assertEqual(cm.exception.http_status, 500)
 
-    def test_engine_failure_with_short_input_is_500(self):
-        from cann_llm.errors import ContextLengthExceededError, GenerationError
-        from cann_llm.types import GenerationParams
-
-        be = self._fake_cann(status=1)
-        with self.assertRaises(GenerationError) as cm:
-            be._run("short", GenerationParams(), None)
-        self.assertNotIsInstance(cm.exception, ContextLengthExceededError)
-        self.assertEqual(cm.exception.http_status, 500)
+    def test_params_are_used_verbatim(self):
+        """采样参数原样使用：不因「值恰好等于默认」而被替换。"""
+        from cann_llm.backends import cann
+        import inspect
+        src = inspect.getsource(cann.CannNdkBackend)
+        self.assertNotIn("_merge_params", src)
 
     def test_token_estimate_is_calibrated(self):
         """按实测标定：原先「字节 // 2」对英文偏高约 2.3 倍，改为「字节 // 4」。"""

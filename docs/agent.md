@@ -95,10 +95,13 @@ def query_db(order_id: str) -> str:
 
 最后一条是最常见的失败模式。缓解办法（已内建）：
 
-* `AgentConfig.force_tool_use = True`（默认）会在工具说明后追加：
+* `AgentConfig.force_tool_use = True`（**默认关闭，需显式打开**）会在工具说明后追加：
   *"If the user's request can be answered by any of the tools above, you MUST
   emit the tool call immediately. Never ask the user for information that a tool
   can provide…"* —— 同一问题实测从 **0/4 提升到 4/4**。
+
+  之所以默认关闭：这是往 prompt 里塞调用方没写的指令，本质是"改变模型行为"
+  而非"如实传递模型行为"。框架不该替调用方做这个决定 —— 需要就打开。
 * 把工具的 `description` 写具体（说明"无需参数，可直接调用"之类）。
 
 **务必知道**：更大/更强的模型会显著更可靠。换模型只需改配置里的

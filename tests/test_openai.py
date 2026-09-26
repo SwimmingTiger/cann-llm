@@ -2,12 +2,7 @@ import json
 import unittest
 
 from cann_llm.api import openai as oa
-from cann_llm.errors import (
-    BusyError,
-    CannLlmError,
-    ContextLengthExceededError,
-    InvalidRequestError,
-)
+from cann_llm.errors import BusyError, CannLlmError, InvalidRequestError
 from cann_llm.types import GenerationStats
 
 
@@ -234,7 +229,6 @@ class TestErrorMapping(unittest.TestCase):
     def test_http_status_per_exception(self):
         cases = [
             (InvalidRequestError("x"), 400, "invalid_request_error"),
-            (ContextLengthExceededError("x"), 400, "context_length_exceeded"),
             (BusyError("x"), 503, "server_busy"),
         ]
         for exc, status, etype in cases:

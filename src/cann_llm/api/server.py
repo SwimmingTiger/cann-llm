@@ -339,9 +339,13 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_chat(self, body: Dict[str, Any]) -> None:
         st = self.state
         req = oa.parse_chat_request(body, default_model=st.cfg.model.model_id,
-                                    strict=st.cfg.server.reject_unsupported)
+                                    strict=st.cfg.server.reject_unsupported,
+                                    base_params=st.base_params())
         self._note_ignored(req.ignored)
-        params = req.params if req.params != GenerationParams() else st.base_params()
+        # req.params 在解析阶段已用配置默认值补齐，直接用，不做任何比较 ——
+        # 曾经的 `req.params != GenerationParams()` 会在调用方显式给出的值
+        # 恰好等于 dataclass 默认值时把它替换掉，属于吞掉调用方意图。
+        params = req.params
         prompt = st.template.render(req.messages, tools=req.tools or None)
 
         if req.stream:
@@ -443,9 +447,10 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_completion(self, body: Dict[str, Any]) -> None:
         st = self.state
         req = oa.parse_completion_request(body, default_model=st.cfg.model.model_id,
-                                          strict=st.cfg.server.reject_unsupported)
+                                          strict=st.cfg.server.reject_unsupported,
+                                          base_params=st.base_params())
         self._note_ignored(req.ignored)
-        params = req.params if req.params != GenerationParams() else st.base_params()
+        params = req.params
 
         if req.stream:
             self._stream_completion(req, params)

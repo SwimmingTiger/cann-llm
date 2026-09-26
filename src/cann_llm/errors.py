@@ -44,13 +44,6 @@ class GenerationError(CannLlmError):
     error_type = "generation_failed"
 
 
-class ContextLengthExceededError(GenerationError):
-    """输入超出模型的上下文/IO 上限。"""
-
-    http_status = 400
-    error_type = "context_length_exceeded"
-
-
 class BusyError(CannLlmError):
     """引擎一次只能跑一路推理，排队超时。"""
 

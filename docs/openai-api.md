@@ -165,7 +165,7 @@ data: [DONE]
 | HTTP | `error.type` | 触发条件 |
 |---|---|---|
 | 400 | `invalid_request_error` | 参数非法、不支持的字段、`n>1`、prompt 为空 |
-| 400 | `context_length_exceeded` | 输入超出模型上下文（2048 token，含输出） |
+
 | 400 | `invalid_request_error` | JSON 解析失败 |
 | 401 | `invalid_api_key` | 配置了 `api_key` 但请求未带或错误 |
 | 404 | `not_found` | 未知路径 |
@@ -243,6 +243,6 @@ OpenAI 客户端的 base_url 只应到 /v1，例如 http://127.0.0.1:8000/v1
 | `503 server_busy` | 并发超过 `server.max_queue`（引擎一次只跑一路），稍后重试 |
 | `400 invalid_request_error` | 参数问题，`error.message` 里有具体原因 |
 | `503 backend_unavailable` | 不在鸿蒙环境 / 找不到 NDK 库 |
-| `400 context_length_exceeded` | 输入太长。**注意**：略超 2048 时引擎不一定报错，而是静默产出重复垃圾 —— 见 docs/cann-engine-notes.md |
+| `500 generation_failed` | 引擎返回非零。服务端只如实报告返回码，不替它断言原因（可能：输入超出 KV 缓存 2048 / 含无法分词的字符 / 引擎内部错误） |
 
 服务端日志里也会带上同样的提示（404/405 会打印原因），方便对着日志排查。

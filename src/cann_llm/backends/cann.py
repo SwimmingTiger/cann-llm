@@ -31,7 +31,6 @@ from typing import Dict, Iterator, Optional, Tuple
 
 from ..errors import (
     BackendUnavailableError,
-    ContextLengthExceededError,
     GenerationError,
     InvalidRequestError,
     ModelLoadError,
@@ -287,7 +286,12 @@ class CannNdkBackend(EngineBackend):
         if not self._loaded:
             self.load()
 
-        params = self._merge_params(request.params)
+        # 采样参数原样使用，不做任何「哨兵值」替换。
+        # 曾经用「等于 dataclass 默认值就视为未指定」来合并后端默认值 ——
+        # 那会吃掉调用方的明确意图：后端默认 temperature=0.1 时，
+        # 调用方显式要求 0.7（恰好等于 dataclass 默认）会拿到 0.1。
+        # 默认值的填充属于上层（CLI / HTTP 在构造请求前完成）。
+        params = request.params
         self._check_prompt(request.prompt, params)
 
         events: "queue.Queue[Tuple[str, object]]" = queue.Queue()
@@ -334,26 +338,6 @@ class CannNdkBackend(EngineBackend):
 
     # ------------------------------------------------------------ 内部
 
-    def _merge_params(self, p: GenerationParams) -> GenerationParams:
-        """未显式给出的字段回落到后端默认值。
-
-        约定：请求里等于 dataclass 默认值的字段视为「未指定」，
-        由后端默认值覆盖。这样 CLI/HTTP 层不必知道后端默认值。
-        """
-        d = GenerationParams()
-        d2 = self.default_params
-        return GenerationParams(
-            max_tokens=p.max_tokens if p.max_tokens != d.max_tokens else d2.max_tokens,
-            temperature=p.temperature if p.temperature != d.temperature else d2.temperature,
-            top_k=p.top_k if p.top_k != d.top_k else d2.top_k,
-            top_p=p.top_p if p.top_p != d.top_p else d2.top_p,
-            repetition_penalty=(p.repetition_penalty
-                                if p.repetition_penalty != d.repetition_penalty
-                                else d2.repetition_penalty),
-            seed=p.seed if p.seed is not None else d2.seed,
-            stop=p.stop or d2.stop,
-        )
-
     def _check_prompt(self, prompt: str, params: GenerationParams) -> None:
         """只拦真正的输入错误，**不限制长度**。
 
@@ -363,7 +347,8 @@ class CannNdkBackend(EngineBackend):
         （没有 tokenize 接口，按字节估算误差可达 2.3 倍），所以交给调用方
         自己观察输出、自己决定怎么控制长度。
 
-        详见 docs/cann-engine-notes.md 的「上下文上限」一节。
+        空 prompt 引擎自己也会拒绝（实测 Generate 返回 1），这里只是提前给出
+        更清楚的报错，不改变引擎的行为。详见 docs/cann-engine-notes.md 第 9 节。
         """
         if not prompt:
             raise InvalidRequestError("prompt 不能为空")
@@ -378,18 +363,12 @@ class CannNdkBackend(EngineBackend):
                                     prompt.encode("utf-8"))
         wall = time.time() - t0
         if status != 0:
-            # 非零返回最常见的原因是输入超出 KV 缓存（2048）。这属于客户端
-            # 错误（400 context_length_exceeded），不该报成 500 —— 否则调用方
-            # 会以为该重试。这里只是给错误分类，不阻断任何请求，所以用粗估
-            # 没关系（估歪了也只是状态码不同）。
-            if self.count_prompt_tokens(prompt) > self.context_length:
-                raise ContextLengthExceededError(
-                    f"引擎 Generate 返回 {status}，且输入约 "
-                    f"{self.count_prompt_tokens(prompt)} token，已超出模型上下文"
-                    f"（{self.context_length}，含输出）。请缩短输入后重试。")
+            # 如实报告引擎的返回码，不替它断言原因 —— 我们无法区分到底是
+            # 输入超长、含无法分词的字符，还是引擎内部错误。列出可能性即可。
             raise GenerationError(
-                f"引擎 Generate 返回 {status}（输入不长，可能是无法分词的字符或"
-                f"引擎内部错误）。")
+                f"引擎 Generate 返回 {status}。无法从返回码判断具体原因，"
+                f"常见可能：输入超出 KV 缓存（本模型 {self.context_length} token，"
+                f"含输出）、含无法分词的字符、引擎内部错误。")
 
         in_tok = ctypes.c_ulong(0)
         out_tok = ctypes.c_ulong(0)

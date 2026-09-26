@@ -38,6 +38,28 @@
 - `Makefile`、`examples/config.example.toml`
 - `docs/architecture.md`、`docs/cann-engine-notes.md`、`docs/openai-api.md`
 
+### Changed — 不扭曲模型行为
+
+用户指出的原则：**推理框架的职责是如实传递模型的行为，不替调用方判断输出
+"该不该"**。据此审计并修正了我自己的四处扭曲：
+
+- **采样参数不再做「哨兵值」替换**。原先 `_merge_params` 把「值恰好等于
+  dataclass 默认」当成「未指定」，于是后端默认 temperature=0.1 时，调用方
+  显式要求 0.7（恰好等于默认值）会拿到 0.1。服务端的
+  `req.params != GenerationParams()` 是同一类 bug。现在默认值只在解析阶段
+  显式兜底，进入后端后参数原样使用。
+- **不再截断模型的工具调用**。原先 `max_calls_per_step`（默认 4）会丢弃
+  第 5 个之后的调用 —— 那是在丢模型输出。现在发几个执行几个。
+- **`force_tool_use` 改为默认关闭**。它会往 prompt 里塞调用方没写的指令，
+  属于改变模型行为。实测有效（0/4 → 4/4），但要不要用应由调用方决定。
+- **引擎非零返回不再断言原因**。原先会猜「输入超出上下文」并返回 400
+  `context_length_exceeded`；我们其实区分不出是超长、含无法分词的字符还是
+  引擎内部错误。现在如实报告返回码 + 列出可能性，状态码回到 500。
+  相应地删除了已成死代码的 `ContextLengthExceededError`。
+
+文档同步去掉了把这个现象称作「危险区 / 坑」的说法 —— 模型在输入超范围时
+产出退化文本是它的真实行为，框架如实传出去就是正确的。
+
 ### Changed — 移除上下文长度限制
 
 - **后端不再对 prompt 长度设限**，也不再做历史裁剪。原先的 `max_prompt_tokens`

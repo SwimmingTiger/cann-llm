@@ -228,12 +228,13 @@ class TestAgentLoop(unittest.TestCase):
         # 最后一轮的 prompt 不应再包含工具声明
         self.assertNotIn("<tools>", backend.prompts[-1])
 
-    def test_max_calls_per_step_truncated(self):
+    def test_all_tool_calls_are_executed(self):
+        """模型发了几个就执行几个 —— 截断等于丢弃模型输出。"""
         many = "".join(f'<tool_call>{{"name":"echo","arguments":{{"s":"{i}"}}}}</tool_call>'
                        for i in range(6))
         calls = []
-        _, events = run([many, "完"], make_registry(calls), max_calls_per_step=2)
-        self.assertEqual(len(calls), 2)
+        _, events = run([many, "完"], make_registry(calls))
+        self.assertEqual(len(calls), 6)
 
     def test_result_truncated(self):
         reg = ToolRegistry()
@@ -261,13 +262,15 @@ class TestAgentLoop(unittest.TestCase):
         self.assertEqual(f.messages[3].tool_call_id, f.messages[2].tool_calls[0].id)
         self.assertEqual(f.messages[-1].content, "最终答案")
 
-    def test_force_tool_use_directive_in_prompt(self):
+    def test_prompt_is_not_edited_by_default(self):
+        """默认不往 prompt 里塞调用方没写的指令 —— 那属于改变模型行为。"""
         backend, _ = run([CALL, "ok"], make_registry([]))
-        self.assertIn("MUST emit the tool call", backend.prompts[0])
-
-    def test_force_tool_use_can_be_disabled(self):
-        backend, _ = run([CALL, "ok"], make_registry([]), force_tool_use=False)
         self.assertNotIn("MUST emit the tool call", backend.prompts[0])
+        self.assertFalse(AgentConfig().force_tool_use)
+
+    def test_force_tool_use_is_opt_in(self):
+        backend, _ = run([CALL, "ok"], make_registry([]), force_tool_use=True)
+        self.assertIn("MUST emit the tool call", backend.prompts[0])
 
 
 if __name__ == "__main__":

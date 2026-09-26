@@ -173,15 +173,16 @@ class StreamFilter:
 class AgentConfig:
     #: 最多迭代几轮（含最后一轮强制收尾）
     max_steps: int = 4
-    #: 单步内最多执行几次工具调用（防止模型一次吐一堆）
-    max_calls_per_step: int = 4
     #: 工具结果回填时截断长度，避免撑爆上下文
     max_result_chars: int = 4000
     #: 是否把工具调用过程也流给用户（作为提示，不含协议标记）
     announce_tool_calls: bool = True
     #: 在工具说明后追加"该用就用、别向用户索要工具能给的信息"的强指令。
-    #: 实测对小模型是决定性的（同一问题 0/4 → 4/4），故默认开启。
-    force_tool_use: bool = True
+    #:
+    #: **默认关闭**：这会往 prompt 里塞调用方没写的指令，属于改变模型行为。
+    #: 实测它对小模型很有效（同一问题 0/4 → 4/4），但那是"让模型表现得更好"，
+    #: 不是"如实传递模型的行为" —— 想要就显式打开。
+    force_tool_use: bool = False
 
 
 # ------------------------------------------------------------------ 主循环
@@ -323,7 +324,8 @@ class AgentLoop:
                 convo.append(Message("assistant", final_text))
                 break
 
-            calls = parsed.tool_calls[:self.config.max_calls_per_step]
+            # 模型发了几个就执行几个 —— 截断等于丢弃模型输出
+            calls = parsed.tool_calls
             pending_calls.extend(calls)
             convo.append(Message("assistant", parsed.text, tool_calls=tuple(calls)))
 
