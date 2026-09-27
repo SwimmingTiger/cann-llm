@@ -127,6 +127,15 @@ def main() -> int:
         print(f"错误：找不到 OMG 可执行文件 {omg_bin}\n"
               f"      用 --omg-dir 指定，或设环境变量 OMG_DIR。", file=sys.stderr)
         return 2
+    # ★ 官方 DDK 解压出来的 omg 是包装脚本，通常【没有执行权限】（文档 §1 提过这一点，
+    #   但此前只能靠人记住）。不检查的话只会得到一个
+    #   PermissionError: [Errno 13] Permission denied，看不出该怎么处理。
+    if not os.access(omg_bin, os.X_OK):
+        print(f"错误：{omg_bin} 没有执行权限（DDK 解压后常见）。\n"
+              f"      先执行：chmod +x {omg_bin}\n"
+              f"      （tools_omg/ 下同级的 omg 往往也是同样情况，可一并 chmod）",
+              file=sys.stderr)
+        return 2
     print("### 执行…", flush=True)
     rc = subprocess.call(cmd, cwd=args.omg_dir, env=env)
     print(f"### OMG_EXIT={rc}")
