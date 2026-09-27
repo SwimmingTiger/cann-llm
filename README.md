@@ -256,6 +256,14 @@ src/cann_llm/
 
 > 以下是**开发/排错**用法。普通用户只需要 `scripts/start_chat.sh` 与 `scripts/start_server.sh`。
 
+底层示例在 [`examples/`](examples/)：
+
+* [`examples/npu-probe/`](examples/npu-probe/) —— 一百多行的 C 程序，**不用 python**、
+  直接 `dlopen` 系统引擎在 NPU 上跑一轮推理。用来确认"原生 ELF 有没有权限打开 NPU"、
+  或者绕开 python 层做最小复现。README 里记了三个坑（引擎是
+  `/system/lib64/libhiai_llm_engine.so`；`modelPath` 只写文件名且要先 chdir 到模型目录；
+  `GenerateAsync` 第 3 参是 prompt 文本、引擎自己分词）。
+
 ### 安装成 pip 包（可选，仍然没有编译）
 
 ```bash
