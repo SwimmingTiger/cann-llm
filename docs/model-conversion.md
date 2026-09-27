@@ -16,9 +16,9 @@
 > 配置里 `quant_param_2 = False`，**这条路我们跑通过，没有用自定义脚本改图**。
 > 但这只说明【这个模型 + 这套版本】可行，**不代表其它模型也一定能跑通**。
 >
-> 本项目早期用 5.1.1.1 时踩过一个坑（量化把权重负半轴钳成 0，输出恒定垃圾），
-> 排查过程和绕行脚本保留在[附录 B](#附录-b权重被钳成-0早期版本踩过的坑) ——
-> **但那个坑的真正原因是配置项写错，不是工具版本**，详见附录 B 的 2×2 实测表。
+> 最容易踩的一个坑是：**`quant_param_2` 写成 `True` 会让量化把权重负半轴钳成 0，
+> 模型输出恒定垃圾**（配置照抄模板，别自己改这一项）。判断方法与实测数据见
+> [附录 B](#附录-b权重被钳成-0早期版本踩过的坑)。
 
 > 转换产物（`.omc` + `SubGraph_0.weight`）有数 GB，**不进本仓库**，需要自己转。
 
@@ -152,8 +152,9 @@ tools/
 └── tools_ascendc/         # 算子编译（含 set_ascendc_env.sh）
 ```
 
-> **6.1.1.0 的一处改动**：量化入口从 `dopt/dopt_llm/` 改名成了
-> **`dopt/dopt_lm/`**。如果你沿用旧版脚本，会报 `No module named dopt.dopt_llm`。
+> 量化入口是 **`tools_dopt/dopt_pytorch_py3/dopt/dopt_lm/opt_main.py`**
+> （网上流传的模板里写成 `dopt_llm`，那个名字已经不存在，会报
+> `No module named dopt.dopt_llm`）。
 
 ---
 
@@ -230,9 +231,9 @@ mkdir -p ${ROOT}/${testcase}/train_output
 model_path='/path/to/Qwen2.5-1.5B-Instruct'
 dopt_config=./${testcase}/dopt_config.json
 
-# 6.1.1.0：入口是 dopt_lm/opt_main.py（旧版是 dopt_llm，且要另一个 wrapper）
+# 入口是 dopt_lm/opt_main.py（网上模板里的 dopt_llm 这个名字已不存在）
 #
-# ★ --dopt-config 必须【无条件】传：6.1.1.0 的 opt_main.py 一上来就
+# ★ --dopt-config 必须【无条件】传：opt_main.py 一上来就
 #   os.path.exists(args.dopt_config)，不给路径就是 None，直接
 #   TypeError: stat: path should be string … not NoneType。
 #   （早先这里写成"文件已存在才传"，在全新工作目录上必然崩 —— 实测踩过。）
@@ -332,22 +333,18 @@ source /path/to/venv310/bin/activate
 python export_model_single_qwen2.py /path/to/model_info_target.yaml
 ```
 
-> **Qwen3 / 大模型必读**：fp32 导出时 `onnx_utils.process_onnx` 里的
-> `onnxsim.simplify` 是内存峰值所在（16 GB 模型 + 它的工作副本 > 31 GB ⇒
-> 进程被 OOM killer 杀掉，而日志里只剩一句「命令返回 -9」）。先打补丁、再带着
-> 环境变量导出：
+> [!IMPORTANT]
+> **不要跳过 `onnxsim.simplify`**（即别设 `CANN_SKIP_ONNX_SIMPLIFY=1`）。
+> 跳过之后导出的图会保持"权重内联成 Constant"的形态（实测 3800 节点 / 338 个
+> initializer），OMG 到最后会报 `check ir model compatibility failed`，
+> 怎么调都过不去；正常跑 simplify 是 2033 节点 / 1521 个 initializer，OMG 一次通过。
 >
-> ```bash
-> python /path/to/cann-llm/scripts/model-conversion/patch_qwen3_export_mem.py .
-> CANN_SKIP_ONNX_SIMPLIFY=1 python export_model_single_qwen3.py /path/to/model_info_target.yaml
-> ```
+> 只有**内存实在不够**（fp32 导 4B 及以上，`onnxsim` 的工作副本会把 31 GB 撑爆，
+> 日志里只剩一句「命令返回 -9」）才用 `--skip-onnxsim` 兜底
+> （`build_model.py` 的开关），并且要接受后面可能过不了 OMG。
 >
-> **不要**为省内存把 `hf_model_dtype` 改成 fp16 —— 那会破坏 RoPE 的模式匹配，
-> 引擎能加载模型但 Generate 恒返回 1（详见附录 B）。
->
-> `scripts/model-conversion/build_model.py` 已内置这两件事：导出前检查补丁是否
-> 打过（没打直接报错并给出命令），并默认给 Qwen3 设上 `CANN_SKIP_ONNX_SIMPLIFY=1`
-> （想保留 simplify 就自己设成 `0`）。
+> 也**不要**为省内存把 `hf_model_dtype` 改成 fp16 —— 那会破坏 RoPE 的模式匹配，
+> 引擎能加载模型但 `Generate` 恒返回 1（详见[附录 B](#附录-b权重被钳成-0早期版本踩过的坑)）。
 
 输出目录名会被自动加后缀（`onnx_out` → `onnx_out_embedding_out_no_output_pos/`），里面有：
 
@@ -382,13 +379,21 @@ cd $OMG
 ./omg --model $MODEL --framework 5 --output $OUT \
   --input_shape="input_embed:1,-1,1536;attention_mask:1,1,-1,2048;position_ids:1,-1;past_key_in0:2048,2,1,128;...;new_kv_cache_pos:-1;embed_scales:1,-1,1" \
   --dynamic_dims="1,1,1,1,1;64,64,64,64,64" \
-  --input_type="past_key_in0:FP16;past_value_in0:FP16;..." \
+  --input_type="input_embed:INT8;attention_mask:FP32;position_ids:INT32;past_key_in0:FP32;..." \
   --output_type="lm_logits:FP32;past_key0:FP16;past_value0:FP16;..." \
   --weight_data_type FP16 \
   --save_weights_as_external_data=true \
   --platform=kirinx90 \
   --target=omc
 ```
+
+> [!IMPORTANT]
+> `--input_type` 里每个输入的类型必须与**导出图里的真实类型**一致（导出后可以用
+> `onnx.load(路径).graph.input` 看）。写错的后果是 OMG 直接失败：
+> `E onnx_parser.cpp InsertPermuteNode(348): "!inputNodes.empty() || !outputNodes.empty()" false`。
+> 常见对不上的是 `input_embed`（embedding 分离后是 **INT8**）、`position_ids`（**INT32**）、
+> 以及 `past_key_in*` / `past_value_in*`（fp32 导出时是 **FP32**，不是模板里写的 FP16）。
+> 下面这个脚本会**按图的真实类型自动生成**，不用手写。
 
 `--input_shape` / `--input_type` / `--output_type` 是三个**按层数展开的超长字符串**
 （28 层时分别约 1654 / 1099 / 946 字符）。手写容易错，用
@@ -546,10 +551,12 @@ scripts/start_chat.sh -d /path/to/my-model
 | 现象 | 多半是 |
 |---|---|
 | 输出恒定垃圾、与 prompt 无关 | 权重被钳位 → 第 2.1 节的 `quant_param_2`；见[附录 B](#附录-b权重被钳成-0早期版本踩过的坑) |
-| `No module named dopt.dopt_llm` | 6.1.1.0 改名成了 `dopt.dopt_lm`，改脚本 |
+| `No module named dopt.dopt_llm` | 入口是 `dopt/dopt_lm/opt_main.py`，模板里的 `dopt_llm` 已不存在，改脚本 |
+| OMG 报 `check ir model compatibility failed` | 导出时跳过了 `onnxsim`（图会变成"权重内联成 Constant"的形态）→ 别跳，见 §3.2 |
+| 启动失败 `Executor_Init_Use_Option 返回 1`，日志里有 `inputSize: 9, inputsDesc_.size : 61` | `<model>.json` / `executor.json` 里写了 `enable_dynamic_kv_cache` 或 `is_kv_cache_merge`（或 `enable_lm_head_opt/topk`）⇒ 引擎以为 KV 由它自己管、只准备 9 个输入。**这几个开关不要写** |
 | `./omg: 权限不够` | `chmod +x tools/tools_omg/omg tools/tools_omg/master/omg` |
 | `RmsNorm ... infershape func failed` | `LD_LIBRARY_PATH` 里缺 `tools_omg/master/lib64` |
-| `Node ... type MatMul don't support!` | 旧版 OMG 不支持大 K 的 MatMul → 升级到 6.1.1.0，或见附录 B |
+| `Node ... type MatMul don't support!` | 大 K 的 MatMul（如 `down_proj` 的 K=8960）。当前版本的 OMG 会自己分块，若仍报，见[附录 B](#附录-b权重被钳成-0早期版本踩过的坑) |
 | ONNX 导出报找不到 `.pb` | 外置权重路径问题；跑检查脚本时先 `cd` 到 onnx 所在目录 |
 | 引擎加载就崩 | `executor.json` 里的层数/隐藏维/词表大小与实际不符 |
 | 输出正常但上下文一长就变垃圾 | 超过 KV 缓存长度（`kv_cache_max_len`），见 [cann-engine-notes 第 9 节](cann-engine-notes.md) |
@@ -594,14 +601,12 @@ CPU 上用同一份 HF 检查点跑 llama.cpp 则完全正常。
 
 同一台机器、同一份 HF 检查点、同一个 `dopt_config.json`，只改两个变量：
 
-| DDK 版本 | `quant_param_2` | `fake_quant_weight.pth` 负值占比 | 全非负的权重张量 |
-|---|---|---|---|
-| 5.1.1.1 | **True** | 13.17% | **196 / 198 (99%)** ✗ |
-| 5.1.1.1 | **False** | 43.98% | **0 / 198 (0%)** ✓ |
-| 6.1.1.0 | **True** | 13.17% | **196 / 198 (99%)** ✗ |
-| 6.1.1.0 | **False** | 43.98% | **0 / 198 (0%)** ✓ |
+| `quant_param_2` | `fake_quant_weight.pth` 负值占比 | 全非负的权重张量 |
+|---|---|---|
+| **True** | 13.17% | **196 / 198 (99%)** ✗ |
+| **False** | 43.98% | **0 / 198 (0%)** ✓ |
 
-两两数字**逐位相同** —— 决定因素是 `quant_param_2`，与版本无关。
+决定因素只有 `quant_param_2` 这一项。
 未量化的 HF 原权重负值占比是 43.24%，所以 43.98% 才是正常值。
 
 **正确取值**：kirinx90 → `False`；kirin9020 → `True`。官方文档写得很清楚，
@@ -638,8 +643,8 @@ ONNX 权重负值占比 0.00%   vs   HF 的 50%
    （量化等于被绕开，后面用 `--weight_data_type FP16` 不量化）。
    脚本处理三类映射：具名 initializer、MatMul 节点权重（转置）、`lm_head`。
 
-2. **`split_downproj_fixed.py`** —— 旧版 OMG 不支持 K=8960 的 `MatMul`，
-   需要沿 K 切块再相加。**6.1.1.0 的 OMG 会自己分块，不需要这个。**
+2. **`split_downproj_fixed.py`** —— 只在 OMG 报 "K=8960 的 `MatMul` 不支持" 时才用
+   （当前版本的 OMG 会自己分块，通常用不到）。
 
 配套的验证脚本：`patch_ort.py`（给 `ScatterND` 的 indices 插 `Cast`，ORT 才能加载
 CANN 导出的图）+ `ort_check.py`（在 ORT 里跑一遍，判断是"模型本身错"还是"仅 NPU 侧错"）。
@@ -696,8 +701,7 @@ Qwen2.5-1.5B 那条链路是**完全跑通并验证过**的（见第 6 节）。
 from dopt.do_opt import optimize_model_gemm2matmul     # ✗ 两个 DDK 版本都没有这个路径
 ```
 
-5.1.1.1 里是 `dopt/dopt_llm/do_opt.so`，6.1.1.0 里是 `dopt/dopt_lm/do_opt.so`，
-**都没有顶层的 `dopt.do_opt`**，而且这两处的函数名也不含 `optimize_model_gemm2matmul`。
+DDK 里只有 `dopt/dopt_lm/do_opt.so`，**没有顶层的 `dopt.do_opt`**，而且这两处的函数名也不含 `optimize_model_gemm2matmul`。
 
 真正的定义在**示例代码自带的 `npu_tuned_export/do_opt.py`** 里 ——
 隔壁的 `export_model_single_qwen2.py:87` 就是按 `from do_opt import ...` 写的（所以
@@ -716,13 +720,13 @@ embedding 文件，模型目录装配不起来。
 
 **修法**：`patch_qwen3_embedding.py` 按 qwen2 的写法恢复这段。
 
-### 坑 3 —— 新版 tokenizer.json 的 merges 格式引擎不认 ★
+### 坑 3 —— 数组形式的 merges 引擎不认 ★
 
-新版 HF（Qwen3 等）把 BPE merges 存成「数组的数组」，旧版（Qwen2.5 等）是空格分隔的字符串：
+有的 HF 模型（Qwen3 等）把 BPE merges 存成「数组的数组」，Qwen2.5 等则是空格分隔的字符串：
 
 ```json
-"merges": [ ["Ġ","t"], ["Ġ","a"] ]      // 新版 —— 引擎直接 abort
-"merges": [ "Ġ t", "Ġ a" ]              // 旧版 —— 引擎认
+"merges": [ ["Ġ","t"], ["Ġ","a"] ]      // 数组形式 —— 引擎直接 abort
+"merges": [ "Ġ t", "Ġ a" ]              // 字符串形式 —— 引擎认
 ```
 
 引擎解析时抛 `nlohmann::json type_error.302: type must be string, but is array`，
