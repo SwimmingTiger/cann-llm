@@ -553,7 +553,7 @@ POST /v1/chat/completions
 ## 判据 #4：测试 —— 达成 ✓
 
 ```
-pip install pytest            # 本机 brew python3 需要装（设备自带 python 均无 pytest）
+pip install pytest            # 设备上 harmonybrew 的 python3 需要它（设备自带 python 均无 pytest）
 PYTHONPATH=src pytest -q      # → 184 passed in 8.41s ✓
 ```
 
