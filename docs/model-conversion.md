@@ -138,6 +138,11 @@ cp -r image/ddk_platform_plugin/kirinx90 tools/platform/
 # 注意：omg 是包装脚本，解压后可能没有执行权限
 chmod +x tools/tools_omg/omg tools/tools_omg/master/omg
 
+# ★ 关键一步：包里的 ld-linux-x86-64-2.35.so.2 是个【指向 /tmp 的软链】，
+#   而那个文件默认不存在 ⇒ 不解这一步，OMG 会以退出码 127 失败：
+#       ./omg: line 196: .../master/omg: cannot execute: required file not found
+ln -snf "$(readlink -f /lib64/ld-linux-x86-64.so.2)" /tmp/ld-linux-x86-64-2.35.so.2
+
 python3 -m venv venv310 && source venv310/bin/activate
 # ★ 用 3.10 的解释器建 venv（见上表；系统 python3 太新的话 torch 装不上）
 ~/py310bin/python -m venv venv310 && source venv310/bin/activate

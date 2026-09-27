@@ -250,29 +250,12 @@ def main() -> int:
     #   实测（Qwen2.5-1.5B，DDK 6.1.1.0）：
     #       source 它  ⇒ TbeInitialize failed / libai_npucore_ascendc.so Initialize failed
     #       不 source ⇒ OMG generate offline model success ✓（产物 SubGraph_0.weight 2.9G）
-    set_env = os.path.join(asc_dir, "set_ascendc_env.sh") if asc_dir else ""
-    if asc_dir and not os.path.isdir(os.path.join(asc_dir, "package", "python")):
-        set_env = ""            # 新布局：不 source
-    if set_env and os.path.exists(set_env):
-        # ⚠ 不要用位置参数传：set_ascendc_env.sh 被 source 后会影响 $@，
-        #   exec "$@" 会拿到错的东西（实测报 "exec: --: invalid option"）。全部走环境变量。
-        env["CANN_LLM_OMG_SETENV"] = set_env
-        env["CANN_LLM_OMG_BIN"] = cmd[0]
-        # 忠实照抄 to_omc_rebuilt.sh 的那几行：PATH 里加 $HOME/ddk/bin，
-        # TMPDIR 指向一个确实存在的目录（默认的 <ascendc>/tmp 往往不存在，
-        # TBE 初始化失败就是这么来的）。
-        env["CANN_LLM_OMG_TMPDIR"] = os.path.join(asc_dir, "tmp")
-        runner = ["/bin/bash", "-c",
-                  'mkdir -p "$CANN_LLM_OMG_TMPDIR" 2>/dev/null || true; '
-                  'export TMPDIR="${CANN_LLM_OMG_TMPDIR:-$TMPDIR}"; '
-                  'export PATH="$HOME/ddk/bin:$PATH"; '
-                  'source "$CANN_LLM_OMG_SETENV" >/dev/null 2>&1 || true; '
-                  'export LD_LIBRARY_PATH="${CANN_LLM_OMG_LD}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; '
-                  'env | sort > /tmp/cann_omg_env.txt 2>/dev/null || true; '
-                  'exec "$CANN_LLM_OMG_BIN" "$@"',
-                  "cann-llm-omg"]
-        print(f"### 先 source {set_env}", flush=True)
-        cmd = runner + cmd[1:]
+    # ★ 不要 source <ascendc>/set_ascendc_env.sh：那是老布局（python 版 TBE，靠
+    #   <ascendc>/package/python 里的 te_fusion）用的。当前 DDK 的 TBE 是 C++ 库
+    #   （libai_npucore_tefusion.so 在 tools/platform/<plat>/lib64/），source 它会把
+    #   PYTHONPATH 指向不存在的目录、并改坏 PATH —— 实测会直接让 OMG 找不到（退出码 127）。
+    #   OMG 自带的包装脚本（<omg-dir>/omg）会自己准备 HIAI_VERSION / 库路径 / loader。
+    # 仅保留：把我们算好的 LD_LIBRARY_PATH 传下去（包装脚本会在此基础上追加）。
     print("### 执行…", flush=True)
     rc = subprocess.call(cmd, cwd=args.omg_dir, env=env)
     print(f"### OMG_EXIT={rc}")
