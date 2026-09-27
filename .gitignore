@@ -31,3 +31,4 @@ config.local.toml
 
 # 脚本运行期产物
 .run/
+log/

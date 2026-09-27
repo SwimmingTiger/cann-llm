@@ -29,18 +29,45 @@ WAIT_SECS = 90
 
 # ---------------------------------------------------------------- 运行时文件
 
+def _stamp() -> str:
+    """``20260927-1444``：日志文件名用的时间戳（本地时间）。"""
+    import datetime
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M")
+
+
 def rundir(root: str) -> str:
+    """运行时**控制文件**的目录（``server.pid`` / ``server.state``）。
+
+    ★ 日志【不】放这里 —— 日志在 :func:`logdir`，这样目录各司其职：
+      ``.run/`` 是指针（谁在跑、监听哪个端口），``log/`` 才是给人看的日志。
+    原先两者混在一个目录，想挪日志就会连 pid/state 一起挪走。
+    """
     d = os.environ.get("CANN_LLM_RUNDIR") or os.path.join(root, ".run")
     os.makedirs(d, exist_ok=True)
     return d
 
 
+def logdir(root: str) -> str:
+    """日志目录（默认 ``log/``，**不存在会自动创建**）。
+
+    用非隐藏名字：日志是给人看的，藏在 ``.run`` 里没人找得到。
+    """
+    d = os.environ.get("CANN_LLM_LOGDIR") or os.path.join(root, "log")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def paths(root: str) -> "Dict[str, str]":
-    d = rundir(root)
+    d = rundir(root)          # 控制文件（pid/state）
+    g = logdir(root)          # 日志
     return {
         "pid": os.path.join(d, "server.pid"),
         "state": os.path.join(d, "server.state"),
-        "log": os.environ.get("CANN_LLM_LOG") or os.path.join(d, "server.log"),
+        # 后台进程的 stdout/stderr。带时间戳 —— 固定名会让两个实例互相覆盖。
+        # （进程自己的 pid 这时还不知道，所以这里只用时间戳；
+        #   诊断日志由服务端自己按 <时间>-<pid>.log 命名，见 api/server.py）
+        "log": os.environ.get("CANN_LLM_LOG")
+               or os.path.join(g, _stamp() + ".server.log"),
     }
 
 
@@ -193,13 +220,15 @@ _USAGE = """用法: scripts/start_server.sh [选项]
   -k, --api-key KEY     API key（设了就要求鉴权）
   -B, --background      后台启动，等就绪后返回
       --debug           诊断模式：记录 HTTP 请求/响应与引擎的原始输入输出
-                        （写到 .run/debug.log；也可用 CANN_LLM_DEBUG=1 打开）
+                        （写到 log/<日期>-<时间>-<pid>.log；也可用 CANN_LLM_DEBUG=1 打开）
       --status          查看状态
       --stop            停止后台服务
   -h, --help            显示本帮助
 
 环境变量: CANN_LLM_MODEL_DIR / CANN_LLM_CONFIG / CANN_LLM_HOST / CANN_LLM_PORT
-          CANN_LLM_API_KEY / CANN_LLM_BACKEND / CANN_LLM_RUNDIR / CANN_LLM_LOG
+          CANN_LLM_API_KEY / CANN_LLM_BACKEND / CANN_LLM_LOG
+          CANN_LLM_RUNDIR（pid/state 目录，默认 .run/）
+          CANN_LLM_LOGDIR（日志目录，默认 log/）
           CANN_LLM_LIB（cann） / CANN_LLM_HIAI_LIB（hiai） / PYTHON
 """
 
@@ -325,8 +354,9 @@ def run_server(root: str, argv: "List[str]") -> int:
 
     env = dict(os.environ)
     if o.get("debug"):
-        # 诊断日志写到运行目录，和 pid/state/server.log 放一起
-        env["CANN_LLM_DEBUG_FILE"] = os.path.join(rundir(root), "debug.log")
+        # ★ 只给【目录】：文件名要带 pid，而 pid 只有子进程自己知道
+        #   （服务端会生成 log/<时间>-<pid>.log，见 api/server.py）。
+        env["CANN_LLM_LOGDIR"] = logdir(root)
     env["PYTHONPATH"] = os.path.join(root, "src") + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env[var] = lib

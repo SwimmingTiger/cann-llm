@@ -192,7 +192,7 @@ curl -sN -X POST http://127.0.0.1:8000/v1/chat/completions \
 
 ## 五、诊断模式（--debug）
 
-服务端加 `--debug` 会把一次请求的**全链路原始信息**写进 `.run/debug.log`：
+服务端加 `--debug` 会把一次请求的**全链路原始信息**写进 `log/<日期>-<时间>-<pid>.log`：
 
 * HTTP 请求：方法、路径、请求头（`Authorization` 等密钥已隐去）、**原始请求体**
   —— 排查"客户端到底带没带 `max_tokens`"就看这里
@@ -202,7 +202,7 @@ curl -sN -X POST http://127.0.0.1:8000/v1/chat/completions \
 * 引擎原始输出全文与上报的 `finish_reason`
 
 ```bash
-scripts/start_server.sh -d <模型目录> --debug     # 日志在 .run/debug.log
+scripts/start_server.sh -d <模型目录> --debug     # 日志在 log/20260927-1444-25113.log
 ```
 
 也可用环境变量 `CANN_LLM_DEBUG=1`；不写文件时可以配 `CANN_LLM_DEBUG_FILE`。

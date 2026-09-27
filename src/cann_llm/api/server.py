@@ -592,7 +592,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = ap.parse_args(argv)
     if args.debug or os.environ.get("CANN_LLM_DEBUG", "") not in ("", "0"):
         # 写文件优先（引擎的 SELinux 噪声也在 stderr，屏蔽噪声会连日志一起屏蔽）
-        debuglog.enable(path=os.environ.get("CANN_LLM_DEBUG_FILE") or None)
+        # ★ 文件名带【本进程的 pid】：这样同时开多个 --debug 实例各写各的，
+        #   不会像固定名那样互相交错（pid 只有这里才知道，所以名字在这里定）。
+        path = os.environ.get("CANN_LLM_DEBUG_FILE")
+        if not path:
+            _dir = os.environ.get("CANN_LLM_LOGDIR") or "log"
+            os.makedirs(_dir, exist_ok=True)
+            _ts = time.strftime("%Y%m%d-%H%M")
+            path = os.path.join(_dir, f"{_ts}-{os.getpid()}.log")
+        debuglog.enable(path=path)
         _f = debuglog.log_file()
         print(f"[debug] 诊断模式已开启：记录 HTTP 请求/响应与引擎原始输入输出"
               + (f"（写入 {_f}）" if _f else "（写入 stderr）"), file=sys.stderr)
