@@ -278,8 +278,9 @@ class _HiaiBindings:
         "HIAI_LLMEngine_Executor_Create": (ctypes.c_void_p, []),
         "HIAI_LLMEngine_Executor_Init_Use_Option": (
             ctypes.c_int, [ctypes.c_void_p, ctypes.c_void_p]),
-        # 旧入口：留着（同一条路可用于对照/兜底），但 load() 不再用它。
-        "HIAI_LLMEngine_Executor_CreateFromJson": (ctypes.c_void_p, [ctypes.c_char_p]),
+        # ★ 这里**故意不绑定** `HIAI_LLMEngine_Executor_CreateFromJson`（旧的 JSON 入口）：
+        #   Qwen3-8B 走它加载即 abort，而官方服务压根不用它。不声明就调不出去，
+        #   顺便让本项目那条自查法（called == declared ⊆ exported）保持成立。
         # 服务每个请求都会设这两个（见 libhm_model_engine_service 的符号引用）
         "HIAI_LLMEngine_Context_SetInitTokenLen": (ctypes.c_int, [ctypes.c_void_p, ctypes.c_int]),
         # ★ 停止序列：签名反编译实锤 (ctx, const char** seqs, unsigned n)，n 有效范围 1..9
@@ -610,6 +611,7 @@ class HiaiBackend(EngineBackend):
         # 与 cann 后端同样的顾虑：引擎的 Destroy 在退出阶段不稳，保守起见不主动调用
         self._ctx = None
         self._exec = None
+
     @property
     def supports_streaming(self) -> bool:
         # ★ 流式：SetOnSomeTokenGenerateDoneFunc 每生成一个 token 回调一次。

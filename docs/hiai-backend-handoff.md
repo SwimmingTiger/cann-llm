@@ -1132,7 +1132,8 @@ HIAI_LLMEngine_Executor_Create / Init_Use_Option / InitGraph_Use_Option
 
 上面那四个「实现前还需确认的」**全部查清了**（两个途径：引擎侧反编译 + 官方服务侧
 反编译；再在设备上逐模型单进程实测）。后端已改为这条路，旧入口
-`Executor_CreateFromJson` 不再被调用。
+`Executor_CreateFromJson` 不再被调用，并且**已从 `SIGS` 里摘掉** ——
+不声明就调不出去，顺手让本项目那条自查法（`called == declared ⊆ exported`）保持成立。
 
 ## 一、四个待确认项 —— 逐条实证
 
