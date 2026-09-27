@@ -72,7 +72,7 @@
 * WorkBuddy
 * CodeArts Agent (注意不是`CodeArts IDE`)
 
-在这些应用内运行`cann-llm`会报这个错：
+在这些应用内运行`cann-llm`，**日志里**（hilog，不是进程的 stdout/stderr）会出现这句：
 
 ```
 Error loading header libneural_network_runtime.so: failed to map header

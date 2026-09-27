@@ -1,4 +1,4 @@
-/* npu_infer.c - 纯 C（原生 ELF）直接驱动 cann LLM 引擎跑一轮推理。
+/* npu_infer_hiai.c - 纯 C（原生 ELF）直接驱动 cann LLM 引擎跑一轮推理。
  *
  * 与 python 后端（src/cann_llm/backends/hiai.py）走同一套 API，
  * 只是为了回答"绕过 python、原生 ELF 能不能打开 NPU 并完成推理"。
@@ -11,8 +11,8 @@
  *   · opt / mi 的生命周期必须覆盖全程（引擎把它们存进 executor），别提前 Destroy。
  *   · SetStopSeq 的签名是 (ctx, char**, int)。
  *
- * Build: cc -O1 npu_infer.c -o npu_infer -ldl
- * Run:   LD_LIBRARY_PATH=/system/lib64/ndk ./npu_infer <model_dir> [prompt]
+ * Build: cc -O1 npu_infer_hiai.c -o npu_infer_hiai -ldl
+ * Run:   LD_LIBRARY_PATH=/system/lib64/ndk ./npu_infer_hiai <model_dir> [prompt]
  *        model_dir 里要有 <name>.omc / <name>.json / tokenizer.json
  */
 #include <dlfcn.h>
