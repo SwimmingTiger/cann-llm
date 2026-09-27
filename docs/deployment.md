@@ -202,7 +202,17 @@ curl -sN -X POST http://127.0.0.1:8000/v1/chat/completions \
 * 引擎原始输出全文与上报的 `finish_reason`
 
 ```bash
-scripts/start_server.sh -d <模型目录> --debug     # 日志在 log/20260927-1444-25113.log
+scripts/start_server.sh -d <模型目录> --debug
+```
+
+日志文件名是 **`log/<日期>-<时间>-<pid>.log`**（例如 `log/20260927-1512-63528.log`），
+**每次启动都是一个新文件** —— 时间戳与 pid 都取自本次启动的那个进程，
+所以别照着某个具体名字去找。实际的路径会打印在服务端启动输出里
+（`[debug] 诊断模式已开启：…（写入 <路径>）`，后台模式下这行在
+`log/<日期>-<时间>.server.log` 里）。想直接看最近一份：
+
+```bash
+ls -t log/*.log | head          # 最近写入的日志文件
 ```
 
 也可用环境变量 `CANN_LLM_DEBUG=1`；不写文件时可以配 `CANN_LLM_DEBUG_FILE`。
