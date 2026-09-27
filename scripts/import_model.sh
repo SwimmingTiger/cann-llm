@@ -93,11 +93,3 @@ set -- "$SRC"
 info "运行: import_omc_package.py $*"
 PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" "$PY" "$ROOT/scripts/import_omc_package.py" "$@"
 
-TARGET="${DEST:-$SRC}"
-if [ -z "$DRY" ] && [ -d "$TARGET" ]; then
-  echo
-  ok "模型目录就绪: $TARGET"
-  info "试一下:"
-  echo "      scripts/start_chat.sh -d $TARGET"
-  echo "      scripts/start_server.sh -d $TARGET --port 8000"
-fi
