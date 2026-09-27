@@ -18,12 +18,31 @@ import os
 import shutil
 from typing import List, Optional, Sequence, Tuple
 
-__all__ = ["build_debug_argv", "DEFAULT_GDBSERVER", "DEFAULT_LLDB_PORT"]
+__all__ = ["build_debug_argv", "is_real_executable",
+           "DEFAULT_GDBSERVER", "DEFAULT_LLDB_PORT"]
 
 #: HarmonyOS 上系统自带的 lldb-server（gdbserver 模式）
 DEFAULT_GDBSERVER = "/data/storage/el2/base/files/huawei-debug-lldb-server"
 
 DEFAULT_LLDB_PORT = 5091
+
+
+def is_real_executable(path: str) -> bool:
+    """是不是能直接 execve 的**真二进制**（ELF）。
+
+    有的解释器入口是 `#!/bin/sh` 包装器（`python3` → `exec python3.12 "$@"`）。
+    shell 跑它没问题（内核解析 shebang），但 **gdbserver 用 execve 直接拉起进程、
+    不解析 shebang** —— 传包装器进去只会得到
+
+        execve failed: Operation not permitted
+
+    （实测）。所以调试启动前必须先确认这一点，把问题在启动时说清楚。
+    """
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4) == b"\x7fELF"
+    except OSError:
+        return False
 
 
 def build_debug_argv(py: str, args: Sequence[str]
@@ -33,11 +52,22 @@ def build_debug_argv(py: str, args: Sequence[str]
     返回 ``(argv, 提示行, 错误信息)``：
 
     * 成功：``argv`` 非空、``错误信息`` 为空；
-    * 失败（找不到调试器）：``argv`` 为 ``None``，由调用方决定怎么退出。
+    * 失败（找不到调试器 / 解释器不是 ELF）：``argv`` 为 ``None``。
 
     提示行由调用方打印 —— 保持本函数纯粹，便于单测。
     """
     env = os.environ
+
+    # ★ 不做启发式替换：调试器要的是真正的可执行文件，包装器直接报错，
+    #   由调用方换成真二进制（通常是同目录下带版本号的那个）。
+    if not is_real_executable(py):
+        return None, [], (
+            f"--lldb 需要真正的可执行文件，但 {py} 不是 ELF（看起来是脚本包装器）。\n"
+            "      gdbserver 用 execve 直接拉起进程、不解析 shebang，会报\n"
+            "      execve failed: Operation not permitted。\n"
+            "      请改用真正的解释器，例如同目录下带版本号的那个：\n"
+            "      PYTHON=<同一目录>/python3.12 ./scripts/start_server.sh … --lldb")
+
     gdbserver = env.get("CANN_LLM_LLDB_SERVER") or DEFAULT_GDBSERVER
     lldb = (env.get("CANN_LLM_LLDB")
             or shutil.which("lldb")
