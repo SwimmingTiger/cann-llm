@@ -242,7 +242,17 @@ def main() -> int:
     #       E/AI_FMK general_model_compiler.cpp BeforeCompile(148)::"check ir model compatibility failed"
     #   —— 因为 set_ascendc_env.sh 会先 unset LD_LIBRARY_PATH，所以 source 完要把我们
     #   算好的那份接回去（用 CANN_LLM_OMG_LD 传进去）。
+    # ★ 只有【老布局】的 DDK 才需要 source set_ascendc_env.sh —— 判据是
+    #   <ascendc>/package/python 是否存在：老布局的 TBE 是 python 版（tbe/te/te_fusion
+    #   装在那里），必须靠它设 PYTHONPATH/PATH；新布局的 TBE 是 C++ 库
+    #   （libai_npucore_tefusion.so 在 tools/platform/<plat>/lib64/），source 反而坏事：
+    #   它会把 PYTHONPATH 指向不存在的目录，并 unset LD_LIBRARY_PATH。
+    #   实测（Qwen2.5-1.5B，DDK 6.1.1.0）：
+    #       source 它  ⇒ TbeInitialize failed / libai_npucore_ascendc.so Initialize failed
+    #       不 source ⇒ OMG generate offline model success ✓（产物 SubGraph_0.weight 2.9G）
     set_env = os.path.join(asc_dir, "set_ascendc_env.sh") if asc_dir else ""
+    if asc_dir and not os.path.isdir(os.path.join(asc_dir, "package", "python")):
+        set_env = ""            # 新布局：不 source
     if set_env and os.path.exists(set_env):
         # ⚠ 不要用位置参数传：set_ascendc_env.sh 被 source 后会影响 $@，
         #   exec "$@" 会拿到错的东西（实测报 "exec: --: invalid option"）。全部走环境变量。

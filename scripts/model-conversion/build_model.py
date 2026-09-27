@@ -155,6 +155,8 @@ def main():
     ap.add_argument("--vocab-size", type=int)
 
     ap.add_argument("--skip-export", action="store_true", help="复用已有 ONNX")
+    ap.add_argument("--skip-onnxsim", action="store_true",
+                    help="导出时跳过 onnxsim.simplify（仅当内存不够，如 4B 及以上的 fp32 导出）")
     ap.add_argument("--skip-omg", action="store_true", help="不跑 OMG")
     ap.add_argument("--only-yaml", action="store_true", help="只写 yaml 后退出")
     ap.add_argument("--dry-run", action="store_true", help="只打印计划")
@@ -177,7 +179,25 @@ def main():
             die(f"无法确定 {label}，请用 --{label.replace('_','-')} 显式指定")
 
     bos = cfg.get("bos_token_id", 151643)
-    eos = cfg.get("eos_token_id", 151645)
+    # ★ 引擎的停止判断用的是 <|endoftext|> 的 id（Qwen2 是 151643），而不是 HF
+    #   config 里的 eos_token_id（Qwen2.5 是 151645 = <|im_end|>）。实测：用 151645
+    #   时模型能加载但停止行为不对；能跑通的 models/rebuilt 用的就是 151643。
+    #   优先从 tokenizer.json 的 added_tokens 里取 <|endoftext|>，取不到再退回 HF 值。
+    eos = None
+    try:
+        _tok = os.path.join(args.export_dir, "..", "..", "..", "..", "npu_tuned_export")
+        for cand in (getattr(args, "_tokenizer_path", None),):
+            if cand and os.path.exists(cand):
+                import json as _json
+                _t = _json.load(open(cand, encoding="utf-8"))
+                for t in _t.get("added_tokens", []) or []:
+                    if t.get("content") == "<|endoftext|>":
+                        eos = t.get("id")
+                        break
+    except Exception:                                     # noqa: BLE001
+        eos = None
+    if eos is None:
+        eos = cfg.get("eos_token_id", 151645)
     if isinstance(eos, list):
         eos = eos[0]
 
@@ -233,9 +253,14 @@ def main():
             if "CANN_SKIP_ONNX_SIMPLIFY" not in src:
                 die(f"{os.path.basename(export_script)} 还没打过内存补丁 —— 先运行：\n"
                     f"      {args.python} {os.path.join(os.path.dirname(__file__), 'patch_qwen3_export_mem.py')} {args.export_dir}")
-            if export_env.get("CANN_SKIP_ONNX_SIMPLIFY") is None:
-                export_env["CANN_SKIP_ONNX_SIMPLIFY"] = "1"
-                print("  [build_model] 设 CANN_SKIP_ONNX_SIMPLIFY=1（跳过 onnxsim，避开内存峰值）")
+        # ★ 默认【不要】跳过 onnxsim.simplify：跳过它会让图保持"权重内联成 Constant"的
+        #   形态（实测 3800 节点 / 338 initializer），而正常跑 simplify 后是
+        #   2033 节点 / 1521 initializer —— 只有后者 OMG 才能转（前者最后报
+        #   "check ir model compatibility failed"）。只有内存实在不够（4B 及以上的
+        #   fp32 导出）才用 --skip-onnxsim 兜底。
+        if args.skip_onnxsim:
+            export_env["CANN_SKIP_ONNX_SIMPLIFY"] = "1"
+            print("  [build_model] --skip-onnxsim：跳过 onnxsim（仅内存不足时用）")
 
         if os.path.isdir(onnx_out):
             shutil.rmtree(onnx_out)
@@ -397,10 +422,13 @@ def main():
             "architectures": cfg.get("architectures"),
             "torch_dtype": cfg.get("torch_dtype"),
             "tie_word_embeddings": cfg.get("tie_word_embeddings", False),
-            "enable_dynamic_kv_cache": True,
-            "enable_lm_head_opt": True,
-            "enable_lm_head_topk": True,
-            "is_kv_cache_merge": True,
+            # ★ 这 4 个开关【不能写】：写了（尤其 enable_dynamic_kv_cache /
+            #   is_kv_cache_merge 为 True）引擎就认为 KV 由它自己管，只准备 9 个输入，
+            #   而我们的 omc 暴露的是 61 个（含 28 层的 past_key/value_in），于是
+            #       E tensor_manager.cpp InitInputsIdx(1079):
+            #           "inputSize not equal inputsDesc.size, inputSize: 9, inputsDesc_ size : 61"
+            #           → Executor_Init_Use_Option 返回 1，启动失败。
+            #   能跑通的模型（models/rebuilt）里这几个字段一个都没有。
         },
         "tokenizer": {"type": "qwen", "path": "tokenizer.json"},
         "autoregressive": {"model_path": f"{args.name}.omc", "weight_path": "./"},
