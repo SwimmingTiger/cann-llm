@@ -150,6 +150,9 @@ def split_known(argv: "List[str]") -> "tuple[Optional[str], str, List[str]]":
 
 def run_chat(root: str, argv: "List[str]") -> int:
     model_dir, backend, rest = split_known(argv)
+    # --lldb：本启动器的选项，不属于 chat CLI 的参数，先摘掉
+    from .lldb_launch import build_debug_argv, strip_flag
+    rest, want_lldb = strip_flag(rest)
     var, lib, kind = pick_engine_lib(backend)
 
     py = current_python()
@@ -189,6 +192,18 @@ def run_chat(root: str, argv: "List[str]") -> int:
     #   上面那些 ✓/› 提示就会【全部丢失】。必须手动刷。
     sys.stdout.flush()
     sys.stderr.flush()
+    if want_lldb:
+        argv_dbg, hints, err = build_debug_argv(
+            py, ["-m", "cann_llm.cli.chat"] + rest)
+        if argv_dbg is None:
+            die(err)
+        for line in hints:
+            info(line) if line else print()
+        print()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execve(argv_dbg[0], argv_dbg, env)
+        return 0
     os.execve(py, [py, "-X", "faulthandler", "-m", "cann_llm.cli.chat"] + rest, env)
     return 0
 
@@ -197,6 +212,7 @@ def main(argv: "Optional[List[str]]" = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
         print("用法: python -m cann_llm.launcher {chat|server} [参数…]")
+        print("      --lldb   在调试器下前台运行（抓崩溃现场）")
         return 0
     what, rest = argv[0], argv[1:]
     # 脚本所在仓库根：src/cann_llm/launcher.py → 上溯三级

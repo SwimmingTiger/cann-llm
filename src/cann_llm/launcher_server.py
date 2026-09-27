@@ -387,31 +387,12 @@ def run_server(root: str, argv: "List[str]") -> int:
         sys.stdout.flush()
         sys.stderr.flush()
         if o.get("lldb"):
-            # ★ 这台设备不能用 `lldb -- <binary>` 直接拉起进程：lldb 会报
-            #   "error: 'A' packet returned an error: 8"（gdb-remote 设置 argv 失败）。
-            #   必须在系统自带的 huawei-debug-lldb-server 里起 gdbserver，
-            #   再用 lldb 的 gdb-remote 接上去。
-            gdbserver = (os.environ.get("CANN_LLM_LLDB_SERVER")
-                         or "/data/storage/el2/base/files/huawei-debug-lldb-server")
-            lldb = (os.environ.get("CANN_LLM_LLDB")
-                    or shutil.which("lldb")
-                    or "/storage/Users/currentUser/.harmonybrew/bin/lldb")
-            if os.path.exists(gdbserver):
-                port_dbg = int(os.environ.get("CANN_LLM_LLDB_PORT") or 5091)
-                argv_dbg = [gdbserver, "gdbserver", "--native-regs",
-                            f"127.0.0.1:{port_dbg}", "--",
-                            py, "-X", "faulthandler"] + args
-                info(f"在 gdbserver 下启动（进程会先停住，等调试器接入）：{gdbserver}")
-                print()
-                info("另开一个终端接上去：")
-                info(f"    {lldb} -o 'gdb-remote 127.0.0.1:{port_dbg}'")
-                info("（接上后敲 continue 让它跑起来；崩溃时会停住，用 bt 看栈）")
-            elif os.path.exists(lldb):
-                argv_dbg = [lldb, "--", py, "-X", "faulthandler"] + args
-                info(f"在 lldb 下启动：{lldb}")
-            else:
-                die(f"找不到调试器（试过 {gdbserver} 与 {lldb}）——"
-                    "用 CANN_LLM_LLDB_SERVER / CANN_LLM_LLDB 指定路径")
+            from .lldb_launch import build_debug_argv
+            argv_dbg, hints, err = build_debug_argv(py, args)
+            if argv_dbg is None:
+                die(err)
+            for line in hints:
+                info(line) if line else print()
             print()
             sys.stdout.flush()
             sys.stderr.flush()

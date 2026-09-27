@@ -5,6 +5,7 @@
 #   scripts/start_server.sh -d /path/to/model_dir -B         # 后台，等就绪后返回
 #   scripts/start_server.sh --status                         # 看状态
 #   scripts/start_server.sh --stop                           # 停止
+#   scripts/start_server.sh -d <模型目录> --lldb              # 在调试器下跑（抓崩溃）
 #
 # 本脚本只做一件事：**找到一个与引擎 libc 兼容的 python，然后把参数原样转发**。
 # 其余逻辑（参数解析、预检、后台与状态管理）都在 cann_llm.launcher_server 里 ——

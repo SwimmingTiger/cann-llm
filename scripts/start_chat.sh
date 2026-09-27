@@ -4,6 +4,7 @@
 #   scripts/start_chat.sh -d /path/to/model_dir
 #   scripts/start_chat.sh -d /path/to/model_dir --temp 0 --topk 1
 #   scripts/start_chat.sh -d /path/to/model_dir -p "你好"      # 单轮模式
+#   scripts/start_chat.sh -d <模型目录> --lldb                  # 在调试器下跑（抓崩溃）
 #
 # 本脚本只做一件事：**找到一个与引擎 libc 兼容的 python，然后把参数原样转发**。
 # 其余逻辑（引擎库选择、模型目录探测、预检提示）都在 cann_llm.launcher 里 ——
