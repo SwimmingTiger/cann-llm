@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -221,6 +222,9 @@ _USAGE = """用法: scripts/start_server.sh [选项]
   -B, --background      后台启动，等就绪后返回
       --debug           诊断模式：记录 HTTP 请求/响应与引擎的原始输入输出
                         （写到 log/<日期>-<时间>-<pid>.log；也可用 CANN_LLM_DEBUG=1 打开）
+      --lldb            在 lldb 下前台启动（抓崩溃现场）。进 lldb 后敲 run，
+                        崩溃时 bt 看栈。lldb 路径可用 CANN_LLM_LLDB 指定；
+                        设 CANN_LLM_LLDB_BATCH=1 则非交互：run→bt→quit
       --status          查看状态
       --stop            停止后台服务
   -h, --help            显示本帮助
@@ -244,6 +248,7 @@ def parse_args(argv: "List[str]") -> "Dict[str, object]":
         "api_key": env.get("CANN_LLM_API_KEY") or "",
         "background": False,
         "debug": False,
+        "lldb": False,
         "action": "run",
         "rest": [],
     }
@@ -277,6 +282,9 @@ def parse_args(argv: "List[str]") -> "Dict[str, object]":
             # 只用来决定"日志写哪" + 在帮助里露出来；参数本身也原样转给服务端
             o["debug"] = True
             o["rest"].append(a)
+        elif a == "--lldb":
+            # 在调试器下前台启动（抓崩溃现场用）。这是启动器自己的选项，不透传。
+            o["lldb"] = True
         elif a in ("-B", "--background"):
             o["background"] = True
         elif a == "--status":
@@ -361,6 +369,9 @@ def run_server(root: str, argv: "List[str]") -> int:
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env[var] = lib
 
+    if o.get("lldb") and o["background"]:
+        die("--lldb 不能和 -B 一起用：调试器要前台交互")
+
     print()
     if not o["background"]:
         for f in (p["pid"], p["state"]):
@@ -375,6 +386,37 @@ def run_server(root: str, argv: "List[str]") -> int:
         #   重定向/接管道时（块缓冲）上面那些提示会全丢，必须手动刷。
         sys.stdout.flush()
         sys.stderr.flush()
+        if o.get("lldb"):
+            # ★ 这台设备不能用 `lldb -- <binary>` 直接拉起进程：lldb 会报
+            #   "error: 'A' packet returned an error: 8"（gdb-remote 设置 argv 失败）。
+            #   必须在系统自带的 huawei-debug-lldb-server 里起 gdbserver，
+            #   再用 lldb 的 gdb-remote 接上去。
+            gdbserver = (os.environ.get("CANN_LLM_LLDB_SERVER")
+                         or "/data/storage/el2/base/files/huawei-debug-lldb-server")
+            lldb = (os.environ.get("CANN_LLM_LLDB")
+                    or shutil.which("lldb")
+                    or "/storage/Users/currentUser/.harmonybrew/bin/lldb")
+            if os.path.exists(gdbserver):
+                port_dbg = int(os.environ.get("CANN_LLM_LLDB_PORT") or 5091)
+                argv_dbg = [gdbserver, "gdbserver", "--native-regs",
+                            f"127.0.0.1:{port_dbg}", "--",
+                            py, "-X", "faulthandler"] + args
+                info(f"在 gdbserver 下启动（进程会先停住，等调试器接入）：{gdbserver}")
+                print()
+                info("另开一个终端接上去：")
+                info(f"    {lldb} -o 'gdb-remote 127.0.0.1:{port_dbg}'")
+                info("（接上后敲 continue 让它跑起来；崩溃时会停住，用 bt 看栈）")
+            elif os.path.exists(lldb):
+                argv_dbg = [lldb, "--", py, "-X", "faulthandler"] + args
+                info(f"在 lldb 下启动：{lldb}")
+            else:
+                die(f"找不到调试器（试过 {gdbserver} 与 {lldb}）——"
+                    "用 CANN_LLM_LLDB_SERVER / CANN_LLM_LLDB 指定路径")
+            print()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.execve(argv_dbg[0], argv_dbg, env)
+            return 0
         os.execve(py, [py, "-X", "faulthandler"] + args, env)
         return 0
 

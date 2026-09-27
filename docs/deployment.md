@@ -235,7 +235,37 @@ ls -t log/*.log | head          # 最近写入的日志文件
 
 ---
 
-## 五、常见问题
+## 六、在调试器下启动（--lldb）
+
+```bash
+scripts/start_server.sh -d <模型目录> --lldb
+```
+
+进程会**先停住**，等调试器接入；屏幕上会打印接入命令，另开一个终端：
+
+```bash
+lldb -o 'gdb-remote 127.0.0.1:5091'      # 端口可用 CANN_LLM_LLDB_PORT 改
+(lldb) continue                          # 跑起来；崩溃时会停住，用 bt 看栈
+```
+
+**为什么不直接 `lldb -- <python>`**：本机这样拉进程会失败 ——
+
+```
+(lldb) run
+error: 'A' packet returned an error: 8
+```
+
+这是 lldb 经 gdb-remote 协议设置 argv 失败（平台限制）。因此改用系统自带的
+`huawei-debug-lldb-server` 起 gdbserver，再让 lldb 用 `gdb-remote` 接上去。
+脚本自动判断：本机有该 gdbserver 就用它，否则回落到普通 `lldb -- <python>`。
+
+环境变量：`CANN_LLM_LLDB`（lldb 路径）、`CANN_LLM_LLDB_SERVER`（gdbserver 路径）、
+`CANN_LLM_LLDB_PORT`（默认 5091）、`CANN_LLM_LLDB_BATCH=1`（非交互 run→bt→quit）。
+与 `-B` 互斥（调试器需要前台）。
+
+---
+
+## 七、常见问题
 
 | 现象 | 原因 / 处理 |
 |---|---|
