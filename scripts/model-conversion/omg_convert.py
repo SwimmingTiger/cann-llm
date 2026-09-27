@@ -76,15 +76,28 @@ def main() -> int:
     ap.add_argument("--weight-data-type", default=None,
                     help="例如 FP16（与 --compress-conf 二选一，FP16 不量化）")
     ap.add_argument("--omg-dir", default=os.environ.get("OMG_DIR", "/path/to/ddk/tools/tools_omg"))
+    ap.add_argument("--omg-bin", default=None,
+                    help="显式指定 OMG 可执行文件（默认用 <omg-dir>/omg 包装脚本）")
     ap.add_argument("--asc-dir", default=os.environ.get("ASC_DIR", "/path/to/ddk/tools/tools_ascendc"))
     ap.add_argument("--dynamic-dims", default="1,1,1,1,1;64,64,64,64,64",
                     help="prefill / decode 两个动态档位")
     ap.add_argument("--dry-run", action="store_true", help="只打印命令")
     args = ap.parse_args()
 
-    omg_bin = os.path.join(args.omg_dir, "master", "omg")
+    # ★ 必须走 OMG 的【包装脚本】而不是 master/omg 二进制。实测：直接跑 master/omg 时
+    #   算子插件注册不上（日志：E plugin.cc RegisterLibrary(58)::"PlugIn library
+    #   :libai_npucore_ascendc.so Initialize failed"、W "dlopen so failed:
+    #   libai_npucore_itf.so"、"Skip InferShapeOptimize"），产出的 omc 引擎加载时报
+    #       E AI_INFRA model_manager_ndk_impl.cpp PrepareModelManager(122):
+    #           "executor_" "null, return FAIL."
+    #   而交叉实验证明同一个 SubGraph_0.weight 配当年的 omc 就能加载 —— 问题在 omc。
+    #   包装脚本会选 HIAI_VERSION、准备 PATH/LD_LIBRARY_PATH，并用 glibc loader 的
+    #   --library-path 启动真正的二进制（"host glibc >= 2.35 → use the HOST loader"）。
+    #   用 --omg-bin 可以显式覆盖。
+    omg_bin = args.omg_bin if getattr(args, "omg_bin", None) else os.path.join(args.omg_dir, "omg")
     if not os.path.exists(omg_bin):
-        omg_bin = os.path.join(args.omg_dir, "omg")
+        alt = os.path.join(args.omg_dir, "master", "omg")
+        omg_bin = alt if os.path.exists(alt) else omg_bin
 
     cmd = [
         omg_bin,
@@ -113,19 +126,48 @@ def main() -> int:
         print("提示：既没给 --compress-conf 也没给 --weight-data-type，"
               "默认按不量化（FP32）走。若要 FP16 请显式加 --weight-data-type FP16。",
               file=sys.stderr)
-    del args.asc_dir
-
     env = dict(os.environ)
     env.setdefault("SOC_VERSION", args.platform)
     env["PYTHONPATH"] = os.pathsep.join(
         [os.path.join(args.omg_dir, "..", "platform", args.platform, "ops", "impl"),
          env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+    # ★ LD_LIBRARY_PATH 必须包含 tools_omg/master/lib64 与 platform/<plat>/lib64：
+    #   否则 OMG 的算子库 dlopen 失败，日志里是
+    #       W ops_kernel_store_manager.cpp DlopenComputeLibrary(41):
+    #         "dlopen so failed: libai_npucore_itf.so: cannot open shared object file"
+    #       I model_optimizer.cpp Optimize(251)::"Skip InferShapeOptimize"
+    #   RmsNorm 等算子拿不到 infershape 函数，生成的 omc 引擎【加载不了】：
+    #       E AI_INFRA model_manager_ndk_impl.cpp PrepareModelManager(122):
+    #           "executor_" "null, return FAIL."
+    #   实测（交叉实验）：同一个 SubGraph_0.weight 配上当年生成的 omc 就能加载 ——
+    #   也就是问题出在这个 omc 上。当年能跑的 to_omc_rebuilt.sh 里正是这么设的。
+    # ⚠ 路径必须【规范化】：写成 ".../tools_omg/../platform/kirinx90/lib64" 这种带 ".."
+    #   的字面量时，动态加载器找不到 libai_npucore_ascendc.so（实测报
+    #   "PlugIn library :libai_npucore_ascendc.so Initialize failed"），
+    #   于是算子插件注册不上、OMG 产出引擎不认的 omc。
+    lib_dirs = [os.path.abspath(os.path.join(args.omg_dir, "master", "lib64")),
+                os.path.abspath(os.path.join(args.omg_dir, os.pardir, "platform",
+                                             args.platform, "lib64"))]
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(
+        lib_dirs + [p for p in env.get("LD_LIBRARY_PATH", "").split(os.pathsep) if p])
+    # 官方 set_ascendc_env.sh 还会把 ascendc 的 package / bisheng/bin 放进 PATH ——
+    # 少了它 libcustom_op.so / te_fusion 之类也加载不了。
+    asc = getattr(args, "asc_dir", None)
+    if asc:
+        extra = [os.path.join(asc, "package"), os.path.join(asc, "bisheng", "bin")]
+        env["PATH"] = os.pathsep.join(
+            [d for d in extra if os.path.isdir(d)] +
+            [p for p in env.get("PATH", "").split(os.pathsep) if p])
+        env.setdefault("TMPDIR", os.path.join(asc, "tmp"))
+    if getattr(args, "asc_dir", None):
+        del args.asc_dir
 
     print("### OMG 命令")
     print(" ".join(shlex.quote(c) for c in cmd))
     print("### 环境")
     print(f"  SOC_VERSION={env['SOC_VERSION']}")
     print(f"  PYTHONPATH={env['PYTHONPATH']}")
+    print(f"  LD_LIBRARY_PATH={env['LD_LIBRARY_PATH']}")
     if args.dry_run:
         return 0
 
