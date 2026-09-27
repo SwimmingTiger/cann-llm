@@ -10,16 +10,17 @@
 >
 > - 📥 **[下载官方模型](docs/get-models.md)** —— Matrix 模型库的**网页点击步骤**、
 >   选包提醒（认准 `OMC` 包）、SHA256 校验。**最快，推荐先用这条。**
+>
 > - 🔧 **[转换自己的模型](docs/model-conversion.md)** —— 从 HuggingFace 检查点
 >   到能在 NPU 上跑的**一条我们实际走通过的路径**：
 >   dopt 三阶段量化 → 导出 ONNX → OMG 转换 → 装配模型目录 → 验证。
 >   ⚠️ **官方工具链对模型结构/版本的兼容性有限，不保证你的模型能走通** ——
 >   这更像"可以尝试"而不是"照着做就能成"。遇到走不通的模型，欢迎开 issue 交流。
 >
-> ⚠️ 有一个配置项容易写错：`quant_param_2` 必须按平台设 ——
-> **kirinx90 用 `False`**。写成 `True` 会让量化把权重负半轴钳成 0，
-> 模型能跑但输出恒定垃圾（实测对照见[附录 B](docs/model-conversion.md)）。
-> 配套脚本与诊断工具在 [`scripts/model-conversion/`](scripts/model-conversion/)。
+>   ⚠️ 有一个配置项容易写错：`quant_param_2` 必须按平台设 ——
+>   **kirinx90 用 `False`**。写成 `True` 会让量化把权重负半轴钳成 0，
+>   模型能跑但输出恒定垃圾（实测对照见[附录 B](docs/model-conversion.md)）。
+>   配套脚本与诊断工具在 [`scripts/model-conversion/`](scripts/model-conversion/)。
 
 ## 特性
 
@@ -62,16 +63,34 @@
 > 垫片运行，把 musl 版引擎加载进来会**直接段错误**。脚本在发现这类解释器时会
 > 逐个跳过并说明原因。
 
-`import` 本包**不会**加载任何 `.so`；原生库只在 `backend.load()` 时加载，
-所以在非鸿蒙机器上仍可正常 `import`、跑测试、做协议层开发。
+## 终端权限问题
 
-（安装/开发方式见文末「维护者」一节。）
+以下应用的内置终端没有打开华为推理框架的权限，与`cann-llm`不兼容：
+
+* MKCode
+* BitFun
+* WorkBuddy
+* CodeArts Agent (注意不是`CodeArts IDE`)
+
+在这些应用内运行`cann-llm`会报这个错：
+
+```
+Error loading header libneural_network_runtime.so: failed to map header
+```
+
+以下应用的内置终端有权限，可以正常使用`cann-llm`进行推理：
+
+* HiShell (系统自带终端)
+* DevEco Studio
+* CodeArts IDE (注意不是`CodeArts Agent`)
+
+目测大部分第三方应用都无权打开华为推理框架，所以建议在系统自带`HiShell`终端内运行`cann-llm`推理。
 
 ## 快速开始
 
 ```bash
 # 1) 准备模型目录（含 omc / SubGraph_0.weight / embedding / tokenizer / json 配置）
-#    参考 docs/cann-engine-notes.md
+#    参考 docs/get-models.md 或 docs/model-conversion.md
 
 # 2) 交互式对话（逐字流式）—— 一键脚本
 scripts/start_chat.sh -d /path/to/model_dir
@@ -81,7 +100,7 @@ scripts/start_chat.sh -d /path/to/model_dir -p "你好"          # 单轮
 #    （官方包是 temperature=0.7 / topK=20 / topP=0.8 / repetitionPenalty=1.1），
 #    所以同一提示每次回答都不一样。想固定下来：
 #      --temp 0          贪心解码（最可靠，与服务是否长驻无关）
-#      --seed 42         固定种子（CLI 每次是新进程，可复现）
+#      --seed 42         固定种子（CLI 每次是新进程，可复现。server 要复现 seed 需重启服务）
 #    对话里也可以临时改：/temp 0.9   /seed random   /params
 
 # 2.5) 工具调用（agent）
@@ -231,6 +250,9 @@ src/cann_llm/
 | `docs/openai-api.md` | 兼容范围、与官方的差异、排错 |
 
 ## 维护者
+
+`import` 本包**不会**加载任何 `.so`；原生库只在 `backend.load()` 时加载，
+所以在非鸿蒙机器上仍可正常 `import`、跑测试、做协议层开发。
 
 > 以下是**开发/排错**用法。普通用户只需要 `scripts/start_chat.sh` 与 `scripts/start_server.sh`。
 
