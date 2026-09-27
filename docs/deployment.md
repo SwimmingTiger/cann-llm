@@ -35,7 +35,9 @@
    Python 加到 `PATH` 末尾并选中它，无需手工配置。
 
    > 它是**本项目唯一的第三方依赖**（Python 包层面仍然是零依赖）。
-   > 设备上的 Python **自带 pip 24.3.1** ✓，可以直接 `pip install`。
+   > 这个 Python **自带 pip 24.3.1** ✓。装包一律用
+   > `python3 -m pip install <包>` —— 这条对「Python安装器」版和 harmonybrew 版
+   > **都适用**；直接写 `pip` 有可能会落到不是你想用的那个解释器上。
 
 ### 为什么 glibc 的 Python 不行
 

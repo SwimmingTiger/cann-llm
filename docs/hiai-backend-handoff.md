@@ -553,7 +553,9 @@ POST /v1/chat/completions
 ## 判据 #4：测试 —— 达成 ✓
 
 ```
-pip install pytest            # 设备上 harmonybrew 的 python3 需要它（设备自带 python 均无 pytest）
+# 设备【不】自带 Python。两种 Python（应用市场「Python安装器」版 / harmonybrew 版）
+# 都用这条命令装 —— 直接写 pip 有可能会落到不是你想用的那个解释器上。
+python3 -m pip install pytest
 PYTHONPATH=src pytest -q      # → 184 passed in 8.41s ✓
 ```
 

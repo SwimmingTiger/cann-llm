@@ -137,7 +137,7 @@ cp -r image/ddk_platform_plugin/kirinx90 tools/platform/
 chmod +x tools/tools_omg/omg tools/tools_omg/master/omg
 
 python3 -m venv venv310 && source venv310/bin/activate
-pip install onnx onnxruntime numpy safetensors pyyaml torch --index-url ...   # 按你的 CUDA 版本装 torch
+python3 -m pip install onnx onnxruntime numpy safetensors pyyaml torch --index-url ...  # 按 CUDA 版本装 torch
 ```
 
 装好后的目录结构：

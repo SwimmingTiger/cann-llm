@@ -10,7 +10,7 @@ test:            ## 跑单元测试（stdlib unittest，无需 pytest）
 test-v:          ## 跑单元测试（详细）
 	$(PY) -m unittest discover -s tests -t . -v
 
-lint:            ## 需要 ruff：pip install ruff
+lint:            ## 需要 ruff：python3 -m pip install ruff
 	ruff check src tests
 
 chat:            ## 交互式对话：make chat MODEL=/path/to/model_dir [BACKEND=cann|hiai]

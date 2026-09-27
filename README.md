@@ -232,7 +232,7 @@ src/cann_llm/
 ### 安装成 pip 包（可选，仍然没有编译）
 
 ```bash
-pip install -e .            # 提供 cann-llm-chat / cann-llm-server 两个命令
+python3 -m pip install -e .  # 提供 cann-llm-chat / cann-llm-server 两个命令
 ```
 
 ### 直接用模块运行（不经过脚本）
