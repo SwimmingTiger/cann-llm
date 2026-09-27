@@ -1081,3 +1081,44 @@ InitOption_Create()
 2. 后端改成：Create → SetInferType/SetModel/SetTokenizer → Executor_Create
    → Init_Use_Option
 3. 回归：7B 仍要能跑；Qwen3-8B 应能加载
+
+### 官方那条路的完整形态（IDA 反编译 `libai_large_model_enginesvr.z.so` 得到）
+
+函数：`OHOS::AI::LargeModelEngineBase::SetInferTypeAndTokenizer` @ 0x1df2b8
+      `OHOS::AI::LargeModelEngineBase::LoadEngine` @ 0x1deb04
+
+```c
+// SetInferTypeAndTokenizer(option, std::string const& tokenPath)
+HIAI_LLMEngine_InitOption_SetInferType(option, 0);          // 非 0 = 失败
+// tokenPath 的 data/len 直接传下去（libc++ string 的两个字）
+HIAI_LLMEngine_InitOption_SetTokenizer(option, ptr, len);   // ★ 三个参数
+
+// LoadEngine(ModelDataInfo&, Executor*, InitOption*, bool)
+v10 = HIAI_LMEngine_ModelInfo_Create();
+HIAI_LLMEngine_InitOption_SetModel(option, 0, v10);         // ★ 三个参数
+HIAI_LMEngine_ModelInfo_SetModelType(v15, 3);               // 官方用 3
+HIAI_LLMEngine_InitOption_SetModelComponent(option, v17);   // 可选（组件模型）
+```
+
+引擎导出的配套 API（`nm -D` 实查）：
+
+```
+HIAI_LLMEngine_InitOption_Create / Destroy / SetInferType / SetModel / SetTokenizer
+                                  / SetModelComponent / SetKVCacheSwitchableFlag
+HIAI_LMEngine_ModelInfo_Create / Destroy / SetModelPath / SetWeightDir / SetModelType
+                              / SetModelCacheStrategy / SetModelBuffer
+                              / SetPreprocessorConfigPath / SetUserData
+HIAI_LLMEngine_Executor_Create / Init_Use_Option / InitGraph_Use_Option
+                              / InitWeight_Use_Option / Deinit / Destroy
+```
+
+### 实现前还需确认的
+
+1. `InitOption_SetTokenizer` 第 2/3 参是 `(const char*, size_t)` 还是别的组合
+   （从 libc++ `std::string` 取 data/len 的次序要与反编译逐条对上）
+2. `SetModelPath` / `SetWeightDir` / `SetUserData` 的签名
+3. 原来 `executor.json` 里 `llm_config` 的那些数值（`num_hidden_layers` / `hidden_size` /
+   `kv_cache_max_len` / embedding 权重文件名 …）在这条路上**从哪个入口进**
+   —— 候选：`SetUserData`（可能是 JSON 串）、或 `InitGraph_Use_Option` /
+   `InitWeight_Use_Option`。**这是实现的关键未知点。**
+4. `Init_Use_Option` 的返回值语义与失败时该看哪条日志
