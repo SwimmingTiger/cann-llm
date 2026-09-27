@@ -143,9 +143,16 @@ def build_context(found, d):
 
 
 def convert(d, dry_run=False):
-    found = find_files(d)
-    missing = [k for k in ("omc", "llm_json", "api_json", "tokenizer")
-               if not found[k]]
+    """把官方 OMC 包整成结构化目录 —— 实现统一在 src/cann_llm/omcimport.py。
+
+    这里只负责命令行体验（打印 + dry-run），转换逻辑与 launcher 的自动导入完全同一份，
+    避免两边漂移。
+    """
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+    from cann_llm.omcimport import find_omc_files, import_omc_dir
+
+    found = find_omc_files(d)
+    missing = [k for k in ("omc", "llm_json", "api_json", "tokenizer") if not found[k]]
     if missing:
         die(f"{d} 里缺少: {', '.join(missing)}（现有: {sorted(os.listdir(d))}）")
 
@@ -156,35 +163,15 @@ def convert(d, dry_run=False):
     log(f"权重       : {found['weight']}")
     log(f"tokenizer  : {found['tokenizer']}")
 
-    ex = build_executor(found, d)
-    cx = build_context(found, d)
+    ex, cx = import_omc_dir(d, dry_run=dry_run)
     lc = ex["llm_config"]
     log(f"→ kv_cache_max_len={lc.get('kv_cache_max_len')} "
         f"layers={lc.get('num_hidden_layers')} kv_heads={lc.get('num_attention_kv_heads')} "
         f"dynamic_kv={lc.get('enable_dynamic_kv_cache')}")
-
     if dry_run:
         log("(--dry-run，不写文件)")
-        return ex, cx
-
-    with open(os.path.join(d, "executor.json"), "w") as f:
-        json.dump(ex, f, indent=4, ensure_ascii=False)
-    with open(os.path.join(d, "context.json"), "w") as f:
-        json.dump(cx, f, indent=4, ensure_ascii=False)
-    log("已写 executor.json / context.json")
-
-    # ★ 本脚本处理的本来就是【官方包】（自带 api_config.json / <model>.json），
-    #   所以通常无需补写；仅当它们缺失时才用 executor 反推，保证布局同构。
-    try:
-        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                        "..", "src"))
-        from cann_llm.modelpkg import is_packaged, write_package_files
-        if not is_packaged(d):
-            written = write_package_files(d, ex)
-            if written:
-                log("已补写打包配置: " + ", ".join(written))
-    except Exception as e:                      # noqa: BLE001
-        log(f"警告：未能补写打包配置（{e}）")
+    else:
+        log("已写 executor.json / context.json")
     return ex, cx
 
 

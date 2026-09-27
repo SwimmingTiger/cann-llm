@@ -310,6 +310,10 @@ def run_server(root: str, argv: "List[str]") -> int:
         return do_stop(root)
 
     backend = str(o["backend"])
+    # 同 run_chat：cann 缺结构化配置时就地导入（幂等，只补缺的）
+    if o.get("model_dir"):
+        from .omcimport import ensure_model_dir
+        ensure_model_dir(str(o["model_dir"]), backend)
     host, port = str(o["host"]), int(o["port"])
     p = paths(root)
 

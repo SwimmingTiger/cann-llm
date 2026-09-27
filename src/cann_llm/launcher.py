@@ -162,6 +162,11 @@ def split_known(argv: "List[str]") -> "tuple[Optional[str], str, List[str]]":
 
 def run_chat(root: str, argv: "List[str]") -> int:
     model_dir, backend, rest = split_known(argv)
+    # ★ cann 后端只读 executor.json / context.json；官方 OMC 包解压出来没有这两个，
+    #   这里就地导入（只补缺的，幂等）—— 让"解压即用"对 cann 也成立。
+    if model_dir:
+        from .omcimport import ensure_model_dir
+        ensure_model_dir(model_dir, backend)
     # --lldb：本启动器的选项，不属于 chat CLI 的参数，先摘掉
     from .lldb_launch import build_debug_argv, strip_flag
     rest, want_lldb = strip_flag(rest)
