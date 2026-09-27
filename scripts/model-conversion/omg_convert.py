@@ -44,6 +44,38 @@ def build_input_shape(nlayers: int, kv_len: int, hidden: int,
     return ";".join(parts)
 
 
+#: ONNX 的 elem_type -> OMG 的 --input_type 名称
+_ONNX2OMG = {1: "FP32", 2: "UINT8", 3: "INT8", 6: "INT32", 7: "INT64", 10: "FP16"}
+
+
+def input_type_str(onnx_path: str, layers: int) -> str:
+    """按 ONNX 里每个输入的【真实】dtype 生成 --input_type。
+
+    实测教训：只声明 past_key_in*/past_value_in*:FP16 是不够的 —— 图里
+      input_embed 是 INT8（embedding 分离后量化过）、position_ids 是 INT32、
+      attention_mask 是 FP16，声明与真实不符时 OMG 的 onnx_parser 直接失败：
+          E onnx_parser.cpp InsertPermuteNode(348):
+              "!inputNodes.empty() || !outputNodes.empty()" "false, return FAIL"
+          E general_model_compiler.cpp BeforeCompile(145): "check ir model compatibility failed"
+
+    读不到 ONNX（没装 onnx 库等）时回退到"只有 past_* 是 FP16"的老行为。
+    """
+    try:
+        import onnx                                       # noqa: PLC0415
+        m = onnx.load(onnx_path, load_external_data=False)
+        parts = []
+        for v in m.graph.input:
+            t = v.type.tensor_type.elem_type
+            name = _ONNX2OMG.get(t)
+            if name:
+                parts.append(f"{v.name}:{name}")
+        if parts:
+            return ";".join(parts)
+    except Exception:                                     # noqa: BLE001
+        pass
+    return build_past_type(layers, "FP16")
+
+
 def build_past_type(nlayers: int, dtype: str) -> str:
     parts: List[str] = []
     for i in range(nlayers):
@@ -106,7 +138,7 @@ def main() -> int:
         "--output", os.path.abspath(args.out),
         f"--input_shape={build_input_shape(args.layers, args.kv_len, args.hidden, args.kv_heads, args.head_dim)}",
         f"--dynamic_dims={args.dynamic_dims}",
-        f"--input_type={build_past_type(args.layers, 'FP16')}",
+        f"--input_type={input_type_str(args.onnx, args.layers)}",
         f"--output_type={build_output_type(args.layers, 'FP16')}",
     ]
     if args.compress_conf:
@@ -148,6 +180,19 @@ def main() -> int:
     lib_dirs = [os.path.abspath(os.path.join(args.omg_dir, "master", "lib64")),
                 os.path.abspath(os.path.join(args.omg_dir, os.pardir, "platform",
                                              args.platform, "lib64"))]
+    # ★ TBE / te_fusion 是 python 引擎：LD_LIBRARY_PATH 里必须有 py3.10 的 libpython，
+    #   否则 TbeInitialize 失败 —— 日志是
+    #       E/TE_FUSION fusion_api.cc TbeInitialize(265)::"failed to initialize tbe."
+    #       E/GENE generated_adaptee.cc InitializeTeFusion(174)::"TbeInitialize failed"
+    #       E/AI_FMK general_model_compiler.cpp BeforeCompile(148)::"check ir model compatibility failed"
+    #   当年 to_omc_rebuilt.sh 里正是这一行（uv 装的 cpython 3.10 lib），照抄：
+    #       export LD_LIBRARY_PATH=~/.local/share/uv/python/cpython-3.10.21-linux-x86_64-gnu/lib:$LD_LIBRARY_PATH
+    import glob as _glob
+    for pat in ("~/.local/share/uv/python/cpython-3.10*-linux-x86_64-gnu/lib",
+                "~/.local/share/uv/python/cpython-3.10*/lib"):
+        for d in sorted(_glob.glob(os.path.expanduser(pat))):
+            if os.path.isdir(d):
+                lib_dirs.append(d)
     env["LD_LIBRARY_PATH"] = os.pathsep.join(
         lib_dirs + [p for p in env.get("LD_LIBRARY_PATH", "").split(os.pathsep) if p])
     # 官方 set_ascendc_env.sh 还会把 ascendc 的 package / bisheng/bin 放进 PATH ——
@@ -159,7 +204,11 @@ def main() -> int:
             [d for d in extra if os.path.isdir(d)] +
             [p for p in env.get("PATH", "").split(os.pathsep) if p])
         env.setdefault("TMPDIR", os.path.join(asc, "tmp"))
-    if getattr(args, "asc_dir", None):
+    # set_ascendc_env.sh 里会 `unset LD_LIBRARY_PATH` 再自己设一份，所以把我们算好的
+    # 那份通过环境变量带进去，在 source 之后重新接上（当年脚本就是 source 完再 export 的）。
+    env["CANN_LLM_OMG_LD"] = env["LD_LIBRARY_PATH"]
+    asc_dir = getattr(args, "asc_dir", None)
+    if asc_dir:
         del args.asc_dir
 
     print("### OMG 命令")
@@ -184,6 +233,36 @@ def main() -> int:
               f"      （tools_omg/ 下同级的 omg 往往也是同样情况，可一并 chmod）",
               file=sys.stderr)
         return 2
+    # ★ 必须先 source <ascendc>/set_ascendc_env.sh 再跑 OMG（当年 to_omc_rebuilt.sh 就是这么做的）。
+    #   它把 <ascendc>/package/python 加进 PYTHONPATH（te_fusion / TBE 的 python 包在这里）、
+    #   把 <ascendc>/package 与 ddk/ccec_compiler/bin 加进 PATH、并设 HIAI_VERSION。
+    #   不做这一步的后果（实测）：
+    #       E/GENE generated_adaptee.cc InitializeTeFusion(175)::"TbeInitialize failed"
+    #       E/AI_NPUCL plugin.cc RegisterLibrary(58)::"libai_npucore_ascendc.so Initialize failed"
+    #       E/AI_FMK general_model_compiler.cpp BeforeCompile(148)::"check ir model compatibility failed"
+    #   —— 因为 set_ascendc_env.sh 会先 unset LD_LIBRARY_PATH，所以 source 完要把我们
+    #   算好的那份接回去（用 CANN_LLM_OMG_LD 传进去）。
+    set_env = os.path.join(asc_dir, "set_ascendc_env.sh") if asc_dir else ""
+    if set_env and os.path.exists(set_env):
+        # ⚠ 不要用位置参数传：set_ascendc_env.sh 被 source 后会影响 $@，
+        #   exec "$@" 会拿到错的东西（实测报 "exec: --: invalid option"）。全部走环境变量。
+        env["CANN_LLM_OMG_SETENV"] = set_env
+        env["CANN_LLM_OMG_BIN"] = cmd[0]
+        # 忠实照抄 to_omc_rebuilt.sh 的那几行：PATH 里加 $HOME/ddk/bin，
+        # TMPDIR 指向一个确实存在的目录（默认的 <ascendc>/tmp 往往不存在，
+        # TBE 初始化失败就是这么来的）。
+        env["CANN_LLM_OMG_TMPDIR"] = os.path.join(asc_dir, "tmp")
+        runner = ["/bin/bash", "-c",
+                  'mkdir -p "$CANN_LLM_OMG_TMPDIR" 2>/dev/null || true; '
+                  'export TMPDIR="${CANN_LLM_OMG_TMPDIR:-$TMPDIR}"; '
+                  'export PATH="$HOME/ddk/bin:$PATH"; '
+                  'source "$CANN_LLM_OMG_SETENV" >/dev/null 2>&1 || true; '
+                  'export LD_LIBRARY_PATH="${CANN_LLM_OMG_LD}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; '
+                  'env | sort > /tmp/cann_omg_env.txt 2>/dev/null || true; '
+                  'exec "$CANN_LLM_OMG_BIN" "$@"',
+                  "cann-llm-omg"]
+        print(f"### 先 source {set_env}", flush=True)
+        cmd = runner + cmd[1:]
     print("### 执行…", flush=True)
     rc = subprocess.call(cmd, cwd=args.omg_dir, env=env)
     print(f"### OMG_EXIT={rc}")
