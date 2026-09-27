@@ -74,6 +74,7 @@ ONNX  +  外置的 embedding_weights / embedding_dequant_scale
 | **HF 检查点** | 官方文档列出的受支持模型之一，例如 `Qwen2.5-1.5B-Instruct`（safetensors 格式） |
 | **Python** | 3.10（本项目用 `venv310`，torch 2.4.0+cu121），需要 `onnx` / `onnxruntime` / `numpy` / `safetensors` |
 | **磁盘** | 至少 20 GB（ONNX + 权重 + 中间产物） |
+| **内存** | ★ **导出是内存峰值**：fp32 导 4B 需要 **≥ 64 GB**（31 GB 上确定性 OOM —— 实测 anon-rss 已 23 GB，再叠加 `from_pretrained` 转换峰值与 onnxsim）；1.5B 在 31 GB 上够用。量化阶段很轻。详见[附录 B](#附录-b权重被钳成-0早期版本踩过的坑) |
 
 ### 长任务一定要挂 `tmux`（或者 `nohup`）
 
@@ -271,6 +272,7 @@ python -u ${QLIBS}/dopt/dopt_lm/opt_main.py \
 | 文件 | 说明 |
 |---|---|
 | `trained_quant_weight.pth` | stage1 产出 |
+| `trained.pth` | stage2 期间写出的全精度 trained 权重（**导出不用** —— 导出的 yaml 里 `quant_pth` 指向 `fake_quant_weight.pth`） |
 | `fake_quant_weight.pth` | stage3 产出，**导出时用它** |
 | `quant_params_file` | stage3 产出，量化参数 |
 | `logs-stage*.log` | 各阶段日志 |
@@ -329,6 +331,23 @@ cd /path/to/cannkit_samplecode_lm_engine_cpp/CANN_LLM/CANN_LLM_Engine_Model/npu_
 source /path/to/venv310/bin/activate
 python export_model_single_qwen2.py /path/to/model_info_target.yaml
 ```
+
+> **Qwen3 / 大模型必读**：fp32 导出时 `onnx_utils.process_onnx` 里的
+> `onnxsim.simplify` 是内存峰值所在（16 GB 模型 + 它的工作副本 > 31 GB ⇒
+> 进程被 OOM killer 杀掉，而日志里只剩一句「命令返回 -9」）。先打补丁、再带着
+> 环境变量导出：
+>
+> ```bash
+> python /path/to/cann-llm/scripts/model-conversion/patch_qwen3_export_mem.py .
+> CANN_SKIP_ONNX_SIMPLIFY=1 python export_model_single_qwen3.py /path/to/model_info_target.yaml
+> ```
+>
+> **不要**为省内存把 `hf_model_dtype` 改成 fp16 —— 那会破坏 RoPE 的模式匹配，
+> 引擎能加载模型但 Generate 恒返回 1（详见附录 B）。
+>
+> `scripts/model-conversion/build_model.py` 已内置这两件事：导出前检查补丁是否
+> 打过（没打直接报错并给出命令），并默认给 Qwen3 设上 `CANN_SKIP_ONNX_SIMPLIFY=1`
+> （想保留 simplify 就自己设成 `0`）。
 
 输出目录名会被自动加后缀（`onnx_out` → `onnx_out_embedding_out_no_output_pos/`），里面有：
 

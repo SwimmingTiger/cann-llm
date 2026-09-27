@@ -219,9 +219,27 @@ def main():
     if not args.skip_export:
         if not os.path.exists(export_script):
             die(f"找不到导出脚本 {export_script}")
+
+        # ★ Qwen3 的 fp32 导出里，onnx_utils.process_onnx 的 onnxsim.simplify 是内存
+        #   峰值所在（16 GB 模型 + 它的工作副本 > 31 GB，实测被 OOM killer 杀，
+        #   日志里只看得到一句 "命令返回 -9"）。仓库的 patch_qwen3_export_mem.py
+        #   把这一段做成受 CANN_SKIP_ONNX_SIMPLIFY 控制 —— 所以：
+        #     · 官方脚本必须先打过那个补丁，否则下面的变量没有任何作用；
+        #     · 默认给 qwen3 设上（不设就是在 31 GB 机器上必然失败）。
+        #   要保留 simplify（内存更大的机器）就自己设 CANN_SKIP_ONNX_SIMPLIFY=0。
+        export_env = dict(os.environ)
+        if arch == "qwen3":
+            src = open(export_script, encoding="utf-8").read()
+            if "CANN_SKIP_ONNX_SIMPLIFY" not in src:
+                die(f"{os.path.basename(export_script)} 还没打过内存补丁 —— 先运行：\n"
+                    f"      {args.python} {os.path.join(os.path.dirname(__file__), 'patch_qwen3_export_mem.py')} {args.export_dir}")
+            if export_env.get("CANN_SKIP_ONNX_SIMPLIFY") is None:
+                export_env["CANN_SKIP_ONNX_SIMPLIFY"] = "1"
+                print("  [build_model] 设 CANN_SKIP_ONNX_SIMPLIFY=1（跳过 onnxsim，避开内存峰值）")
+
         if os.path.isdir(onnx_out):
             shutil.rmtree(onnx_out)
-        run([args.python, export_script, yaml_path], cwd=args.export_dir)
+        run([args.python, export_script, yaml_path], cwd=args.export_dir, env=export_env)
         # 导出会给目录加后缀，按名字找
         for cand in sorted(os.listdir(work)):
             if cand.startswith("onnx_out"):
