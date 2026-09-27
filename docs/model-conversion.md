@@ -72,7 +72,8 @@ ONNX  +  外置的 embedding_weights / embedding_dequant_scale
 | **DDK 工具** | DDK 工具包 + kirinx90 平台插件包 —— **下载地址见下面** |
 | **华为示例代码** | [`cannkit_samplecode_lm_engine_cpp`](https://gitcode.com/HarmonyOS_Samples/cannkit_samplecode_lm_engine_cpp) —— 量化与导出脚本都在里面 |
 | **HF 检查点** | 官方文档列出的受支持模型之一，例如 `Qwen2.5-1.5B-Instruct`（safetensors 格式） |
-| **Python** | 3.10（本项目用 `venv310`，torch 2.4.0+cu121），需要 `onnx` / `onnxruntime` / `numpy` / `safetensors` |
+| **Python** | **3.10**（实测 3.10.21）。⚠️ 系统自带的 `python3` 若是 3.11 以上，`torch` 的 CUDA 轮子装不上（报 `No matching distribution found for torch`）—— 用 [`uv`](https://docs.astral.sh/uv/) 装一个：`uv python install 3.10`，再用它的解释器建 venv |
+| **Python 依赖** | `torch`（按 CUDA 版本，实测 `2.5.1+cu121`）+ `onnx` `onnxruntime` `numpy` `safetensors` `pyyaml`，以及 dopt 运行时要用的 `tqdm` `datasets` `transformers` `accelerate` `sentencepiece` `protobuf` `pyarrow` `pandas` `aiohttp` `onnxsim` `wandb` |
 | **磁盘** | 至少 20 GB（ONNX + 权重 + 中间产物） |
 | **内存** | ★ **导出是内存峰值**：fp32 导 4B 需要 **≥ 64 GB**（31 GB 上确定性 OOM —— 实测 anon-rss 已 23 GB，再叠加 `from_pretrained` 转换峰值与 onnxsim）；1.5B 在 31 GB 上够用。量化阶段很轻。详见[附录 B](#附录-b权重被钳成-0早期版本踩过的坑) |
 
@@ -138,7 +139,12 @@ cp -r image/ddk_platform_plugin/kirinx90 tools/platform/
 chmod +x tools/tools_omg/omg tools/tools_omg/master/omg
 
 python3 -m venv venv310 && source venv310/bin/activate
-python3 -m pip install onnx onnxruntime numpy safetensors pyyaml torch --index-url ...  # 按 CUDA 版本装 torch
+# ★ 用 3.10 的解释器建 venv（见上表；系统 python3 太新的话 torch 装不上）
+~/py310bin/python -m venv venv310 && source venv310/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+pip install onnx onnxruntime numpy safetensors pyyaml \
+            tqdm datasets transformers accelerate sentencepiece \
+            protobuf pyarrow pandas aiohttp onnxsim wandb
 ```
 
 装好后的目录结构：
