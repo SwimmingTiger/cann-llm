@@ -42,7 +42,7 @@
 |---|---|
 | 本项目源码 | 全部是 Python，无需 C/C++ 工具链、无需 `pip install` 即可运行 |
 | **Python 运行时** | ★ **这是唯一的第三方依赖，且鸿蒙 PC 不预装** —— 见下方说明 |
-| Python 包依赖 | **零**（HTTP 层用标准库 `http.server`，测试用 `unittest`，`pip install` 无外部包可拉） |
+| Python 包依赖 | **零**（HTTP 层用标准库 `http.server`；测试本体是标准库 `unittest`，pytest 只是可选的跑法） |
 | 原生库 | 运行期由 `ctypes` 加载**系统自带**的 `/system/lib64/ndk/libcann_llm_engine.so`（鸿蒙 NDK 提供，不是本项目编译的） |
 | 模型产物 | `.omc` + `SubGraph_0.weight` 由华为的 **OMG 离线转换工具**生成，属于离线步骤，不在本仓库内（见 `docs/cann-engine-notes.md`） |
 | Python 版本 | ≥ 3.9（用到 `tomllib`） |
@@ -252,8 +252,9 @@ PYTHONPATH=src python3 -m cann_llm.api.server -d /path/to/model_dir --port 8000
 ```bash
 make chat   MODEL=/path/to/model_dir                 # 交互式对话
 make server MODEL=/path/to/model_dir PORT=8000       # 启动服务
-make test                                            # 单元测试（stdlib unittest）
+make test                                            # 单元测试（pytest；自动挑可用的解释器）
 make test-v                                          # 单元测试（详细输出）
+make test-unittest                                   # 同上，但不需要 pytest（stdlib unittest）
 ```
 
 `make` 的 `chat` / `server` 支持 `BACKEND=cann|hiai`（默认 `cann`）。
