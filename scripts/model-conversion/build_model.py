@@ -375,6 +375,25 @@ def main():
             "embedding_weights": f"{emb_prefix}.embedding_weights",
             "embedding_dequant_scale": f"{emb_prefix}.embedding_dequant_scale",
             "embedding_input_type": "int8",
+            # ★ 下面这些此前没写，而官方包（对照 models/qwen25_coder_7b_omc1024 的
+            #   executor.json）里都有 —— 缺了它们引擎加载会失败：
+            #       model_manager_ndk_impl.cpp PrepareModelManager(122):
+            #           "executor_" "null, return FAIL."
+            #       engine_executor_impl.cpp Init(153): "init model fail or load toke..."
+            #   数值一律取自 HF config.json，不要自己编。
+            "pad_token_id": cfg.get("pad_token_id") or 0,
+            "num_attention_heads": cfg.get("num_attention_heads"),
+            "intermediate_size": cfg.get("intermediate_size"),
+            "rms_norm_eps": cfg.get("rms_norm_eps", 1e-06),
+            "rope_theta": cfg.get("rope_theta", 10000),
+            "model_type": cfg.get("model_type", arch),
+            "architectures": cfg.get("architectures"),
+            "torch_dtype": cfg.get("torch_dtype"),
+            "tie_word_embeddings": cfg.get("tie_word_embeddings", False),
+            "enable_dynamic_kv_cache": True,
+            "enable_lm_head_opt": True,
+            "enable_lm_head_topk": True,
+            "is_kv_cache_merge": True,
         },
         "tokenizer": {"type": "qwen", "path": "tokenizer.json"},
         "autoregressive": {"model_path": f"{args.name}.omc", "weight_path": "./"},
@@ -395,6 +414,10 @@ def main():
             log("已写打包配置: " + ", ".join(written))
     except Exception as e:                      # noqa: BLE001
         log(f"警告：未能补写 api_config.json / <model>.json（{e}）")
+        log("      这两个文件引擎要用（采样参数 / 停止符 / chat template），"
+            "且 <model>.json 必须与 .omc 同名。")
+        log("      转换机上一般没有仓库的 src/，所以在【设备】上补一句即可：")
+        log(f"          PYTHONPATH=src python3 -m cann_llm.modelpkg {out_dir}")
 
     log(f"完成 → {out_dir}")
     log("三处 KV 长度已对齐：" 
