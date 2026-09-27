@@ -1,142 +1,135 @@
-"""把模型自带的思考段（``<think>…</think>``）从正文里拆出来。
+# -*- coding: utf-8 -*-
+"""把模型的思考段拆成 (思考, 正文) 两路。
 
-**为什么需要**：Qwen3-8B 自带思考模式，输出形如::
+模型自带的 chat template 长这样::
 
-    <think>
-    （一段思考过程）
-    </think>
+    '<|im_start|>' + role + '\\n<think>\\n' + reasoning + '\\n</think>\\n\\n' + content
 
-    （真正的回答）
+★ 判定规则：**标记必须独立成行**才算标记。
 
-服务此前把整段原样放进 ``delta.content``，客户端（DSH 用的
-``@earendil-works/pi-ai``）于是把它当**正文**渲染 —— 用户看到的是一堆
-``<think>`` 标签，而不是"思考"。
+    开始：`<think>` 在【文本开头】或 `\\n` 之后，且其后紧跟 `\\n`（或文本结束）
+    结束：`</think>` 同理
 
-**为什么是 ``reasoning_content`` 这个字段名**：查过 pi-ai 的
-``dist/api/openai-completions.js``，它按 ``["reasoning_content", "reasoning",
-"reasoning_text"]`` 的顺序取**第一个非空**的字段作为 thinking_delta，正文仍读
-``delta.content``；源码注释原话是 *Some endpoints return reasoning in
-reasoning_content (llama.cpp), or reasoning (other openai compatible
-endpoints)*。也就是 llama.cpp / vLLM 那一套既有做法，照做即可 —— 不需要新增
-任何请求参数（OpenAI 协议里没有"关思考"这种东西）。
-
-**为什么不用 ``text.split("<think>")``**：流式下一个标记会被切在两个 chunk 之间
-（``"<thi"`` + ``"nk>"``），简单切分会把两个半截都当正文漏出去。这里用
-「保留可能是标记真前缀的尾巴」的办法增量判定，与 ``agent/loop.py`` 里处理
-``<tool_call>`` 的 :class:`~cann_llm.agent.loop.StreamFilter` 同一套思路
-（判据本身已抽到 :func:`cann_llm.textutil.prefix_hold_len`）。
-
-**对不带标记的模型没有影响**：整个流都走同一个状态机，但只要输出里没出现
-``<think>``，它至多把"可能是标记前缀"的尾巴多留一拍（最多 6 个字符），正文的
-字符一个不少、顺序也不变；而且响应里**不会出现 reasoning_content 字段**
-（空字符串不写），7B 与自转模型的响应结构与改动前完全一致。
+为什么必须这么严：用户的消息里可能内联写着 "<think> </think>"（讨论这个标签），
+模型思考时也可能在正文里引用它。实测踩过：内联出现的 `</think>` 被当成结束标记，
+思考段从中间被截断、后半段错当成正文露出去。模型真正用的标记永远独占一行，
+所以按行判定既准确又不会误伤。
 """
-
 from __future__ import annotations
 
 from typing import List, NamedTuple, Tuple
 
-from ..textutil import prefix_hold_len
+__all__ = ["THINK_OPEN", "THINK_CLOSE", "ThinkPieces", "ThinkSplitter", "split_reasoning"]
 
-#: Qwen3 思考段的标记。模型只会原样吐这两个字符串（见模型自带 chat template 里的
-#: ``'<|im_start|>' + role + '\n<think>\n' + reasoning + '\n</think>\n\n' + content``），
-#: 没有别的变体，所以不做正则、不认别名。
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
 
-# 状态机的三个状态。用字符串而不是 Enum：只在 feed 内部比较，日志里也直接可读。
-_BEFORE = "before"      # 还没见到 <think>：这一段是「待定」，见到标记则前面的算正文
+_BEFORE = "before"      # 还没确认思考开始：这一段先按正文对待
 _INSIDE = "inside"      # 在思考段里（已吃掉 <think>，还没见到 </think>）
-_AFTER = "after"        # 已见过 </think>：之后全是正文，此后不再找标记
+_AFTER = "after"        # 已见过 </think>：之后全是正文，不再找标记
 
 
 class ThinkPieces(NamedTuple):
-    """一次 :meth:`ThinkSplitter.feed` 切出来的两路增量。"""
+    """一次 `feed` 切出来的两路增量。"""
 
     reasoning: str = ""
     content: str = ""
 
 
-class ThinkSplitter:
-    """增量的 ``<think>`` 状态机：喂入模型输出，吐出 (思考, 正文)。
+def _standalone(buf: str, tag: str, i: int) -> bool:
+    """`tag` 出现在 buf[i:] 时，是否满足"独立成行"。"""
+    if i != 0 and buf[i - 1] != "\n":
+        return False
+    end = i + len(tag)
+    return end == len(buf) or buf[end] == "\n"
 
-    只认**第一个** ``<think>…</think>``：见到 ``</think>`` 之后一律当正文，
-    之后再出现的 ``<think>`` 也不再当标记 —— 否则模型在正文里讨论这个标记
-    （很常见：用户问"你怎么输出思考"）会被我们当成思考吞掉。
 
-    边界都按「不丢模型说过的话」处理：
+def _find(buf: str, tag: str, *, needs_close: bool) -> Tuple[int, bool]:
+    """找第一个独立成行的 `tag`。
 
-    * ``<think>`` 之后一直没等到 ``</think>``（被 ``max_tokens`` 截断）→
-      已生成的部分全算思考；
-    * 流结束时缓冲里只剩半个标记（如 ``"<thi"``）→ 它不构成完整的 ``<think>``，
-      当正文交出去。
+    返回 ``(位置, 是否已确定)``：位置为 -1 表示没找到。末尾处"可能还差一个换行"
+    的候选返回 ``(-1, False)``，表示**还得再等更多文本**，不能就此收尾。
     """
+    start = 0
+    while True:
+        i = buf.find(tag, start)
+        if i < 0:
+            return -1, True
+        end = i + len(tag)
+        if (i == 0 or buf[i - 1] == "\n"):
+            if end == len(buf):
+                # 标记落在缓冲区末尾：后面的字符还没到，无法判定
+                return -1, False
+            if buf[end] == "\n":
+                return i, True
+        start = i + 1
+
+
+class ThinkSplitter:
+    """增量状态机：喂模型输出，吐 ``(思考, 正文)``。
+
+    只认**第一个**独立成行的 ``<think>…</think>``；见过 ``</think>`` 之后一律当正文，
+    之后再出现标记也不再当标记 —— 否则模型在正文里讨论这个标签会被吞掉。
+    没等到 ``</think>`` 就被 ``max_tokens`` 截断时，已生成的部分全算思考。
+    """
+
+    #: 尾部最多压住这么多字符不吐：要能容纳一个标记外加两侧换行
+    _HOLD = max(len(THINK_OPEN), len(THINK_CLOSE)) + 2
 
     def __init__(self, open_tag: str = THINK_OPEN,
                  close_tag: str = THINK_CLOSE) -> None:
         self.open_tag = open_tag
         self.close_tag = close_tag
-        #: 还没能判定的尾巴（可能是半个标记）
-        self._tail = ""
+        self._buf = ""
         self._state = _BEFORE
 
-    def feed(self, delta: str) -> ThinkPieces:
-        """喂入一段增量，返回这一段里属于思考 / 正文的部分。"""
-        if not delta:
-            return ThinkPieces()
-        self._tail += delta
+    def feed(self, text: str) -> ThinkPieces:
+        self._buf += text
         reasoning: List[str] = []
         content: List[str] = []
-        while self._tail:
+
+        while True:
             if self._state == _AFTER:
-                # 已经没有标记可找了：整段透传，连缓冲都不用留
-                content.append(self._tail)
-                self._tail = ""
+                content.append(self._buf)
+                self._buf = ""
                 break
-            # 在思考段里就找闭标记（找到的算思考），否则找开标记（找到的前面算正文）
-            tag, out = ((self.close_tag, reasoning) if self._state == _INSIDE
-                        else (self.open_tag, content))
-            i = self._tail.find(tag)
+
+            tag = self.open_tag if self._state == _BEFORE else self.close_tag
+            i, settled = _find(self._buf, tag, needs_close=(self._state == _INSIDE))
             if i < 0:
-                # 没有完整标记：能确定归属的部分立刻吐出去，
-                # 只留「可能是标记真前缀」的尾巴等下一个 chunk
-                hold = prefix_hold_len(self._tail, tag)
-                if hold:
-                    out.append(self._tail[:len(self._tail) - hold])
-                    self._tail = self._tail[len(self._tail) - hold:]
-                else:
-                    out.append(self._tail)
-                    self._tail = ""
+                if not settled:
+                    break                     # 缓冲区末尾可能是半个标记 → 等更多文本
+                # 没有标记：只留可能成为标记的尾巴，其余按当前状态吐出去
+                keep = self._keep_len()
+                out, self._buf = self._buf[:len(self._buf) - keep], self._buf[len(self._buf) - keep:]
+                (content if self._state == _BEFORE else reasoning).append(out)
                 break
-            out.append(self._tail[:i])
-            self._tail = self._tail[i + len(tag):]
+
+            head, self._buf = self._buf[:i], self._buf[i + len(tag):]
+            (content if self._state == _BEFORE else reasoning).append(head)
             self._state = _INSIDE if self._state == _BEFORE else _AFTER
+            # 吃掉标记后面【所有】连续换行：规则是 `<think>\n+ … \n+</think>`，
+            # 模型到底给几个换行无法保证，所以不写死个数（它们都是分隔符）。
+            self._buf = self._buf.lstrip("\n")
+
         return ThinkPieces("".join(reasoning), "".join(content))
 
-    def flush(self) -> ThinkPieces:
-        """流结束时吐出缓冲里剩下的文本（此后本对象作废）。
+    def _keep_len(self) -> int:
+        """当前状态下，尾部至少要压住多少字符才能保证不漏判标记。"""
+        return self._HOLD
 
-        * 卡在 ``_INSIDE``：被截断、没等到 ``</think>`` —— 按调用方的要求，
-          已生成的部分都算思考。
-        * 卡在 ``_BEFORE``：剩下的一定只是"半个标记"，当正文。丢掉它等于把
-          模型确实说过的话吞了。
-        """
-        tail, self._tail = self._tail, ""
+    def flush(self) -> ThinkPieces:
+        """流结束：吐出缓冲里剩下的（此后本对象作废）。"""
+        tail, self._buf = self._buf, ""
         if not tail:
             return ThinkPieces()
-        if self._state == _INSIDE:
-            return ThinkPieces(reasoning=tail)
-        return ThinkPieces(content=tail)
+        # 在思考段里没等到 </think> → 按调用方要求，已生成的部分都算思考
+        return ThinkPieces(reasoning=tail) if self._state == _INSIDE else ThinkPieces(content=tail)
 
 
 def split_reasoning(text: str) -> Tuple[str, str]:
-    """非流式：一次性切出 ``(reasoning, content)``。
-
-    刻意复用同一个状态机，而不是在这里另写一遍 ``split()``：流式与非流式必须给出
-    **一致**的结果，否则「同样的输出、流式与非流式对不上」是最难查的一类 bug
-    （典型例子就是截断在半个标记上）。
-    """
-    splitter = ThinkSplitter()
-    head = splitter.feed(text)
-    tail = splitter.flush()
-    return head.reasoning + tail.reasoning, head.content + tail.content
+    """一次性切分（非流式用）。返回 ``(思考, 正文)``。"""
+    sp = ThinkSplitter()
+    first = sp.feed(text)
+    last = sp.flush()
+    return first.reasoning + last.reasoning, first.content + last.content
