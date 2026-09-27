@@ -67,8 +67,20 @@ def die(text: str, code: int = 1) -> "None":
 # ---------------------------------------------------------------- 解释器（外壳用同一个逻辑做，这里只做查错）
 
 def current_python() -> str:
-    """返回当前解释器路径（外壳应已把 PYTHON 环境变量或 PATH 决定好的那个传进来）。"""
-    return os.environ.get("CANN_LLM_RESOLVED_PYTHON") or sys.executable or "python3"
+    """返回要用来重跑/启动的解释器路径。
+
+    ★ 直接用 ``sys.executable``：它一定是**真二进制**。用 `#!/bin/sh` 包装器启动时，
+      Python 自己会把它解析成实际的可执行文件（实测：`python3` 包装器 →
+      `…/bin/python3.12`）。也就是说外壳挑好的那个解释器，这里本来就知道，
+      不必再靠环境变量传一遍。
+
+      这比读 ``CANN_LLM_RESOLVED_PYTHON`` 可靠：外壳传进来的可能就是那个包装器，
+      而调试器（gdbserver）用 execve 直接拉起进程、**不解析 shebang**，
+      传包装器进去会得到 "execve failed: Operation not permitted"。
+
+    ``CANN_LLM_RESOLVED_PYTHON`` 保留为兜底（极少数取不到 ``sys.executable`` 的场合）。
+    """
+    return sys.executable or os.environ.get("CANN_LLM_RESOLVED_PYTHON") or "python3"
 
 
 def libc_compatible(py: str) -> bool:

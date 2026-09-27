@@ -311,7 +311,12 @@ def run_server(root: str, argv: "List[str]") -> int:
     host, port = str(o["host"]), int(o["port"])
     p = paths(root)
 
-    py = os.environ.get("CANN_LLM_RESOLVED_PYTHON") or sys.executable or "python3"
+    # ★ 用 sys.executable（而非外壳传的环境变量）：它一定是**真二进制** ——
+    #   用 `#!/bin/sh` 包装器启动时 Python 会把它解析成实际可执行文件（实测：
+    #   python3 包装器 → …/bin/python3.12）。调试器用 execve 直接拉起进程、
+    #   不解析 shebang，传包装器进去会 "execve failed: Operation not permitted"，
+    #   所以这里必须有真二进制。环境变量仅作兜底。
+    py = sys.executable or os.environ.get("CANN_LLM_RESOLVED_PYTHON") or "python3"
     if sys.version_info < (3, 9):
         die("Python 版本过低（需要 >= 3.9，因为用到了 tomllib）")
     if not libc_compatible(py):
