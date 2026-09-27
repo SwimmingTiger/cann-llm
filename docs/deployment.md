@@ -190,6 +190,29 @@ curl -sN -X POST http://127.0.0.1:8000/v1/chat/completions \
 
 ---
 
+## 五、诊断模式（--debug）
+
+服务端加 `--debug` 会把一次请求的**全链路原始信息**写进 `.run/debug.log`：
+
+* HTTP 请求：方法、路径、请求头（`Authorization` 等密钥已隐去）、**原始请求体**
+  —— 排查"客户端到底带没带 `max_tokens`"就看这里
+* HTTP 响应 / SSE 每一帧（前 40 帧记正文，之后只计数，避免长回答把日志淹掉）
+* 引擎参数：`max_gen_tokens` / `init_token_len` / 采样值 —— **我们实际下发给引擎的上限**
+* 引擎原始输入全文（模板渲染后的完整原文，含特殊 token）
+* 引擎原始输出全文与上报的 `finish_reason`
+
+```bash
+scripts/start_server.sh -d <模型目录> --debug     # 日志在 .run/debug.log
+```
+
+也可用环境变量 `CANN_LLM_DEBUG=1`；不写文件时可以配 `CANN_LLM_DEBUG_FILE`。
+
+> **为什么不写 stderr**：引擎自己的 SELinux 噪声（`Unknown class perfgenius_interface`）
+> 也走 stderr，而文档里让大家用 `2>/dev/null` 屏蔽它 —— 那样会把诊断日志一起屏蔽。
+> 写文件就没这个问题。
+
+---
+
 ## 五、常见问题
 
 | 现象 | 原因 / 处理 |

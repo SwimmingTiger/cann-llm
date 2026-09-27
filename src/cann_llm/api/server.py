@@ -32,6 +32,7 @@ from .. import version
 from ..backends import available_backends, create_backend
 from ..backends.base import EngineBackend, SerializedBackend
 from ..chat.template import get_template
+from .. import debuglog
 from ..config import AppConfig, load_config, resolve_sampler
 from ..agent.loop import StreamFilter
 from ..agent.parser import parse_tool_calls
@@ -146,6 +147,7 @@ class Handler(BaseHTTPRequestHandler):
             self.extra_headers = tuple(extra_headers)
         self._emit_headers()
         self.end_headers()
+        debuglog.log(f"HTTP 响应 {status}", json.dumps(payload, ensure_ascii=False))
         self.wfile.write(body)
 
     def _send_error_json(self, status: int, message: str,
@@ -171,9 +173,17 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def _sse_write(self, data: bytes) -> None:
+        # ★ 诊断点：SSE 每一帧。帧可能上千，所以只记前 40 帧的正文，
+        #   之后只计数 —— 否则一个长回答就把日志淹了。
+        self._dbg_frames = getattr(self, "_dbg_frames", 0) + 1
+        if self._dbg_frames <= 40:
+            debuglog.log(f"SSE 帧 #{self._dbg_frames}", data.decode("utf-8", "replace"))
+        elif self._dbg_frames == 41:
+            debuglog.log("SSE 帧", "…后续帧只计数（避免日志被淹）")
         self._sse_raw(data)
 
     def _sse_end(self) -> None:
+        debuglog.log("SSE 结束", f"共 {getattr(self, '_dbg_frames', 0)} 帧")
         self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()
 
@@ -271,6 +281,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:                # noqa: N802
         path = self._path()
+        debuglog.kv("HTTP 请求", method="GET", path=path,
+                    headers=debuglog.redact(self.headers))
         if path in ("/healthz", "/health"):
             st = self.state
             self._send_json(200, {
@@ -320,6 +332,11 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_body()
         if body is None:
             return
+        # ★ 诊断点：客户端到底给了什么。max_tokens 有没有带、带了多大，
+        #   看这一行就知道（这正是排查"输出被截断"的第一步）。
+        debuglog.kv("HTTP 请求", method="POST", path=path,
+                    headers=debuglog.redact(self.headers))
+        debuglog.log("请求体（原始 JSON）", json.dumps(body, ensure_ascii=False))
         try:
             if path == "/v1/chat/completions":
                 self._handle_chat(body)
@@ -567,9 +584,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--model-id", help="对外暴露的模型 id")
     ap.add_argument("--max-tokens", type=int, dest="max_tokens",
                     help="默认输出窗口（单轮最多生成多少 token；请求里的 max_tokens 优先）")
+    ap.add_argument("--debug", action="store_true",
+                    help="诊断模式：记录 HTTP 请求/响应与引擎的原始输入输出"
+                         "（也可用环境变量 CANN_LLM_DEBUG=1）")
     ap.add_argument("--workers", type=int, help="忽略，保留参数位（兼容习惯）")
     ap.add_argument("-V", "--version", action="version", version=f"cann-llm {version.__version__}")
     args = ap.parse_args(argv)
+    if args.debug or os.environ.get("CANN_LLM_DEBUG", "") not in ("", "0"):
+        # 写文件优先（引擎的 SELinux 噪声也在 stderr，屏蔽噪声会连日志一起屏蔽）
+        debuglog.enable(path=os.environ.get("CANN_LLM_DEBUG_FILE") or None)
+        _f = debuglog.log_file()
+        print(f"[debug] 诊断模式已开启：记录 HTTP 请求/响应与引擎原始输入输出"
+              + (f"（写入 {_f}）" if _f else "（写入 stderr）"), file=sys.stderr)
 
     cfg = load_config(args.config)
     over = {}

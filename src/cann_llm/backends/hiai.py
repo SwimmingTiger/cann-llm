@@ -50,6 +50,7 @@ import random
 import time
 from typing import Any, Dict, Iterator, List, Optional
 
+from .. import debuglog
 from ..modelpkg import detect_layout
 from ..errors import BackendUnavailableError, GenerationError, ModelLoadError
 from ..types import (
@@ -654,6 +655,12 @@ class HiaiBackend(EngineBackend):
 
         # ★ 服务每个请求都会显式设 initTokenLen / maxGenTokens
         maxgen = int(getattr(p, "max_tokens", 0) or 128)
+        # ★ 诊断点：下发给引擎的生成上限。排查"输出被截断"时，
+        #   这一行和下一条"引擎原始输入"合起来就够定位了。
+        debuglog.kv("引擎参数", max_gen_tokens=maxgen,
+                    init_token_len=self._init_token_len,
+                    temperature=getattr(p, "temperature", None),
+                    greedy=bool(getattr(p, "greedy", False)))
         self._bind.lib.HIAI_LLMEngine_Context_SetMaxGenTokens(ctx, maxgen)
 
         # ---- 采样参数：**必须每个请求显式下发** ----
@@ -748,6 +755,9 @@ class HiaiBackend(EngineBackend):
         #   引擎自己分词（tokenizer 由 InitOption_SetTokenizer 给它），
         #   因此**不需要** Prompt_SetTokenIds，也不必自己解码。
         text = request.prompt.encode("utf-8")
+        # ★ 诊断点：送给引擎的【完整原文】（含模板渲染出的所有特殊 token）
+        debuglog.kv("引擎原始输入", chars=len(text))
+        debuglog.log("引擎原始输入全文", text)
         if self._bind.lib.HIAI_LLMEngine_Context_SetPrefixPrompt(ctx, text) != 0:
             raise GenerationError("Context_SetPrefixPrompt 失败")
         # 服务在此设 initTokenLen（= 模型配置里的 initTokenLen）；两参，调用点实锤
@@ -770,6 +780,7 @@ class HiaiBackend(EngineBackend):
                     yield GenerationChunk(text=_q.get(), index=_idx)
                     _idx += 1
                 if _ev_fail.is_set():
+                    debuglog.log("引擎失败", "失败回调被触发（流式尾段）")
                     raise GenerationError(_gen_failure_msg(None, self._context_length))
             while not _q.empty():
                 yield GenerationChunk(text=_q.get(), index=_idx)
@@ -781,6 +792,11 @@ class HiaiBackend(EngineBackend):
             raise GenerationError(_gen_failure_msg(rc, self._context_length))
 
         stats = self._read_stats(len(_emitted))
+        # ★ 诊断点：引擎吐出的原始文本与最终上报的 finish_reason
+        debuglog.kv("引擎原始输出", chars=len(_emitted),
+                    out_tokens=getattr(stats, "completion_tokens", None),
+                    finish_reason="stop")
+        debuglog.log("引擎原始输出全文", _emitted)
         yield GenerationChunk(index=_idx, finish_reason="stop", stats=stats)
 
 

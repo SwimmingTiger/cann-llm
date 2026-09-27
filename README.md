@@ -94,6 +94,11 @@ scripts/start_server.sh -d /path/to/model_dir -B              # 后台，等就�
 scripts/start_server.sh --status                              # 看状态
 scripts/start_server.sh --stop                                # 停止
 
+# 5) 出问题时的诊断模式
+#    记录 HTTP 请求/响应（含客户端到底带没带 max_tokens）与引擎的
+#    原始输入/输出，写到 .run/debug.log
+scripts/start_server.sh -d /path/to/model_dir --debug
+
 # 4) 切换后端（默认 hiai）
 #    hiai = 系统内部引擎。更快、输出干净、支持停止序列 —— 官方 OMC 包推荐用它
 #    cann = 官方 NDK 后端

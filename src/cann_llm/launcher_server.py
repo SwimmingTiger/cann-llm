@@ -192,6 +192,8 @@ _USAGE = """用法: scripts/start_server.sh [选项]
       --port PORT       监听端口（默认 8000）
   -k, --api-key KEY     API key（设了就要求鉴权）
   -B, --background      后台启动，等就绪后返回
+      --debug           诊断模式：记录 HTTP 请求/响应与引擎的原始输入输出
+                        （写到 .run/debug.log；也可用 CANN_LLM_DEBUG=1 打开）
       --status          查看状态
       --stop            停止后台服务
   -h, --help            显示本帮助
@@ -212,6 +214,7 @@ def parse_args(argv: "List[str]") -> "Dict[str, object]":
         "port": int(env.get("CANN_LLM_PORT") or 8000),
         "api_key": env.get("CANN_LLM_API_KEY") or "",
         "background": False,
+        "debug": False,
         "action": "run",
         "rest": [],
     }
@@ -241,6 +244,10 @@ def parse_args(argv: "List[str]") -> "Dict[str, object]":
             o["port"] = int(val())
         elif a in ("-k", "--api-key"):
             o["api_key"] = val()
+        elif a == "--debug":
+            # 只用来决定"日志写哪" + 在帮助里露出来；参数本身也原样转给服务端
+            o["debug"] = True
+            o["rest"].append(a)
         elif a in ("-B", "--background"):
             o["background"] = True
         elif a == "--status":
@@ -317,6 +324,9 @@ def run_server(root: str, argv: "List[str]") -> int:
     args += list(o["rest"])              # 其余参数原样透传
 
     env = dict(os.environ)
+    if o.get("debug"):
+        # 诊断日志写到运行目录，和 pid/state/server.log 放一起
+        env["CANN_LLM_DEBUG_FILE"] = os.path.join(rundir(root), "debug.log")
     env["PYTHONPATH"] = os.path.join(root, "src") + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env[var] = lib
