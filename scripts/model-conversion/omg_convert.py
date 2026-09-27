@@ -94,36 +94,33 @@ def build_output_type(nlayers: int, dtype: str) -> str:
 
 
 def ensure_glibc_loader(omg_dir: str) -> "Optional[str]":
-    """确保 OMG 需要的 glibc loader 软链存在（幂等），返回做了什么/None。
+    """把 DDK 自带的 glibc loader 软链【直接改指系统的 ld】（幂等）。
 
-    包里的 tools_omg/ld-linux-x86-64-2.35.so.2 是【指向 /tmp 的软链】，而目标
-    默认不存在 ⇒ master/omg 无法执行，OMG 以退出码 127 失败：
+    包里的 tools_omg/ld-linux-x86-64-2.35.so.2 是指向 /tmp/ld-linux-x86-64-2.35.so.2
+    的软链，而那个文件默认不存在 ⇒ master/omg 无法执行，OMG 以退出码 127 失败：
         ./omg: line 196: .../master/omg: cannot execute: required file not found
-    这里从 DDK 自带软链读出目标路径，用宿主的 ld 把目标建出来。
+
+    不去 /tmp 造文件（有些环境 /tmp 只读、或被清理），直接把 DDK 里那条软链
+    重新指向宿主自己的 ld-linux-x86-64.so.2 —— 效果一样，但不留全局状态。
     """
     import glob                                                   # noqa: PLC0415
-    links = glob.glob(os.path.join(omg_dir, "ld-linux-x86-64-*.so.2"))
-    if not links:
+    src = None
+    for cand in ("/usr/lib/ld-linux-x86-64.so.2", "/lib64/ld-linux-x86-64.so.2",
+                 "/lib/ld-linux-x86-64.so.2"):
+        if os.path.exists(cand):
+            src = os.path.realpath(cand)
+            break
+    if not src:
         return None
-    for link in links:
-        target = os.path.realpath(link) if os.path.islink(link) else link
-        # 软链可能指向相对路径，统一成绝对路径
-        if not os.path.isabs(target):
-            target = os.path.join(os.path.dirname(link), target)
-        if os.path.exists(target):
+    for link in glob.glob(os.path.join(omg_dir, "ld-linux-x86-64-*.so.2")):
+        if not os.path.islink(link):
             continue
-        src = None
-        for cand in ("/lib64/ld-linux-x86-64.so.2", "/usr/lib/ld-linux-x86-64.so.2",
-                     "/lib/ld-linux-x86-64.so.2"):
-            if os.path.exists(os.path.realpath(cand)):
-                src = os.path.realpath(cand)
-                break
-        if not src:
-            return None
+        if os.path.exists(os.path.realpath(link)):
+            continue                     # 已经能解析出来，别动
         try:
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            os.symlink(src, target)
-            return f"{target} -> {src}"
+            os.remove(link)
+            os.symlink(src, link)
+            return f"{link} -> {src}"
         except OSError:
             return None
     return None

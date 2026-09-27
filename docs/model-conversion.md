@@ -141,7 +141,9 @@ chmod +x tools/tools_omg/omg tools/tools_omg/master/omg
 # ★ 关键一步：包里的 ld-linux-x86-64-2.35.so.2 是个【指向 /tmp 的软链】，
 #   而那个文件默认不存在 ⇒ 不解这一步，OMG 会以退出码 127 失败：
 #       ./omg: line 196: .../master/omg: cannot execute: required file not found
-ln -snf "$(readlink -f /lib64/ld-linux-x86-64.so.2)" /tmp/ld-linux-x86-64-2.35.so.2
+#   直接把它改指系统的 ld（不要往 /tmp 造文件：有些环境 /tmp 只读或被清理）：
+ln -snf "$(readlink -f /lib64/ld-linux-x86-64.so.2)" \
+        tools/tools_omg/ld-linux-x86-64-2.35.so.2
 
 python3 -m venv venv310 && source venv310/bin/activate
 # ★ 用 3.10 的解释器建 venv（见上表；系统 python3 太新的话 torch 装不上）
