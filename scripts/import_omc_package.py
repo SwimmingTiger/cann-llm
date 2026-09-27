@@ -44,6 +44,16 @@ def log(msg):
     print(f"  {msg}")
 
 
+def ok(msg):
+    """打勾的成功提示（与 scripts/*.sh 的 ok() 同款，不带缩进）。"""
+    print(f"\033[32m✓\033[0m {msg}")
+
+
+def info(msg):
+    """箭头的过程提示（与 scripts/*.sh 的 info() 同款，不带缩进）。"""
+    print(f"\033[36m›\033[0m {msg}")
+
+
 def die(msg):
     print(f"错误：{msg}", file=sys.stderr)
     raise SystemExit(1)
@@ -202,8 +212,8 @@ def main():
         die(f"不是目录: {d}")
     convert(d, args.dry_run)
     log(f"完成 → {d}")
-    log(f"模型目录就绪: {d}")
-    log("试一下:")
+    ok(f"模型目录就绪: {d}")
+    info("试一下:")
     log(f"    scripts/start_chat.sh -d {d}")
     log(f"    scripts/start_server.sh -d {d} --port 8000")
     return 0
