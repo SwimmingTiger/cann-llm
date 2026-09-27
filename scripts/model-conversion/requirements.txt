@@ -1,0 +1,37 @@
+# 模型转换机的 Python 依赖（量化 dopt / 导出 / OMG 装配用）
+#
+# 用法（注意 torch 的 CUDA 轮子只在 pytorch 的索引上，所以要带 --extra-index-url）：
+#
+#     python3.10 -m venv venv310 && source venv310/bin/activate
+#     pip install -r scripts/model-conversion/requirements.txt \
+#         --extra-index-url https://download.pytorch.org/whl/cu121
+#
+# 版本是照"实测跑通 Qwen2.5-1.5B 全流程"的机器固定下来的，别随手升级：
+#   * torch==2.4.0+cu121 —— 导出（torch.onnx.export）是内存峰值，版本不同峰值不同；
+#     换成 2.5.x 在 31 GB 机器上实测被 OOM 杀掉（anon-rss 23 GB）。
+#   * transformers==4.51.0 —— 5.x 会报
+#       ImportError: cannot import name 'LossKwargs' from 'transformers.utils'
+#     （示例代码 npu_tuned_export/npu_tuned_model/qwen2/modeling_qwen2.py 用了它）。
+#   * Python 必须是 3.10（3.11+ 时 torch 的 cu121 轮子不存在）。
+
+torch==2.4.0+cu121
+
+# 导出与图处理
+onnx==1.23.0
+onnxruntime==1.23.2
+onnxsim
+numpy==2.2.6
+safetensors==0.8.0
+PyYAML==6.0.3
+
+# dopt 量化运行时要用的
+tqdm
+datasets
+transformers==4.51.0
+accelerate
+sentencepiece
+protobuf
+pyarrow
+pandas
+aiohttp
+wandb
