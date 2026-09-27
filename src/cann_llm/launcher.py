@@ -225,6 +225,8 @@ def main(argv: "Optional[List[str]]" = None) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print("用法: python -m cann_llm.launcher {chat|server} [参数…]")
         print("      --lldb   在调试器下前台运行（抓崩溃现场）")
+        print("               本机只有 huawei-debug-lldb-server 能正常调试，")
+        print("               找不到会警告并建议从 CodeArts IDE 的终端运行")
         return 0
     what, rest = argv[0], argv[1:]
     # 脚本所在仓库根：src/cann_llm/launcher.py → 上溯三级

@@ -53,6 +53,10 @@ class TestBuildDebugArgv(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual(argv, ["/some/lldb", "--", sys.executable,
                                 "-X", "faulthandler", "-m", "x"])
+        # ★ 没有 huawei-debug-lldb-server 时必须警告：本机只有它能正常调试
+        text = "\n".join(hints)
+        self.assertIn("⚠️", text)
+        self.assertIn("CodeArts", text)
 
     def test_reports_when_no_debugger(self):
         with mock.patch.object(os.path, "exists", lambda p: False), \

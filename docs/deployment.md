@@ -257,7 +257,16 @@ error: 'A' packet returned an error: 8
 
 这是 lldb 经 gdb-remote 协议设置 argv 失败（平台限制）。因此改用系统自带的
 `huawei-debug-lldb-server` 起 gdbserver，再让 lldb 用 `gdb-remote` 接上去。
-脚本自动判断：本机有该 gdbserver 就用它，否则回落到普通 `lldb -- <python>`。
+
+> **本机目前只有 `huawei-debug-lldb-server` 能正常调试。** 找不到它时，脚本会
+> 打印警告（普通 `lldb -- <python>` 会报上面那个 `'A' packet` 错误）并提示
+> **从 CodeArts IDE 的终端运行**；随后仍会尝试普通 lldb —— 别的平台这样是可行的。
+> 路径可用 `CANN_LLM_LLDB_SERVER` 覆盖。
+
+传给调试器的必须是**真二进制**（ELF）：gdbserver 用 `execve` 直接拉起进程、
+不解析 shebang，给 `#!/bin/sh` 包装器会得到 `execve failed: Operation not permitted`。
+正常情况下不会碰到 —— launcher 用的是 `sys.executable`，Python 已经把它解析成
+真二进制了（例如 `python3` 包装器 → `…/bin/python3.12`）。
 
 环境变量：`CANN_LLM_LLDB`（lldb 路径）、`CANN_LLM_LLDB_SERVER`（gdbserver 路径）、
 `CANN_LLM_LLDB_PORT`（默认 5091）、`CANN_LLM_LLDB_BATCH=1`（非交互 run→bt→quit）。

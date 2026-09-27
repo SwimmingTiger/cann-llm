@@ -225,6 +225,8 @@ _USAGE = """用法: scripts/start_server.sh [选项]
       --lldb            在 lldb 下前台启动（抓崩溃现场）。进 lldb 后敲 run，
                         崩溃时 bt 看栈。lldb 路径可用 CANN_LLM_LLDB 指定；
                         设 CANN_LLM_LLDB_BATCH=1 则非交互：run→bt→quit
+                        本机只有 huawei-debug-lldb-server 能正常调试，
+                        找不到会警告并建议从 CodeArts IDE 的终端运行
       --status          查看状态
       --stop            停止后台服务
   -h, --help            显示本帮助

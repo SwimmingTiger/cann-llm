@@ -10,7 +10,10 @@
 
 这是 lldb 经 gdb-remote 协议设置 argv 失败（平台限制），不是被调试程序的问题。
 所以改为在系统自带的 gdbserver 里起进程，再用 lldb 的 `gdb-remote` 接上去。
-其它平台（没有那个 gdbserver）回落到普通的 `lldb -- <python>`。
+
+★ 本机目前**只有 huawei-debug-lldb-server 能正常调试**。找不到它时这里会给出警告
+（普通 `lldb -- <python>` 会报上面那个 `'A' packet` 错误）并建议从 CodeArts IDE 的
+终端运行；随后仍会尝试普通 lldb —— 别的平台这样是可行的。
 """
 from __future__ import annotations
 
@@ -87,11 +90,23 @@ def build_debug_argv(py: str, args: Sequence[str]
         return argv, hints, ""
 
     if os.path.exists(lldb):
+        # ★ 实测：本机目前**只有 huawei-debug-lldb-server 能正常调试** —— 普通 lldb
+        #   直接拉起进程会报 "error: 'A' packet returned an error: 8"。
+        #   这里仍然回退（别的平台没问题），但必须把话说清楚，免得白折腾。
         argv = [lldb, "--", py, "-X", "faulthandler"] + list(args)
-        return argv, [f"在 lldb 下启动：{lldb}"], ""
+        return argv, [
+            f"⚠️ 没找到 {gdbserver}",
+            "     本机目前只有它能正常调试；普通 lldb 直接拉起进程会报",
+            "     error: 'A' packet returned an error: 8。",
+            "     建议从 CodeArts IDE 的终端运行。",
+            f"     仍然尝试：{lldb} -- …",
+        ], ""
 
-    return None, [], (f"找不到调试器（试过 {gdbserver} 与 {lldb}）——"
-                      "用 CANN_LLM_LLDB_SERVER / CANN_LLM_LLDB 指定路径")
+    return None, [], (
+        f"找不到调试器（试过 {gdbserver} 与 {lldb}）。\n"
+        "      本机目前只有 huawei-debug-lldb-server 能正常调试 ——\n"
+        "      建议从 CodeArts IDE 的终端运行；\n"
+        "      或用 CANN_LLM_LLDB_SERVER / CANN_LLM_LLDB 指定路径")
 
 
 def strip_flag(argv: List[str]) -> Tuple[List[str], bool]:
