@@ -476,6 +476,15 @@ my-model/
 里面的数字要和你的模型对上（`num_hidden_layers` / `hidden_size` / `vocab_size` /
 `kv_cache_max_len`），`embedding_*` 两个文件名要和实际文件一致。
 
+> [!WARNING]
+> **不要**自己往 `llm_config` 里加这几个字段：
+> `enable_dynamic_kv_cache` / `is_kv_cache_merge` / `enable_lm_head_opt` / `enable_lm_head_topk`。
+> 它们是**图编译期**决定的；尤其前两个写成 `true` 时，引擎会以为 KV 由它自己管、只准备
+> 9 个输入，而 `.omc` 暴露的是 61 个（28 层的 `past_key/value_in`），启动直接失败：
+> `Executor_Init_Use_Option 返回 1`，日志里是
+> `inputSize not equal inputsDesc.size, inputSize: 9, inputsDesc_ size : 61`。
+> 照着上面的示例（**不写**这几个字段）就是对的。
+
 ### 5.3 `context.json`
 
 生成参数。`max_gen_tokens` 与 `stop_sequence` 每次请求都会被覆盖，这里给的是默认值：
@@ -502,6 +511,15 @@ my-model/
 ```
 
 > `callback_freq: 1` 才会**每生成一个 token 回调一次**（逐字流式的关键）。
+
+> [!IMPORTANT]
+> `api_config.json` 的 `initTokenLen` 与 `context.json` 的
+> `generate_options.init_token_len` 必须**严格小于** `kv_cache_max_len`
+> （相等也不行）。引擎的原话是
+> `set init token len = 2048 error. it should smaller than kvCacheMaxLen 2048`
+> （`mask_and_pos_manager.cpp SetInitTokenLen`）。经验值取**一半**：
+> `kv_cache_max_len = 2048` 时用 `1024`（`python -m cann_llm.modelpkg <模型目录>`
+> 会自动按这个规则写）。
 
 ### 5.4 `tokenizer.json`
 
