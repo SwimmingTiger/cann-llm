@@ -996,3 +996,88 @@ int Context_SetSampleGreedy(ctx, uint8)
 引擎没有导出任何随机数重置接口（`nm -D` 里找不到 `random` / `rng` / `reset`），
 所以长驻服务里想"固定回答"只能把 `temperature` 设 0（贪心解码，
 实测与服务是否长驻无关）。
+
+---
+
+## ★★★ 结论性发现：官方不用 `Executor_CreateFromJson`，用的是 `InitOption` 那条路
+
+### 怎么发现的
+
+Qwen3-8B（8B，官方包，从系统模型管理器的详情页跳转下载）在本项目里**加载即崩**：
+
+```
+libc++abi: terminating … nlohmann::json … type_error.302:
+           type must be string, but is array
+  hiai.py:361  ← Executor_CreateFromJson
+```
+
+用 `lldb_test/` 那套（设备侧 `huawei-debug-lldb-server` + lldb，见
+`~/work/llm/lldb_test/`）抓到调用栈，抛异常处引擎正在**按空格拆字符串**：
+
+```
+unnamed_symbol4777 + 3340:
+    mov w1, #0x20                              # ' '
+    bl  std::string::find(char, unsigned long)
+```
+
+模块内偏移 **0x2335d4**（加载基址实测 0x5556a40000 → 0x5556c735d4）。
+附近 .rodata 是 LoRA 那一摊：`dynamic_lora_rank`(0x39880)、`dynamicLoraRank`、
+`LORA_RANK_SUPPORT…`、`loraConf.loraDat…`。
+
+### 排除过的（都实测）
+
+| 尝试 | 结果 |
+|---|---|
+| `architectures` 改字符串 / 改成 Qwen2 / 删掉 | ✗ 同一个错 |
+| `model_type` 改成 qwen2 | ✗ 同一个错 |
+| 把**我们合成的 executor 里所有数组**都改成字符串 | ✗ 同一个错 |
+| 移走 `omc.omc.loraconf`/`loradata` + 清空 `loraCfgPath` + 删 `lora_rank` | ✗ 正确参数顺序下仍崩 |
+| 换成 20251024 那份包（旧格式，无 LoRA） | ✗ 仍崩 |
+
+⇒ **那个数组不在我们传进去的 JSON 里**；引擎是从别处按自己的规则读的。
+
+### 真正的答案：看官方服务怎么调引擎
+
+```
+readelf --dyn-syms /system/lib64/libhm_model_engine_service.z.so | grep LLMEngine
+```
+
+它导入的创建相关符号是：
+
+```
+HIAI_LLMEngine_InitOption_Create
+HIAI_LLMEngine_InitOption_SetInferType
+HIAI_LLMEngine_InitOption_SetModel
+HIAI_LLMEngine_InitOption_SetTokenizer
+HIAI_LLMEngine_Executor_Create
+HIAI_LLMEngine_Executor_Init_Use_Option      ← ★★★
+```
+
+**没有 `Executor_CreateFromJson`** ✗ —— 官方走的是
+
+```
+InitOption_Create()
+  → InitOption_SetInferType / SetModel / SetTokenizer
+  → Executor_Create()
+  → Executor_Init_Use_Option(exec, option)
+```
+
+**⇒ 我们用的是次要入口（整份 JSON）**，JSON 里任何一处形状不符合它的期望，
+就在解析期抛 `type_error` ✗。这也解释了：
+
+* 那些 `executor.json` / `executor_super.json` **派生文件官方根本不用**
+* 7B 能跑只是**我们的 JSON 恰好对了**，不是这条路本身可靠
+* 官方这套 API 在 `libhiai_llm_engine.so` 里**全部导出**（已 `nm -D` 确认）
+
+### 这与早先的记录吻合
+
+本文档 Round 35 那条「`Init_Use_Option` 需要 JSON 先载入 —— 两条路要一起走」
+就是这条路。当时走到了岔口，最后选了 `CreateFromJson`。
+
+### 下一步（待做）
+
+1. 逆向这几个符号的签名与 `InitOption_SetModel` 需要的
+   `HIAI_LMEngine_ModelInfo` 结构布局（IDA：`~/re/ida_decomp.py`）
+2. 后端改成：Create → SetInferType/SetModel/SetTokenizer → Executor_Create
+   → Init_Use_Option
+3. 回归：7B 仍要能跑；Qwen3-8B 应能加载
