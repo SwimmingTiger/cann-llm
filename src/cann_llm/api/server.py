@@ -173,13 +173,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def _sse_write(self, data: bytes) -> None:
-        # ★ 诊断点：SSE 每一帧。帧可能上千，所以只记前 40 帧的正文，
-        #   之后只计数 —— 否则一个长回答就把日志淹了。
+        # ★ 诊断点：SSE 每一帧都记 —— 不设上限、不汇总、不截断。
+        #   诊断要的就是全量原文；"帮你收一收"等于把要看的东西藏起来。
         self._dbg_frames = getattr(self, "_dbg_frames", 0) + 1
-        if self._dbg_frames <= 40:
-            debuglog.log(f"SSE 帧 #{self._dbg_frames}", data.decode("utf-8", "replace"))
-        elif self._dbg_frames == 41:
-            debuglog.log("SSE 帧", "…后续帧只计数（避免日志被淹）")
+        debuglog.log(f"SSE 帧 #{self._dbg_frames}", data)
         self._sse_raw(data)
 
     def _sse_end(self) -> None:
@@ -282,7 +279,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:                # noqa: N802
         path = self._path()
         debuglog.kv("HTTP 请求", method="GET", path=path,
-                    headers=debuglog.redact(self.headers))
+                    headers=dict(self.headers))
         if path in ("/healthz", "/health"):
             st = self.state
             self._send_json(200, {
@@ -335,7 +332,7 @@ class Handler(BaseHTTPRequestHandler):
         # ★ 诊断点：客户端到底给了什么。max_tokens 有没有带、带了多大，
         #   看这一行就知道（这正是排查"输出被截断"的第一步）。
         debuglog.kv("HTTP 请求", method="POST", path=path,
-                    headers=debuglog.redact(self.headers))
+                    headers=dict(self.headers))
         debuglog.log("请求体（原始 JSON）", json.dumps(body, ensure_ascii=False))
         try:
             if path == "/v1/chat/completions":

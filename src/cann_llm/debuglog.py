@@ -10,6 +10,11 @@
 为什么单独一个模块：``api/server.py`` 与 ``backends/hiai.py`` 都要打点，
 而它们不该互相 import。默认关闭 —— 不开关就不产生任何输出。
 
+★ **不做任何过滤、拦截、改写、限制**：请求体、请求头、每一帧 SSE、引擎的原始
+  输入输出，全部原样写入。诊断的价值就在完整原文，任何"帮你收一收"都是在藏东西。
+  ⚠️ 因此日志里**会包含**请求头里的 `Authorization` / API key 等敏感值 ——
+  这是刻意的（用户要求），别把 debug 日志随手贴出去或提交进版本库。
+
 开启方式（任一）::
 
     server --debug
@@ -22,19 +27,25 @@ import os
 import sys
 from typing import Any, Dict, Optional
 
-__all__ = ["enabled", "enable", "log", "kv", "clamp", "redact", "summary"]
+__all__ = ["enabled", "enable", "log", "kv", "log_file"]
 
 _LOGGER_NAME = "cann_llm.debug"
 
-#: 单条打点最大字符数 —— 日志是给人看的，不要把一个 4 万字的 prompt 全塞进去
-CLAMP = 4000
-
-#: 这些请求头不能进日志（密钥）
-_SECRET_HEADERS = {"authorization", "x-api-key", "api-key", "cookie", "proxy-authorization"}
-
-
 def _logger() -> logging.Logger:
     return logging.getLogger(_LOGGER_NAME)
+
+
+def _text(data: bytes) -> str:
+    r"""bytes → str，**不丢任何字节**。
+
+    用 ``backslashreplace``：真正的 UTF-8 文本原样通过；万一有坏字节，
+    也变成 ``\xNN`` 留在日志里，而不是被替换成 ``?`` 抹掉。
+    """
+    return data.decode("utf-8", "backslashreplace")
+
+
+def _as_text(v: Any) -> str:
+    return _text(v) if isinstance(v, (bytes, bytearray)) else (v if isinstance(v, str) else str(v))
 
 
 def enabled() -> bool:
@@ -53,13 +64,26 @@ def enable(stream: Optional[Any] = None, path: Optional[str] = None) -> None:
     """
     lg = _logger()
     lg.setLevel(logging.DEBUG)
-    if not lg.handlers:
-        if path:
-            h: logging.Handler = logging.FileHandler(path, encoding="utf-8")
-        else:
-            h = logging.StreamHandler(stream or sys.stderr)
-        h.setFormatter(logging.Formatter("%(asctime)s [debug] %(message)s", "%H:%M:%S"))
-        lg.addHandler(h)
+    target = path or getattr(stream or sys.stderr, "name", None) or id(stream or sys.stderr)
+    # ★ 目标变了就要换 handler。原来写成 `if not lg.handlers:` —— 已经挂过就直接
+    #   返回，于是 enable(stream=别的流) 变成空操作（单元测试里被这条坑到：
+    #   缓冲一直是空的，因为日志写进了先前那个 handler）。
+    if lg.handlers and getattr(lg, "_cann_llm_target", None) == target:
+        lg.propagate = False
+        return
+    for h in list(lg.handlers):
+        lg.removeHandler(h)
+        try:
+            h.close()
+        except Exception:            # noqa: BLE001
+            pass
+    if path:
+        h: logging.Handler = logging.FileHandler(path, encoding="utf-8")
+    else:
+        h = logging.StreamHandler(stream or sys.stderr)
+    h.setFormatter(logging.Formatter("%(asctime)s [debug] %(message)s", "%H:%M:%S"))
+    lg.addHandler(h)
+    lg._cann_llm_target = target       # type: ignore[attr-defined]
     lg.propagate = False
 
 
@@ -72,45 +96,23 @@ def log_file() -> Optional[str]:
 
 
 def log(section: str, text: Any = "") -> None:
-    """打一条。未开启时什么都不做（调用方不必先判断）。"""
+    """打一条。未开启时什么都不做（调用方不必先判断）。
+
+    ★ 内容**原样写出**：不截断、不过滤、不改写。
+      诊断的价值就在原文 —— 任何"帮你收一收"都是在藏东西。
+    """
     if not enabled():
         return
-    _logger().debug("── %s ──\n%s", section, clamp(text))
+    if isinstance(text, (bytes, bytearray)):
+        text = _text(bytes(text))
+    _logger().debug("── %s ──\n%s", section, text)
 
 
 def kv(section: str, **items: Any) -> None:
-    """把一组键值打成 ``k=v`` 行（值过长会被截断）。"""
+    """把一组键值打成 ``k = v`` 行。**值原样写出，不截断。**"""
     if not enabled():
         return
-    body = "\n".join(f"    {k} = {clamp(v, 400)}" for k, v in items.items())
+    body = "\n".join(f"    {k} = {_as_text(v)}" for k, v in items.items())
     _logger().debug("── %s ──\n%s", section, body)
 
 
-def clamp(text: Any, limit: int = CLAMP) -> str:
-    """截断到 ``limit`` 字符（并标出原长度）—— 日志要能看，不能把内存写爆。"""
-    if isinstance(text, (bytes, bytearray)):
-        text = bytes(text).decode("utf-8", "replace")   # 引擎的 prompt 是 bytes
-    s = text if isinstance(text, str) else str(text)
-    if len(s) <= limit:
-        return s
-    return f"{s[:limit]}…[已截断，原文 {len(s)} 字符]"
-
-
-def redact(headers: Any) -> Dict[str, str]:
-    """请求头进日志前把密钥抹掉。
-
-    打印原始头是**故意**的（诊断时需要），但密钥不能落盘 —— 这条不能省。
-    """
-    out: Dict[str, str] = {}
-    try:
-        items = headers.items()
-    except AttributeError:
-        return out
-    for k, v in items:
-        out[str(k)] = "***已隐去***" if str(k).lower() in _SECRET_HEADERS else str(v)
-    return out
-
-
-def summary(d: Dict[str, Any]) -> str:
-    """把字典收成一行（用于 SSE 帧那样的短打点）。"""
-    return " ".join(f"{k}={clamp(v, 120)}" for k, v in d.items())
