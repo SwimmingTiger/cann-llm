@@ -95,9 +95,13 @@ def _gen_from_llm(llm: Dict[str, Any], model_dir: str,
                                    int(llm.get("max_io_tokens") or 32768)
                                    - min(2048, kv))),
         "repetitionPenalty": 1.1,
-        # ★ initTokenLen ≠ kv_cache_max_len：官方 7B 包是 kv=4096 / initTokenLen=2048。
-        #   填成 kv 会让引擎内部的 MaskAndPosManager->SetInitTokenLen 失败。
-        "initTokenLen": min(2048, kv),
+        # ★ initTokenLen 必须【严格小于】kv_cache_max_len —— 引擎的原话是
+        #   "set init token len = 2048 error. it should smaller than kvCacheMaxLen 2048"
+        #   （mask_and_pos_manager.cpp SetInitTokenLen），等于也会失败。
+        #   官方 7B 是 kv=4096 / initTokenLen=2048，正好取一半。
+        #   ⚠ 这里原来写的是 min(2048, kv)：kv=2048 时它给出 2048 —— 与 kv 相等，
+        #     于是 --kv-len ≤ 2048 的模型【必然】加载失败（实测踩过）。
+        "initTokenLen": max(1, min(2048, kv // 2)),
         "stopSeq": llm.get("stop_sequence") or ["<|im_end|>", "<|endoftext|>"],
     }
 

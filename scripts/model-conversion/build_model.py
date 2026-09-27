@@ -350,8 +350,15 @@ def main():
     else:
         log("警告：没找到 normalize_tokenizer_merges.py，请手工确认 merges 格式")
 
+    context_json = json.loads(json.dumps(CONTEXT_JSON))      # 深拷贝，别改模板
+    # init_token_len 必须与 api_config 的 initTokenLen 一致，且严格小于 kv：
+    # 模板里写死的 0 / 128 既与 kv 无关，也不符合引擎对 MaskAndPosManager 的要求。
+    context_json["generate_options"]["init_token_len"] = max(1, min(2048, args.kv_len // 2))
+    context_json["generate_options"]["max_gen_tokens"] = min(
+        5000, 4096 - context_json["generate_options"]["init_token_len"])
+    context_json["generate_options"]["stop_sequence"] = ["<|im_end|>", "<|endoftext|>"]
     with open(os.path.join(out_dir, "context.json"), "w") as f:
-        json.dump(CONTEXT_JSON, f, indent=4, ensure_ascii=False)
+        json.dump(context_json, f, indent=4, ensure_ascii=False)
 
     executor = {
         "version": 1,
