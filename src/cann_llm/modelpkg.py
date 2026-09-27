@@ -150,8 +150,14 @@ def build_package_files(model_dir: str,
     mj = _model_json_from_llm(llm)
     # 把推出来的字段回填进 executor.json 的 llm_config（build_configs 以它为基底）
     llm.setdefault("num_attention_heads", mj.get("num_attention_heads"))
-    # 文件名取模型名（build_configs 会挑非派生的那份 .json）
-    return api, mj, f"{model_name}.json"
+    # ★ 文件名必须与 **.omc 同名**（不是目录名）：引擎建 Executor 时自己按
+    #   `modelPath` 去掉扩展名 + ".json" 去找这份配置
+    #   （`InitOptionPacker::GetConfigFilePath`，反编译见
+    #   docs/hiai-backend-handoff.md 最后一节）。目录名与 omc 名不一致的目录
+    #   （例：`models/qwen25_coder_7b_omc1024/qwen7b.omc`）按目录名写就会找不到。
+    omc = str(api.get("modelPath") or "")
+    stem = os.path.splitext(omc)[0] if omc else ""
+    return api, mj, f"{stem or model_name}.json"
 
 
 def write_package_files(model_dir: str,

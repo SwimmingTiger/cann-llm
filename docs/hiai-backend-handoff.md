@@ -1114,6 +1114,9 @@ HIAI_LLMEngine_Executor_Create / Init_Use_Option / InitGraph_Use_Option
 
 ### 实现前还需确认的
 
+> ✅ **这四条已全部查清、后端已实现并实测通过 —— 见本文档最后一节
+> 「官方那条路已打通（Round 100）」。** 下面是提问当时的原文，保留以便对照。
+
 1. `InitOption_SetTokenizer` 第 2/3 参是 `(const char*, size_t)` 还是别的组合
    （从 libc++ `std::string` 取 data/len 的次序要与反编译逐条对上）
 2. `SetModelPath` / `SetWeightDir` / `SetUserData` 的签名
@@ -1122,3 +1125,184 @@ HIAI_LLMEngine_Executor_Create / Init_Use_Option / InitGraph_Use_Option
    —— 候选：`SetUserData`（可能是 JSON 串）、或 `InitGraph_Use_Option` /
    `InitWeight_Use_Option`。**这是实现的关键未知点。**
 4. `Init_Use_Option` 的返回值语义与失败时该看哪条日志
+
+---
+
+# ★★★★★ 官方那条路已打通（Round 100）：7B 与 Qwen3-8B 都能跑
+
+上面那四个「实现前还需确认的」**全部查清了**（两个途径：引擎侧反编译 + 官方服务侧
+反编译；再在设备上逐模型单进程实测）。后端已改为这条路，旧入口
+`Executor_CreateFromJson` 不再被调用。
+
+## 一、四个待确认项 —— 逐条实证
+
+### 1. `InitOption_SetTokenizer` 的签名：`(opt, int tokenizerType, const char* path)`
+
+引擎侧反编译 `libhiai_llm_engine.so` **@0xfc118**：
+
+```c
+__int64 __fastcall HIAI_LLMEngine_InitOption_SetTokenizer(__int64 a1, int a2, __int64 a3)
+{
+  if ( a1 ) {
+    if ( a3 ) {
+      *(_DWORD *)(a1 + 4) = a2;
+      std::__n1::basic_string<...>::assign(a1 + 8, a3);   // ← a3 一路进 assign
+      return 0;
+    }
+    ... "tokenizerPath" "null, return FAIL."
+```
+
+`a3` 直接喂给 `std::string::assign` ⇒ 是 **`const char*`**，不是
+`(ptr, len)` 那一对。★ **这意味着那个 C++ shim 完全不需要了** —— 旧记录里
+`hiai_shim.c` 存在的理由是"要自己拼一个真正的 `std::string` 塞进 ModelInfo"，
+而官方 API 本来就直接收 C 字符串（引擎自己 `assign` 出一份）。
+
+调用点佐证：官方服务 `LargeModelEngineBase::SetInferTypeAndTokenizer`（@0x1df2b8）里
+`HIAI_LLMEngine_InitOption_SetTokenizer(a2, v12, v11)`，`v11` 就是
+`std::string::c_str()`。
+
+### 2. `SetModelPath` / `SetWeightDir` / `SetUserData` 的签名
+
+| 导出符号 | 地址 | 反编译出的行为 | 结论 |
+|---|---|---|---|
+| `LMEngine_ModelInfo_SetModelPath` | 0x2cba9c | `std::string::assign(mi+16, a2)` | `(mi, const char*)` |
+| `LMEngine_ModelInfo_SetWeightDir` | 0x2cbb20 | `std::string::assign(mi+40, a2)` | `(mi, const char*)` |
+| `LMEngine_ModelInfo_SetModelType` | 0x2cbc28 | `*mi = a2` | `(mi, int)` |
+| `LMEngine_ModelInfo_SetUserData` | 0x2cbba4 | `*(mi+88)=a2; *(mi+96)=a3` | `(mi, void*, size_t)` |
+| `ModelInfo_Create` | 0x2cb8d8 | `new(0x70)`，+16/+40/+64 三个 `std::string` 置空 | 结构见下 |
+
+```c
+struct HIAI_LMEngine_ModelInfo {        // 0x70 = 112 字节
+    int64_t     model_type;             // +0
+    std::string model_path;             // +16
+    std::string weight_dir;             // +40
+    std::string preprocessor_cfg_path;  // +64   （由 SetPreprocessorConfigPath 填）
+    void       *user_data;              // +88   ┐ SetUserData(ptr, len)
+    size_t      user_data_len;          // +96   ┘
+    int32_t     model_cache_strategy;   // +104
+};
+```
+
+★ `SetUserData` 收的是 **`(void*, size_t)` 裸缓冲区**，不是字符串 ——
+所以它**不是** llm_config 的入口（候选 C 排除）。而且
+`libai_large_model_enginesvr.z.so` / `libhm_model_engine_service.z.so` 两个服务
+**都没有导入它**。两个服务实际导入的 ModelInfo 系列只有
+`Create / Destroy / SetModelPath / SetWeightDir`（前者多一个
+`SetModelType / SetModelBuffer / SetPreprocessorConfigPath`）。
+
+### 3. ★★ `llm_config` 那些数值从哪个入口进 —— 答案是「引擎自己去读文件」
+
+既不是 `SetUserData`，也不是 `InitGraph_Use_Option` / `InitWeight_Use_Option`。
+真正的机制在 `InitOptionPacker` 里，两条路**都会**先做同一件事：
+
+```c
+// InitOptionPacker::SetInitOption(option)                        @0x12f684
+// （= 没走过 CreateFromJson 时走的那条；compare: SetInitOptionByJson @0x130288）
+GetConfigFilePath(modelInfo->modelPath, configFile_);   // ← 推出配置文件路径
+FileUtil::LoadToBuffer(&buf, configFile_);              // ← 从磁盘读它
+nlohmann::json j = parse(buf);                          // ← 这就是 llm_config
+```
+
+而 `GetConfigFilePath`（**@0x130088，反编译**）只做一件事：
+
+```c
+i = model_path.rfind('.', -1);
+if (i == -1) { log("model config path error"); return FAIL; }
+out = model_path.substr(0, i) + ".json";
+```
+
+⇒ `qwen3_8b_ceval_g256.omc` → **`qwen3_8b_ceval_g256.json`**，
+`qwen7b.omc` → `qwen7b.json`。
+
+**这就是"官方包里模型配置与 `.omc` 同名"这条命名约定的由来** ——
+引擎按约定自己去读，用户不必（也无法）通过 API 把那些数值传进去。
+所以：
+
+* `executor.json` / `executor_super.json` 这类派生文件官方确实不用 ✓（旧结论对了）
+* 我们**合成**的 JSON 在官方这条路上根本不会被读 —— JSON 入口（`CreateFromJson`）
+  才是那个"额外"的功能，它把 llm_config 直接塞进 `llmConfig_` 成员
+* 哪条路走哪个 packer 由 `EngineExecutorImpl` 的一个字节（`+51`）决定：
+  `SetJsonParam` 会把它置 1 → `Init` 里走 `SetInitOptionByJson`；
+  没置 1（= `Executor_Create` + `Init_Use_Option`）→ 走 `SetInitOption`。
+  （`sub_1129B4` = `Init`，反编译 @0x1129b4 第 108–111 行就是这两个分支）
+
+### 4. `Init_Use_Option` 的返回值语义与失败时看哪条日志
+
+* **0 = 成功**，非 0 = 失败（`HIAI_LLMEngine_SUCCESS` / `FAILURE`）。
+* 它在自己的入口处有两条断言，都是**纯参数检查**，返回值直接来自这里：
+  * `executor` / `initOption` 为空 → 日志 `HIAI_LLMEngine_Executor_Init_Use_Option(450/451)`
+  * `inferType == 0` 时还要求 **`modelInfo->weightDir` 非空**（`@0xfc750`，
+    测 `.size()`），为空 → 报
+    `"initOptionImpl->modelInfo->weightDir.size() > 0" "false, return ..."`
+    （`llm_engine_executor.cpp:455`）
+* 再往里（`Init` @0x1129b4）失败会打 `AI_INFRA` 级别的
+  `engine_executor_impl.cpp / init_option_packer.cpp` 断言原文，例如
+  `"readConfigBuffer" "null, return FAIL."`（＝ 那个 `<omc 同名>.json` 没读到）。
+* 我们的取法：出错时 `src/cann_llm/enginelog.py` 抓 `hilog -x` **按 pid 过滤**
+  后原样附在异常里（`_engine_log_suffix()`）。本轮实测这条路上没触发过失败日志。
+
+## 二、新实现（`src/cann_llm/backends/hiai.py`）
+
+```python
+opt = InitOption_Create()
+InitOption_SetInferType(opt, inferType)                    # api_config.inferType
+InitOption_SetTokenizer(opt, tokenizerType, tokenizerPath) # api_config 的同名字段
+mi  = LMEngine_ModelInfo_Create()
+LMEngine_ModelInfo_SetWeightDir(mi, api_config.weightDir)  # ★ 不能为空（见上）
+LMEngine_ModelInfo_SetModelPath(mi, api_config.modelPath)
+LMEngine_ModelInfo_SetModelType(mi, 0)                     # = Create 的默认值，见下
+InitOption_SetModel(opt, 0, mi)                            # ★ 第 2 参官方传 0
+exec = Executor_Create()
+Executor_Init_Use_Option(exec, opt)                        # 0 = 成功
+```
+
+参数取值的依据：`InitOption_SetModel(opt, 0, mi)` 的 **0** 和 `modelType` 的取值
+都是从官方服务的调用点直接读出来的
+（`LargeModelEngineBase::LoadEngine` @0x1deb04）：
+
+```c
+v10 = HIAI_LMEngine_ModelInfo_Create();
+ILargeModelEngine::SetEngineModelBuffer(v10, omcVector, <weightDir>, <omcPath>);
+HIAI_LLMEngine_InitOption_SetModel(a4, 0, v10);            // ← 0
+...
+v15 = HIAI_LMEngine_ModelInfo_Create();
+HIAI_LMEngine_ModelInfo_SetModelType(v15, 3);              // ← 3，但这是给【组件】的
+HIAI_LLMEngine_InitOption_SetModelComponent(a4, v15);
+```
+
+而 `SetEngineModelBuffer`（`ILargeModelEngine::SetEngineModelBuffer` @0x1dee08，
+反编译，参数名来自它自己的日志串）证明**基座**只设三样、且**没有** `SetModelType`：
+
+```c
+// SetEngineModelBuffer(ModelInfo* mi, HIAI_LM_Buffer& omc, const string& weightDir, const string& omcPath)
+HIAI_LMEngine_ModelInfo_SetModelBuffer(mi, omc);
+HIAI_LMEngine_ModelInfo_SetWeightDir(mi, weightDir.c_str());   // ← 先 weightDir
+HIAI_LMEngine_ModelInfo_SetModelPath(mi, omcPath.c_str());     // ← 后 modelPath
+```
+
+⇒ 基座 `ModelInfo->modelType` 就是 `ModelInfo_Create` 的清零值 **0**
+（日志也印证：`"...SetEngineModelBuffer weightDir is %s"` / `"omcPath is %s"`，
+两个 `std::string` 的次序就是 `(weightDir, omcPath)`）。
+实测基座给 0、给 3 都 rc=0；实现按官方取证取 **0**（并显式写出来，让
+「调用的符号」与 `SIGS` 声明一一对应 —— 项目那条 `called == declared` 自查法）。
+
+两个生命周期注意点（都写进代码注释了）：
+
+* option / modelInfo 的指针被 executor 长期持有（`Init` 把 option 原样交给了流水线），
+  **不能提前 Destroy**，也不能让它们被 GC 回收 —— 挂在后端实例上。
+* `Context` 仍然每请求新建（`Context_Create()`），输入/输出仍走
+  `SetPrefixPrompt` / `GenerateAsync` / `GetAllGeneration`，采样与停止序列
+  仍按请求 `Context_Set*` 下发 —— **只有建 Executor 这一处换了入口**。
+
+## 三、实测（设备上单进程逐个跑，probe 见 `~/work/llm/.tmp/probe_official.py`）
+
+| 模型 | `Init_Use_Option` | 端到端生成 |
+|---|---|---|
+| `qwen25_coder_7b_omc1024` | **rc=0** | ✓ 中文回答正常 |
+| `Qwen3-8B` | **rc=0** | ✓ 中文回答正常（旧路径在此 abort） |
+| `Qwen3-8B-20251024` | **rc=0** | ✓ 中文回答正常 |
+
+`Executor_CreateFromJson` 对 Qwen3-8B 是**加载即 abort**
+（`nlohmann::json type_error.302`），换到这条路之后不再出现。
+本轮**没有**再复现/复核那次 abort 的精确栈帧（任务前提里已确证），
+所以"为什么 JSON 入口会崩"仍以旧记录为准 —— 本节的结论只管"新入口可用"。

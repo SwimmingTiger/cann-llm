@@ -5,7 +5,16 @@
 ``AIMM::HIAI::HiaiSession``，文件名 ``hiai_session.cpp``）—— **全部使用导出符号**，
 不碰任何内部函数：
 
-    初始化（一次）:  Executor_CreateFromJson(executor_json)
+    初始化（一次）:  opt = InitOption_Create()
+                    InitOption_SetInferType(opt, inferType)
+                    InitOption_SetTokenizer(opt, tokenizerType, tokenizerPath)
+                    mi = LMEngine_ModelInfo_Create()
+                    LMEngine_ModelInfo_SetModelPath(mi, modelPath)
+                    LMEngine_ModelInfo_SetWeightDir(mi, weightDir)
+                    LMEngine_ModelInfo_SetModelType(mi, 0)
+                    InitOption_SetModel(opt, 0, mi)
+                    exec = Executor_Create()
+                    Executor_Init_Use_Option(exec, opt)
     每次推理:        ctx = Context_Create()
                     Context_SetPrefixPrompt(ctx, prompt【文本】)        // hiai_session.cpp:1429
                     Context_SetInitTokenLen(ctx, initTokenLen)          // :1431（两个参数）
@@ -89,6 +98,13 @@ def build_configs(model_dir: str) -> "tuple[Dict[str, Any], Dict[str, Any]]":
     """把官方目录里的两个文件合成引擎要的 executor / context（**超集**）。
 
     返回 ``(executor_dict, context_dict)``；调用方负责 ``json.dumps`` 后传给引擎。
+
+    ★ **只有 context 那一份会真的交给引擎**（走 ``CreateFromContextJson``，与服务一致）。
+      ``executor`` 那份现在【不再】送进引擎 —— 建 Executor 改走官方服务的
+      ``InitOption`` 那条路，模型的结构超参由引擎自己按 ``modelPath`` 去读
+      ``<omc 同名>.json``。这里仍然合成它、``load()`` 仍然读它，是因为
+      ``bos_token_id`` / ``stopSeq`` / ``initTokenLen`` 这几个标量还要用
+      （见 :func:`engine_options` / :func:`config_file_for_model`）。
     """
     f = _find_official_files(model_dir)
     layout = detect_layout(model_dir)
@@ -165,6 +181,44 @@ def build_configs(model_dir: str) -> "tuple[Dict[str, Any], Dict[str, Any]]":
     return executor, context
 
 
+def engine_options(model_dir: str) -> Dict[str, Any]:
+    """``api_config.json`` 里喂给 ``InitOption`` / ``ModelInfo`` 的那几项。
+
+    这是官方服务的做法：它只拿这几项去建 Executor，**模型的结构超参
+    （num_hidden_layers / hidden_size / kv_cache_max_len / embedding 权重文件名 …）
+    不在这里传** —— 引擎自己按 ``modelPath`` 推出配置文件名去读
+    （见 :func:`config_file_for_model`），也就是模型目录里那份与 ``.omc``
+    同名的扁平 ``<model>.json``。
+    """
+    path = os.path.join(model_dir, "api_config.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            api = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise ModelLoadError(f"读不了 {path}: {e}") from e
+    if not isinstance(api, dict):
+        raise ModelLoadError(f"{path} 不是 JSON 对象")
+    return {
+        "inferType": int(api.get("inferType") or 0),
+        "tokenizerType": int(api.get("tokenizerType") or 0),
+        "tokenizerPath": str(api.get("tokenizerPath") or "tokenizer.json"),
+        "modelPath": str(api.get("modelPath") or ""),
+        "weightDir": str(api.get("weightDir") if api.get("weightDir") is not None else "./"),
+    }
+
+
+def config_file_for_model(model_path: str) -> str:
+    """复刻引擎的 ``InitOptionPacker::GetConfigFilePath``（@0x130088，反编译）。
+
+    引擎内部就是：**取最后一个 ``.`` 之前的部分 + ``".json"``**；没有 ``.`` 就报
+    ``model config path error``。所以 ``qwen3_8b_ceval_g256.omc`` →
+    ``qwen3_8b_ceval_g256.json`` —— 这正是官方包里模型配置与 ``.omc`` 同名的原因，
+    也是 llm_config 那条路真正读的文件。
+    """
+    i = model_path.rfind(".")
+    return (model_path[:i] + ".json") if i >= 0 else ""
+
+
 class _HiaiBindings:
     """``libhiai_llm_engine.so`` 的 ctypes 绑定（符号名已按实测映射）。"""
 
@@ -188,6 +242,43 @@ class _HiaiBindings:
             ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]),
         "HIAI_LLMEngine_Context_GetDecodeTimeMs": (
             ctypes.c_int, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]),
+        # ---- 建 Executor：照官方服务（InitOption 那条路），【不用】CreateFromJson ----
+        # 反编译来源：libai_large_model_enginesvr.z.so 的
+        #   OHOS::AI::LargeModelEngineBase::LoadEngine @0x1deb04
+        #       ModelInfo_Create → SetEngineModelBuffer(→ SetModelPath/SetWeightDir)
+        #       → InitOption_SetModel(option, 0, modelInfo)
+        #   OHOS::AI::LargeModelEngineBase::SetInferTypeAndTokenizer @0x1df2b8
+        #       InitOption_SetInferType(option, 0)
+        #       InitOption_SetTokenizer(option, tokenizerType, path)
+        # 参数类型全部来自引擎侧的反编译（不是猜的）：
+        #   InitOption_SetInferType(opt, int)                    @0xfc0c4
+        #   InitOption_SetTokenizer(opt, int, const char*)       @0xfc118
+        #       → 引擎内部 std::string::assign(opt+8, ptr)，第 3 参是【C 字符串】
+        #   InitOption_SetModel(opt, int, ModelInfo*)            @0xfc1a8
+        #   ModelInfo_SetModelPath / SetWeightDir (mi, const char*) @0x2cba9c / 0x2cbb20
+        #   ModelInfo_SetModelType(mi, int)                      @0x2cbc28
+        #   Executor_Create(void)                                @0xfc2b8
+        #   Executor_Init_Use_Option(exec, opt)                  @0xfc750
+        "HIAI_LLMEngine_InitOption_Create": (ctypes.c_void_p, []),
+        "HIAI_LLMEngine_InitOption_SetInferType": (ctypes.c_int, [ctypes.c_void_p, ctypes.c_int]),
+        # ★ 第 3 参必须声明成 c_char_p（引擎自己 assign 出一份 std::string）——
+        #   这正是本后端【不需要】那个 C++ shim 的原因（旧记录里的 shim 是为
+        #   「自己拼 std::string 塞进 ModelInfo」用的，官方 API 直接收 char*）。
+        "HIAI_LLMEngine_InitOption_SetTokenizer": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p]),
+        "HIAI_LLMEngine_InitOption_SetModel": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]),
+        "HIAI_LMEngine_ModelInfo_Create": (ctypes.c_void_p, []),
+        "HIAI_LMEngine_ModelInfo_SetModelPath": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_char_p]),
+        "HIAI_LMEngine_ModelInfo_SetWeightDir": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_char_p]),
+        "HIAI_LMEngine_ModelInfo_SetModelType": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_int]),
+        "HIAI_LLMEngine_Executor_Create": (ctypes.c_void_p, []),
+        "HIAI_LLMEngine_Executor_Init_Use_Option": (
+            ctypes.c_int, [ctypes.c_void_p, ctypes.c_void_p]),
+        # 旧入口：留着（同一条路可用于对照/兜底），但 load() 不再用它。
         "HIAI_LLMEngine_Executor_CreateFromJson": (ctypes.c_void_p, [ctypes.c_char_p]),
         # 服务每个请求都会设这两个（见 libhm_model_engine_service 的符号引用）
         "HIAI_LLMEngine_Context_SetInitTokenLen": (ctypes.c_int, [ctypes.c_void_p, ctypes.c_int]),
@@ -287,6 +378,21 @@ def _ctx_desc(n: int) -> str:
             "本模型的上限未知 —— 模型目录里没找到 kv_cache_max_len")
 
 
+def _engine_log_suffix() -> str:
+    """加载失败时附在异常消息后面的原始日志（与生成失败用的是同一套）。
+
+    加载阶段是最需要日志的地方（缺文件、参数不匹配都在这里暴露）；引擎自己的
+    原话不翻译、不加工，读不到才退回那几条"可能原因"。
+    """
+    from ..enginelog import format_engine_log, recent_engine_log
+    extra = format_engine_log()
+    if not recent_engine_log():
+        extra = ("\n常见可能：\n"
+                 "    · 当前终端没有访问 NPU 的权限（换一个系统终端试试）\n"
+                 "    · 模型目录不完整（缺 <model>.json / 权重 / tokenizer）" + extra)
+    return extra
+
+
 
 
 
@@ -309,6 +415,9 @@ class HiaiBackend(EngineBackend):
         self._bind: Optional[_HiaiBindings] = None
         self._ctx: Optional[int] = None          # 仅代表"最近一次"的 Context
         self._exec: Optional[int] = None
+        # InitOption / ModelInfo：引擎把这两个指针原样存进 executor，必须活到进程结束
+        self._opt: Optional[int] = None
+        self._model_info: Optional[int] = None
         self._ctx_json: bytes = b""               # 每请求用它新建 Context
         self._cb_done = None                       # 回调需长期持有，勿被 GC
         self._cb_fail = None
@@ -349,27 +458,14 @@ class HiaiBackend(EngineBackend):
         # 引擎按相对路径解析模型文件
         os.chdir(self.model_dir)
 
-        # ★ 传 JSON 内容（不是文件名）
-        # ★★ 关键：Context 携带对话状态，**不能跨请求复用** ——
-        #     复用时第二次 Generate 就会产出垃圾（实测：in 变成 1，输出固定胡话）。
-        #     这里只保存 context JSON，每次 generate 新建一个 Context，
-        #     与已验证可用的 C 程序做法一致。
         # ★ 只建 Executor —— 验证过的配方里【不】预先建 Context（预建会 SIGTRAP）。
         #   Context 每请求用 Context_Create()（无参）新建。
+        # ★ 传 JSON 内容（不是文件名）—— 那是 context 那一路，它仍走 CreateFromContextJson
+        #   （服务也是这么做的，见 hiai_session.cpp）。**只有 Executor 换了入口。**
         self._ctx_json = json.dumps(context_cfg).encode()
         self._ctx = None
-        self._exec = self._bind.lib.HIAI_LLMEngine_Executor_CreateFromJson(
-            json.dumps(executor_cfg).encode())
-        if not self._exec:
-            # ★ 加载失败也要附原始日志 —— 缺字段、参数不匹配这类问题都在
-            #   加载阶段暴露，这里才是最需要日志的地方。
-            from ..enginelog import format_engine_log, recent_engine_log
-            extra = format_engine_log()
-            if not recent_engine_log():
-                extra = ("\n常见可能：\n"
-                         "    · 当前终端没有访问 NPU 的权限（换一个系统终端试试）\n"
-                         "    · 模型目录不完整 / executor JSON 有问题" + extra)
-            raise ModelLoadError("Executor 创建失败。" + extra)
+        # 失败时 _create_executor 自己抛 ModelLoadError（附原始日志），不返回 None
+        self._exec = self._create_executor()
 
         # 注：本后端【不需要】自己分词 —— 输入/输出都是明文，
         # 引擎用模型配置里的 tokenizer 自己处理。
@@ -407,11 +503,113 @@ class HiaiBackend(EngineBackend):
                                context_length=self._context_length, chat_template="chatml")
         return self._info
 
+    # ------------------------------------------------------------- 建 Executor
+
+    def _create_executor(self):
+        """按**官方服务**的序列建 Executor（``InitOption`` 那条路）。
+
+        为什么不用 ``Executor_CreateFromJson(整份 JSON)``
+        ------------------------------------------------
+        那是**次要入口**：流量最大的那条路（``libai_large_model_enginesvr`` /
+        ``libhm_model_engine_service``）用的是下面这套逐项 setter，两个服务的导入表里
+        **根本没有** ``Executor_CreateFromJson``。实测差别是决定性的：
+
+        * 走 JSON 入口时，引擎要用我们**合成**的 executor JSON 去填 ``llmConfig_``；
+          Qwen3-8B 的 ``<model>.json`` 里 ``architectures`` 是数组，引擎在 LoRA
+          相关代码里按字符串取它 → ``nlohmann::json type_error.302`` 直接 abort。
+        * 走这条路时引擎**不读我们拼的 JSON**，而是自己按 ``modelPath`` 去掉扩展名
+          ＋ ``.json`` 去找模型自带的那份扁平 ``<model>.json``
+          （``InitOptionPacker::GetConfigFilePath`` @0x130088，反编译见
+          :func:`config_file_for_model`）。7B / 8B 两种情况实测都 rc=0。
+
+        参数取值（都来自反编译，不是猜的）
+        ----------------------------------
+        * ``InitOption_SetModel(opt, 0, mi)`` —— 第 2 参官方传 **0**
+          （``LargeModelEngineBase::LoadEngine`` @0x1deb04 的调用点实锤）
+        * ``ModelInfo->modelType`` 官方**不设**（保持 ``ModelInfo_Create`` 的清零值 0）——
+          官方的 ``SetEngineModelBuffer``（@0x1dee08，反编译）只做三件事：
+          ``SetModelBuffer`` → ``SetWeightDir`` → ``SetModelPath``，**没有** ``SetModelType``；
+          那个 ``SetModelType(..., 3)`` 是给 **lmhead 组件** 的（同一个 LoadEngine 里，
+          设置完紧接着 ``SetModelComponent``）。实测基座给 0 与给 3 都能 rc=0，
+          这里按官方取证取 0。（``[3,121)`` 那条断言是 ``SetModelComponent`` 自己的。）
+        * ``weightDir`` **不能为空** —— ``Init_Use_Option`` 自己会断言
+          ``initOptionImpl->modelInfo->weightDir.size() > 0``，空了直接返回失败
+        """
+        assert self._bind is not None
+        lib = self._bind.lib
+
+        opts = engine_options(self.model_dir)
+
+        # 引擎按 modelPath 推配置文件，推不出来 / 文件不在 → 到引擎里只会得到一句
+        # "readConfigBuffer null"，在这里先说清楚是哪个文件。
+        cfg_name = config_file_for_model(opts["modelPath"])
+        if not cfg_name:
+            raise ModelLoadError(
+                f"api_config.json 的 modelPath={opts['modelPath']!r} 里没有 '.'，"
+                f"引擎推不出模型配置文件（GetConfigFilePath 会报 model config path error）")
+        if not os.path.isfile(cfg_name):
+            raise ModelLoadError(
+                f"引擎要读的模型配置文件不存在：{cfg_name}\n"
+                f"    （它由 api_config.json 的 modelPath={opts['modelPath']!r} "
+                f"去掉扩展名 + .json 得来）\n"
+                f"    补齐：python -m cann_llm.modelpkg {self.model_dir}")
+        if not opts["weightDir"]:
+            raise ModelLoadError(
+                f"api_config.json 的 weightDir 是空的；引擎的 Init_Use_Option 会直接失败")
+
+        # ★ option / modelInfo 的生命周期必须覆盖整个进程：引擎把这两个指针原样存进
+        #   executor（Init 里把 option 传给了流水线），提前 Destroy 就是 use-after-free。
+        #   一次 load 漏 96 + 112 字节，无所谓；这里挂在 self 上防止被 GC 回收。
+        opt = lib.HIAI_LLMEngine_InitOption_Create()
+        if not opt:
+            raise ModelLoadError("InitOption_Create 返回空。")
+        mi = lib.HIAI_LMEngine_ModelInfo_Create()
+        if not mi:
+            raise ModelLoadError("LMEngine_ModelInfo_Create 返回空。")
+
+        steps = (
+            ("InitOption_SetInferType",
+             lambda: lib.HIAI_LLMEngine_InitOption_SetInferType(opt, opts["inferType"])),
+            ("InitOption_SetTokenizer",
+             lambda: lib.HIAI_LLMEngine_InitOption_SetTokenizer(
+                 opt, opts["tokenizerType"], opts["tokenizerPath"].encode())),
+            # 官方 SetEngineModelBuffer 的次序：weightDir 在 modelPath 之前
+            ("ModelInfo_SetWeightDir",
+             lambda: lib.HIAI_LMEngine_ModelInfo_SetWeightDir(
+                 mi, opts["weightDir"].encode())),
+            ("ModelInfo_SetModelPath",
+             lambda: lib.HIAI_LMEngine_ModelInfo_SetModelPath(
+                 mi, opts["modelPath"].encode())),
+            # 显式写 0 == ModelInfo_Create 的清零值 == 官方基座的实际值。
+            # 写出来是为了让「代码里调用的符号」与 SIGS 声明的一一对应
+            # （项目自查法要求 called == declared；见 handoff 文档末尾那节）。
+            ("ModelInfo_SetModelType",
+             lambda: lib.HIAI_LMEngine_ModelInfo_SetModelType(mi, 0)),
+            ("InitOption_SetModel",
+             lambda: lib.HIAI_LLMEngine_InitOption_SetModel(opt, 0, mi)),
+        )
+        for name, call in steps:
+            rc = call()
+            if rc != 0:
+                self._opt, self._model_info = opt, mi
+                raise ModelLoadError(f"{name} 返回 {rc}（0 才是成功）"
+                                     + _engine_log_suffix())
+
+        self._opt, self._model_info = opt, mi
+
+        ex = lib.HIAI_LLMEngine_Executor_Create()
+        if not ex:
+            raise ModelLoadError("Executor_Create 返回空。" + _engine_log_suffix())
+        rc = lib.HIAI_LLMEngine_Executor_Init_Use_Option(ex, opt)
+        if rc != 0:
+            raise ModelLoadError(
+                f"Executor_Init_Use_Option 返回 {rc}（0 才是成功）。" + _engine_log_suffix())
+        return ex
+
     def close(self) -> None:
         # 与 cann 后端同样的顾虑：引擎的 Destroy 在退出阶段不稳，保守起见不主动调用
         self._ctx = None
         self._exec = None
-
     @property
     def supports_streaming(self) -> bool:
         # ★ 流式：SetOnSomeTokenGenerateDoneFunc 每生成一个 token 回调一次。

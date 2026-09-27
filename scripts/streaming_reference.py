@@ -1,5 +1,13 @@
 """★ 已验证可用的 hiai 流式参考实现（逐 token，实测 30 token → 30 个分片）。
 
+⚠ 这份脚本是**当时**的形态，只有"流式"那部分仍然权威。两处已经过时，别照抄：
+  * 建 Executor 用的是 `Executor_CreateFromJson` —— 后端现在走官方服务的
+    `InitOption_*` + `Executor_Init_Use_Option` 那条路（见
+    docs/hiai-backend-handoff.md 最后一节、以及 backends/hiai.py 的 `_create_executor`）
+  * `PUSH` / `RUN` 那两个 `base + 偏移` 是**内部函数**，后端已全部弃用
+    （那套东西随系统升级就失效）
+  输入方式也从 `Prompt_SetTokenIds` 换成了 `Context_SetPrefixPrompt(文本)`。
+
 在设备上运行：
     PYTHONPATH=<repo>/src <设备自带 python3.12> scripts/streaming_reference.py
 

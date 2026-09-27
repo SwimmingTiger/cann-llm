@@ -6,7 +6,7 @@
 |---|---|
 | 运行时依赖 | `dependencies = []` —— **只用标准库 + ctypes** ✓ |
 | 是否需要编译 | **不需要** ✓（没有 ext_modules、没有 CMake、没有编译目标，且**不含任何 C/C++ 源文件**）|
-| C/C++ 代码 | **没有** ✓ —— 曾有一个实验用的 `hiai_shim.c`，因最终走 `CreateFromJson` 而用不到，**已删除** |
+| C/C++ 代码 | **没有** ✓ —— 曾有一个实验用的 `hiai_shim.c`，**已删除**。它当初的用途是"自己拼一个真正的 `std::string` 塞进 ModelInfo"；后来发现官方 API（`LMEngine_ModelInfo_SetModelPath/SetWeightDir`）本来就收 C 字符串，用不着它 |
 | 原生库从哪来 | **系统自带**：`/system/lib64/libhiai_llm_engine.so`（hiai 后端）与 `/system/lib64/ndk/libcann_llm_engine.so`（cann 后端）|
 
 **所以"部署"= 把 Python 代码 + 模型文件放到设备上，然后用设备上的 Python 跑。**
@@ -75,7 +75,11 @@ brew python3 的 NEEDED：libmusl_compat.so · libintl.so.8 · libpython3.14.so.
 | 步骤 | 实测结果 |
 |---|---|
 | `ctypes.CDLL("/system/lib64/libhiai_llm_engine.so")` | ✅ **成功**（不崩） |
-| 第一次调用引擎的函数（`Executor_CreateFromJson`） | ❌ **Segmentation fault** |
+| 第一次调用引擎的函数（当时是 `Executor_CreateFromJson`，现在是 `InitOption_Create`） | ❌ **Segmentation fault** |
+
+> 上面那条 traceback 是**当时的实测记录**，入口后来换成了 `InitOption_Create`
+> ＋ `Executor_Init_Use_Option`（见 [hiai-backend-handoff.md](hiai-backend-handoff.md)
+> 最后一节）—— 结论不变：**glibc 构建的 Python 跑不动引擎**。
 
 **为什么第一步能过、第二步才崩**：`dlopen` 只做符号绑定，此时引擎还没真正
 用 libc；等它一执行到 `malloc` / `pthread_*` / `std::string` 分配，调用的就是
@@ -125,11 +129,17 @@ qwen25_coder_7b_omc1024/
 └── *.weight / *.embedding_weights   # 权重
 ```
 
-**约 4.3 GB** ✓。后端会自己从 `api_config.json` + `qwen7b.json` **合成**
-executor / context JSON（`build_configs()`），**不需要**任何手工调参文件。
+**约 4.3 GB** ✓。后端**不需要**任何手工调参文件，也不再往引擎里塞合成的 JSON：
+
+* 建 Executor 用**官方服务那套逐项 setter**（`InitOption_*` + `LMEngine_ModelInfo_*`），
+  只吃 `api_config.json` 里的 `inferType` / `tokenizerType` / `tokenizerPath` /
+  `modelPath` / `weightDir` 五项；
+* 模型的结构超参（`num_hidden_layers` / `hidden_size` / `kv_cache_max_len` /
+  embedding 权重文件名 …）由**引擎自己**按 `modelPath` 去掉扩展名 + `.json` 去读
+  —— 也就是上面那个 `qwen7b.json`。所以**这个文件必须与 `.omc` 同名**。
 
 > 复现性提示：`models/<name>/` 下若出现 `executor_super.json` 之类，
-> 那是调查期间的实验产物，**部署时不需要**。
+> 那是调查期间的实验产物，**部署时不需要**（引擎也不会读它）。
 
 ### 步骤 2：放置代码
 
