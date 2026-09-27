@@ -40,6 +40,7 @@ from ..errors import CannLlmError, InvalidRequestError
 from ..types import GenerationParams
 from . import openai as oa
 
+from .reasoning import ThinkSplitter, split_reasoning
 #: 请求体上限（防止误发大文件把内存打满）
 MAX_BODY_BYTES = 4 * 1024 * 1024
 
@@ -374,10 +375,12 @@ class Handler(BaseHTTPRequestHandler):
 
         result = aggregate(st.backend.generate(GenerationRequest(prompt=prompt, params=params)))
 
+        # ★ 思考归 reasoning_content，正文归 content（非流式同一条规矩）
+        reasoning, content = split_reasoning(result.text)
         tool_calls = None
         if req.tools:
             # 按 OpenAI 标准：把 tool_calls 交给客户端自行执行
-            parsed = parse_tool_calls(result.text)
+            parsed = parse_tool_calls(content)
             tool_calls = parsed.tool_calls or None
             if tool_calls:
                 result = replace(result, text=parsed.text, finish_reason="tool_calls")
@@ -385,7 +388,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, oa.chat_completion_response(
             req_id=oa.new_id("chatcmpl"), model=req.model or st.cfg.model.resolved_id,
             text=result.text, finish_reason=result.finish_reason,
-            usage=oa.usage_payload(result.stats), tool_calls=tool_calls))
+            usage=oa.usage_payload(result.stats), tool_calls=tool_calls,
+              reasoning=reasoning))
 
     def _stream_chat(self, req: oa.ChatCompletionRequest, prompt: str,
                      params: GenerationParams) -> None:
@@ -415,22 +419,37 @@ class Handler(BaseHTTPRequestHandler):
             stats = None
             raw_parts: List[str] = []
             flt = StreamFilter() if use_tools else None
+            # ★ 思考段与正文分开推送：pi-ai / llama.cpp / vLLM 都从 delta.reasoning_content
+            #   读思考，正文仍读 delta.content。
+            think = ThinkSplitter()
+
+            def _emit(pieces) -> None:
+                """一次切分结果发出去：思考 → reasoning_content，正文 → content。"""
+                if pieces.reasoning:
+                    self._sse_write(oa.sse_data(oa.chat_completion_chunk(
+                        req_id=req_id, model=model, created=created,
+                        delta={"reasoning_content": pieces.reasoning})))
+                body = pieces.content
+                if not body:
+                    return
+                # 工具标记只在【正文】里找：思考段里的 <tool_call> 不算调用
+                if flt is not None:
+                    raw_parts.append(body)
+                    body = flt.feed(body)
+                if body:
+                    self._sse_write(oa.sse_data(oa.chat_completion_chunk(
+                        req_id=req_id, model=model, created=created,
+                        delta={"content": body})))
+
             for chunk in st.backend.generate(GenerationRequest(prompt=prompt, params=params)):
                 if chunk.text:
-                    if flt is not None:
-                        raw_parts.append(chunk.text)
-                        piece = flt.feed(chunk.text)
-                    else:
-                        piece = chunk.text
-                    if piece:
-                        self._sse_write(oa.sse_data(oa.chat_completion_chunk(
-                            req_id=req_id, model=model, created=created,
-                            delta={"content": piece})))
+                    _emit(think.feed(chunk.text))
                 if chunk.stats is not None:
                     stats = chunk.stats
                 if chunk.finish_reason:
                     finish_reason = chunk.finish_reason
 
+            _emit(think.flush())   # 缓冲里可能压着半个标记/未闭合思考段
             if flt is not None:
                 parsed = parse_tool_calls("".join(raw_parts))
                 if parsed.tool_calls:

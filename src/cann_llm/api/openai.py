@@ -353,7 +353,7 @@ def chat_completion_response(*, req_id: str, model: str, text: str,
                              finish_reason: str, usage: Optional[Dict[str, int]] = None,
                              created: Optional[int] = None,
                              tool_calls: Optional[Sequence[Any]] = None,
-                             extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                             extra: Optional[Dict[str, Any]] = None, reasoning: str = "") -> Dict[str, Any]:
     """非流式 ``chat.completion``。
 
     :param tool_calls: 非空时按 OpenAI 规范放进 message（客户端需自行执行），
@@ -361,6 +361,9 @@ def chat_completion_response(*, req_id: str, model: str, text: str,
     :param extra: 非标准扩展字段（以 ``x_`` 开头），客户端一般会忽略。
     """
     message: Dict[str, Any] = {"role": "assistant", "content": text or None}
+    if reasoning:
+        # 思考单独一个字段（pi-ai / llama.cpp / vLLM 同款）；没有思考的模型不出现该字段
+        message["reasoning_content"] = reasoning
     if tool_calls:
         message["tool_calls"] = [tc.to_openai() for tc in tool_calls]
         message["content"] = text or None
