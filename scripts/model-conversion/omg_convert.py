@@ -92,6 +92,43 @@ def build_output_type(nlayers: int, dtype: str) -> str:
     return ";".join(parts)
 
 
+
+def ensure_glibc_loader(omg_dir: str) -> "Optional[str]":
+    """确保 OMG 需要的 glibc loader 软链存在（幂等），返回做了什么/None。
+
+    包里的 tools_omg/ld-linux-x86-64-2.35.so.2 是【指向 /tmp 的软链】，而目标
+    默认不存在 ⇒ master/omg 无法执行，OMG 以退出码 127 失败：
+        ./omg: line 196: .../master/omg: cannot execute: required file not found
+    这里从 DDK 自带软链读出目标路径，用宿主的 ld 把目标建出来。
+    """
+    import glob                                                   # noqa: PLC0415
+    links = glob.glob(os.path.join(omg_dir, "ld-linux-x86-64-*.so.2"))
+    if not links:
+        return None
+    for link in links:
+        target = os.path.realpath(link) if os.path.islink(link) else link
+        # 软链可能指向相对路径，统一成绝对路径
+        if not os.path.isabs(target):
+            target = os.path.join(os.path.dirname(link), target)
+        if os.path.exists(target):
+            continue
+        src = None
+        for cand in ("/lib64/ld-linux-x86-64.so.2", "/usr/lib/ld-linux-x86-64.so.2",
+                     "/lib/ld-linux-x86-64.so.2"):
+            if os.path.exists(os.path.realpath(cand)):
+                src = os.path.realpath(cand)
+                break
+        if not src:
+            return None
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            os.symlink(src, target)
+            return f"{target} -> {src}"
+        except OSError:
+            return None
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="生成/执行 OMG 转换命令")
     ap.add_argument("--onnx", required=True, help="输入 ONNX 路径")
@@ -250,6 +287,10 @@ def main() -> int:
     #   实测（Qwen2.5-1.5B，DDK 6.1.1.0）：
     #       source 它  ⇒ TbeInitialize failed / libai_npucore_ascendc.so Initialize failed
     #       不 source ⇒ OMG generate offline model success ✓（产物 SubGraph_0.weight 2.9G）
+    made = ensure_glibc_loader(args.omg_dir)
+    if made:
+        print(f"### 已补 glibc loader 软链：{made}")
+
     # ★ 不要 source <ascendc>/set_ascendc_env.sh：那是老布局（python 版 TBE，靠
     #   <ascendc>/package/python 里的 te_fusion）用的。当前 DDK 的 TBE 是 C++ 库
     #   （libai_npucore_tefusion.so 在 tools/platform/<plat>/lib64/），source 它会把
