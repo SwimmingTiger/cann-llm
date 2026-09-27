@@ -95,14 +95,20 @@ def main() -> int:
         f"--dynamic_dims={args.dynamic_dims}",
         f"--input_type={build_past_type(args.layers, 'FP16')}",
         f"--output_type={build_output_type(args.layers, 'FP16')}",
-        "--save_weights_as_external_data=true",
-        f"--platform={args.platform}",
-        "--target=omc",
     ]
     if args.compress_conf:
         cmd += ["--compress_conf", os.path.abspath(args.compress_conf)]
+    # 参数顺序对齐 x570 上当年能跑的那条命令（quant/to_omc_rebuilt.sh）：
+    #     … --output_type=… --weight_data_type FP16 --save_weights_as_external_data=true --platform=… --target=omc
+    # ⚠ 实测：把 --weight_data_type 放到末尾【产物大小不变】（仍 5.8 G），
+    #   所以顺序【不是】那个加载失败的原因 —— 这里只是保持与历史命令一致，别读成修复。
+    #   真正的原因在输入 ONNX 的权重精度：当年那份是 fp16 量级（产物 3.1 G），
+    #   我们这次是 fp32（产物 5.8 G）。
     if args.weight_data_type:
         cmd += ["--weight_data_type", args.weight_data_type]
+    cmd += ["--save_weights_as_external_data=true",
+            f"--platform={args.platform}",
+            "--target=omc"]
     if not (args.compress_conf or args.weight_data_type):
         print("提示：既没给 --compress-conf 也没给 --weight-data-type，"
               "默认按不量化（FP32）走。若要 FP16 请显式加 --weight-data-type FP16。",
