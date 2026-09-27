@@ -228,22 +228,37 @@ mkdir -p ${ROOT}/${testcase}/train_output
 
 model_path='/path/to/Qwen2.5-1.5B-Instruct'
 dopt_config=./${testcase}/dopt_config.json
-EXTRA=""
-[ -f "$dopt_config" ] && EXTRA="--dopt-config $dopt_config"
 
 # 6.1.1.0：入口是 dopt_lm/opt_main.py（旧版是 dopt_llm，且要另一个 wrapper）
+#
+# ★ --dopt-config 必须【无条件】传：6.1.1.0 的 opt_main.py 一上来就
+#   os.path.exists(args.dopt_config)，不给路径就是 None，直接
+#   TypeError: stat: path should be string … not NoneType。
+#   （早先这里写成"文件已存在才传"，在全新工作目录上必然崩 —— 实测踩过。）
+#   给了路径而文件不存在时，它才会像下面注释说的那样"生成一份再退出"。
 python -u ${QLIBS}/dopt/dopt_lm/opt_main.py \
     --model-path $model_path \
     --optimize-config ${ROOT}/config.yaml \
     --quant-stage $1 \
     --group-size 128 --w-bits 4 --act-bits 16 --block-size 128 \
-    $EXTRA \
+    --dopt-config $dopt_config \
     --output-dir ${ROOT}/${testcase}/train_output 2>&1 | tee ${ROOT}/${testcase}/train_output/logs-$1.log
 ```
 
 > 首次运行若 `dopt_config.json` 不存在，`opt_main.py` 会**先生成一份然后退出**
 > （提示 `generate plugin quang config please set quant strategy firstly`）。
-> 检查/调整那份配置里的 `quant_strategy`，再重跑即可。
+> 那份配置里全是 `float`（**等于不量化**），必须把量化策略填进去再重跑 ——
+> 用仓库脚本 `scripts/model-conversion/set_quant_strategy.py` 自动填：
+>
+> ```bash
+> python3 scripts/model-conversion/set_quant_strategy.py <dopt_config.json> --dry-run
+> python3 scripts/model-conversion/set_quant_strategy.py <dopt_config.json>
+> ```
+>
+> 它把 `model.layers.N.*` 的 Linear 设为 `Quant_act_weight_eco`（W4 / group 128 /
+> act 16），`lm_head` 与 embedding / norm 保持 float —— 与官方示例一致。
+> 实测（Qwen3-4B）：254 个条目 → 252 个设为量化、`lm_head` 1 个保持 float、
+> embedding 1 个非 Linear。
 
 ### 2.3 跑三个阶段
 
@@ -262,24 +277,17 @@ python -u ${QLIBS}/dopt/dopt_lm/opt_main.py \
 
 ### 2.4 先验一下权重没有被钳位（建议做，很便宜）
 
-```python
-import torch
-sd = torch.load('output_dir/train_output/fake_quant_weight.pth', map_location='cpu', weights_only=False)
-for k in ('state_dict','model','module'):
-    if isinstance(sd, dict) and k in sd and isinstance(sd[k], dict): sd = sd[k]; break
-tot = neg = n = allpos = 0
-for k, v in sd.items():
-    if not torch.is_tensor(v) or v.numel() < 10000 or not k.endswith('.weight'): continue
-    t = v.numel(); g = int((v < 0).sum().item())
-    tot += t; neg += g; n += 1
-    allpos += (g == 0)
-print(f"权重张量 {n} 个, 负值占比 {neg/max(tot,1)*100:.2f}%, 全非负 {allpos} 个")
+用仓库脚本 `scripts/model-conversion/check_quant_clamp.py`：
+
+```bash
+python3 scripts/model-conversion/check_quant_clamp.py output_dir/train_output/fake_quant_weight.pth
 ```
 
-**正常结果**：负值占比 ≈ **43%~44%**，全非负张量 **0 个**。
+**正常结果**：负值占比 ≈ **43%~44%**，全非负张量 **0 个**，脚本输出 `✓ 正常`。
 
-若看到负值占比只有 **13% 左右、且几乎全部张量无负值**，说明被钳位了 ——
-回 2.1 检查 `quant_param_2`。
+若看到负值占比只有 **13% 左右、且几乎全部张量无负值**（脚本会直接提示
+`✗ 疑似被钳位`），说明被钳位了 —— 回 2.1 检查 `quant_param_2`
+（kirinx90 应为 `False`）。
 
 ---
 
