@@ -33,6 +33,7 @@ from ..chat.template import (
     ChatTemplate,
     Message,
 )
+from ..textutil import prefix_hold_len
 from ..tools.registry import ToolError, ToolRegistry
 from ..types import (
     GenerationChunk,
@@ -102,15 +103,6 @@ AgentEvent = Any   # Union[TextDelta, ToolCallReady, ToolCallDone, StepStarted, 
 
 # ------------------------------------------------------------------ 流式过滤
 
-def _prefix_hold(text: str, tag: str) -> int:
-    """返回 text 末尾「是 tag 真前缀」的最长长度（需要继续等后续字符）。"""
-    max_len = min(len(text), len(tag) - 1)
-    for n in range(max_len, 0, -1):
-        if text.endswith(tag[:n]):
-            return n
-    return 0
-
-
 class StreamFilter:
     """把模型输出里的 ``<tool_call>…</tool_call>`` 段从流中剔除。
 
@@ -149,7 +141,7 @@ class StreamFilter:
                 i = self._tail.find(self.close_tag)
                 if i < 0:
                     # 只保留可能是"半个闭标签"的尾巴，其余丢弃
-                    keep = _prefix_hold(self._tail, self.close_tag)
+                    keep = prefix_hold_len(self._tail, self.close_tag)
                     self._tail = self._tail[len(self._tail) - keep:] if keep else ""
                     break
                 self._tail = self._tail[i + len(self.close_tag):]
@@ -157,7 +149,7 @@ class StreamFilter:
                 continue
             i = self._tail.find(self.open_tag)
             if i < 0:
-                hold = _prefix_hold(self._tail, self.open_tag)
+                hold = prefix_hold_len(self._tail, self.open_tag)
                 if hold:
                     out.append(self._tail[:len(self._tail) - hold])
                     self._tail = self._tail[len(self._tail) - hold:]
