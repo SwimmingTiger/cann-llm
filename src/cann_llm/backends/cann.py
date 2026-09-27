@@ -265,7 +265,14 @@ class CannNdkBackend(EngineBackend):
         # 引擎按相对路径解析模型文件，切换到模型目录
         os.chdir(self.model_dir)
 
-        self._executor = self._ndk.executor_create(b"executor.json")
+        # ★ 引擎只认 executor.json，且对 tokenizer 的 merges 逐项按 string 解析 ——
+        #   官方包（Qwen3 等）这两处都跟它不一致，先各补一份 .live 文件（不改原文件）。
+        ex_name, tok_name = self._prepare_engine_files()
+        if ex_name != "executor.json" or tok_name != "tokenizer.json":
+            warnings.warn(
+                f"为适配引擎，已生成补全后的 {ex_name}（tokenizer: {tok_name}）",
+                RuntimeWarning, stacklevel=2)
+        self._executor = self._ndk.executor_create(ex_name.encode())
         if not self._executor:
             from ..enginelog import format_engine_log, recent_engine_log
             extra = format_engine_log()
@@ -280,6 +287,76 @@ class CannNdkBackend(EngineBackend):
 
         self._loaded = True
         return self._info
+
+
+    def _prepare_engine_files(self):
+        """生成引擎实际要读的两份文件（都写在模型目录里；调用前已 chdir 过去）。
+
+        ① ``.executor.live.json`` —— 把 ``<omc 同名>.json`` 的标量超参并进 ``executor.json``。
+           引擎的 ``CreateFromExecutorJson`` **只读 executor.json**，不会去读
+           ``<omc 同名>.json``；而官方包（Qwen3-8B 等）恰恰把 hidden_size /
+           num_hidden_layers / kv_cache_max_len 这些放在后者，executor.json 里的
+           llm_config 几乎是空的 ⇒ 参数不全 ⇒ "Executor 创建失败"。
+           实测：Qwen3-8B 补全后（llm_config 从 2 个键到 37 个）即可正常推理。
+
+        ② ``.tokenizer.live.json`` —— merges 规范成**字符串数组**。
+           Qwen3 的 tokenizer.json 里 merges 是「数组的数组」（``[["Ġ","Ġ"], …]``），
+           而引擎对每个元素调 string ⇒ 抛 nlohmann type_error.302 并 **abort**
+           （SIGABRT，连 NULL 都不返回）。Qwen2.5 那份本来就是字符串数组，无需改。
+
+        返回 ``(executor 文件名, tokenizer 文件名)``；没有改动时就是原名。
+        """
+        import json
+
+        ex_name, tok_name = "executor.json", "tokenizer.json"
+        try:
+            executor = json.load(open(ex_name, encoding="utf-8"))
+        except (OSError, ValueError):
+            return ex_name, tok_name
+
+        # ---- ① 合并 <omc 同名>.json 的标量超参 ----
+        llm = executor.setdefault("llm_config", {})
+        omc = (executor.get("autoregressive") or {}).get("model_path") or ""
+        stem = os.path.splitext(os.path.basename(omc))[0]
+        changed = False
+        if stem and os.path.exists(f"{stem}.json"):
+            try:
+                model_json = json.load(open(f"{stem}.json", encoding="utf-8"))
+            except (OSError, ValueError):
+                model_json = {}
+            for key, val in model_json.items():
+                # 只补标量：dict/list（rope_scaling、architectures 之类）引擎不认，
+                # 实测列表会让它抛 type_error，一律跳过。
+                if key not in llm and not isinstance(val, (dict, list)):
+                    llm[key] = val
+                    changed = True
+
+        # ---- ② merges 规范化 ----
+        tok = None
+        try:
+            tok = json.load(open(tok_name, encoding="utf-8"))
+        except (OSError, ValueError):
+            tok = None
+        merges_fixed = False
+        if tok is not None:
+            merges = (tok.get("model") or {}).get("merges")
+            if merges and isinstance(merges[0], list):
+                tok["model"]["merges"] = [" ".join(m) for m in merges]
+                merges_fixed = changed = True
+
+        if not changed:
+            return ex_name, tok_name
+
+        # tokenizer：只有 merges 真被规范化过才写新文件
+        if merges_fixed:
+            with open(".tokenizer.live.json", "w", encoding="utf-8") as fh:
+                json.dump(tok, fh, ensure_ascii=False)
+            tok_name = ".tokenizer.live.json"
+            executor.setdefault("tokenizer", {})["path"] = tok_name
+
+        with open(".executor.live.json", "w", encoding="utf-8") as fh:
+            json.dump(executor, fh, indent=4, ensure_ascii=False)
+        return ".executor.live.json", tok_name
 
     def close(self) -> None:
         # 故意不释放：Context_Destroy 会崩溃，Executor_Destroy 在退出阶段也无必要
