@@ -433,14 +433,28 @@ OMG_EXIT=0
 
 ```
 my-model/
-├── executor.json                                  # 引擎配置
-├── context.json                                   # 生成/采样配置
-├── tokenizer.json                                 # 从 HF 检查点复制
+├── executor.json                                  # 引擎配置（见 5.2）
+├── context.json                                   # 生成/采样配置（见 5.3）
+├── tokenizer.json                                 # 从 HF 检查点复制（见 5.4）
+├── api_config.json                                # ★ 打包配置，引擎必需（见下）
+├── <omc 同名>.json                                # ★ 模型配置，引擎必需（见下）
 ├── <name>.omc                                     # 第 4 节产物
 ├── SubGraph_0.weight                              # 第 4 节产物
 ├── <name>_64_2048.embedding_weights               # 第 3 节产物
 └── <name>_64_2048.embedding_dequant_scale         # 第 3 节产物
 ```
+
+> [!IMPORTANT]
+> `api_config.json` 与 `<omc 同名>.json` **不能省** —— 缺了它们引擎会直接拒绝加载
+> （`缺少 api_config.json`），光有 `executor.json` 的"裸"目录已经不被支持。
+> 用下面这条命令按目录内容补齐（幂等，已存在则跳过）：
+>
+> ```bash
+> PYTHONPATH=src python3 -m cann_llm.modelpkg /path/to/my-model
+> ```
+>
+> 注意 `<omc 同名>.json` 的文件名必须是 **`.omc` 去掉扩展名**（例如
+> `qwen7b.omc` → `qwen7b.json`），**不是**目录名 —— 引擎建 Executor 时就是按这个规则找的。
 
 ### 5.2 `executor.json`
 
