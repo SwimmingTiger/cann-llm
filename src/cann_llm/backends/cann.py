@@ -267,8 +267,8 @@ class CannNdkBackend(EngineBackend):
 
         # ★ 引擎只认 executor.json，且对 tokenizer 的 merges 逐项按 string 解析 ——
         #   官方包（Qwen3 等）这两处都跟它不一致，先各补一份 .live 文件（不改原文件）。
-        ex_name, tok_name = self._prepare_engine_files()
-        if ex_name != "executor.json" or tok_name != "tokenizer.json":
+        ex_name, tok_name, prepared = self._prepare_engine_files()
+        if prepared:
             warnings.warn(
                 f"为适配引擎，已生成补全后的 {ex_name}（tokenizer: {tok_name}）",
                 RuntimeWarning, stacklevel=2)
@@ -304,15 +304,21 @@ class CannNdkBackend(EngineBackend):
            而引擎对每个元素调 string ⇒ 抛 nlohmann type_error.302 并 **abort**
            （SIGABRT，连 NULL 都不返回）。Qwen2.5 那份本来就是字符串数组，无需改。
 
-        返回 ``(executor 文件名, tokenizer 文件名)``；没有改动时就是原名。
+        返回 ``(executor 文件名, tokenizer 文件名, 是否真的写了文件)``。
+        "没有改动时名字就是原名、changed=False" —— 调用方据此决定要不要提示。
         """
         import json
 
-        ex_name, tok_name = "executor.json", "tokenizer.json"
+        ex_name = "executor.json"
         try:
             executor = json.load(open(ex_name, encoding="utf-8"))
         except (OSError, ValueError):
-            return ex_name, tok_name
+            return ex_name, "tokenizer.json", False
+        # ★ tokenizer 的名字以 executor.json 里声明的为准：导入脚本会把规范化过的
+        #   merges 另存为 tokenizer.cann.json 并让 executor.tokenizer.path 指过去；
+        #   这里若写死 tokenizer.json，就会去读【没规范化的原文件】、又做一遍并再报一次
+        #   "已生成补全后的 …"（实测踩过）。
+        tok_name = (executor.get("tokenizer") or {}).get("path") or "tokenizer.json"
 
         # ---- ① 合并 <omc 同名>.json 的标量超参 ----
         llm = executor.setdefault("llm_config", {})
@@ -345,7 +351,9 @@ class CannNdkBackend(EngineBackend):
                 merges_fixed = changed = True
 
         if not changed:
-            return ex_name, tok_name
+            # 没有任何需要补的：名字可能仍来自 executor 的声明（例如导入脚本已经把
+            # merges 规范化成 tokenizer.cann.json 了），但那不是"我们生成的"，别提示。
+            return ex_name, tok_name, False
 
         # tokenizer：只有 merges 真被规范化过才写新文件
         if merges_fixed:
@@ -356,7 +364,7 @@ class CannNdkBackend(EngineBackend):
 
         with open(".executor.live.json", "w", encoding="utf-8") as fh:
             json.dump(executor, fh, indent=4, ensure_ascii=False)
-        return ".executor.live.json", tok_name
+        return ".executor.live.json", tok_name, changed
 
     def close(self) -> None:
         # 故意不释放：Context_Destroy 会崩溃，Executor_Destroy 在退出阶段也无必要

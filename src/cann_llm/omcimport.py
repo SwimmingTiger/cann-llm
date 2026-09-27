@@ -61,6 +61,10 @@ def find_omc_files(d: str) -> Dict[str, Optional[str]]:
                                      "emb_w": None, "emb_s": None,
                                      "tokenizer": None, "weight": None}
     for name in sorted(os.listdir(d)):
+        # 跳过隐藏文件：cann.py 的 .executor.live.json / .context.live.json 等
+        # 也是 *.json，会被误认成 <model>.json（实测踩过）。
+        if name.startswith("."):
+            continue
         p = os.path.join(d, name)
         if not os.path.isfile(p):
             continue
@@ -140,6 +144,40 @@ def import_omc_dir(d: str, dry_run: bool = False) -> Tuple[Dict[str, Any], Dict[
 
     ex = build_executor_json(found, d)
     cx = build_context_json(found, d)
+
+    # ★ ① 把 <omc 同名>.json 的【标量】超参也并进 llm_config。
+    #   cann 引擎的 CreateFromExecutorJson 只读 executor.json，不看 <omc 同名>.json —
+    #   官方包恰恰把 hidden_size / num_hidden_layers / kv_cache_max_len 放在后者，
+    #   不并的话 cann 那边还得靠 .executor.live.json 兜底（多生成一个文件、多一条警告）。
+    #   只并标量：dict/list（architectures、rope_scaling 之类）引擎不认，实测列表会
+    #   让它抛 nlohmann type_error。
+    llm_json = found.get("llm_json")
+    lc = ex["llm_config"]
+    if llm_json:
+        try:
+            mj = json.load(open(os.path.join(d, llm_json), encoding="utf-8"))
+            for key, val in mj.items():
+                if key not in lc and not isinstance(val, (dict, list)):
+                    lc[key] = val
+        except (OSError, ValueError):
+            pass
+
+    # ★ ② merges 规范化：Qwen3 的 tokenizer.json 里 merges 是「数组的数组」，
+    #   引擎对每个元素调 string ⇒ 抛 type_error 并 **abort**（SIGABRT）。
+    #   不动用户的 tokenizer.json，另写一份规范化副本、让 executor 指过去。
+    tok_name = found.get("tokenizer") or "tokenizer.json"
+    try:
+        tok = json.load(open(os.path.join(d, tok_name), encoding="utf-8"))
+        merges = (tok.get("model") or {}).get("merges")
+        if merges and isinstance(merges[0], list):
+            tok["model"]["merges"] = [" ".join(m) for m in merges]
+            tok_name = "tokenizer.cann.json"
+            if not dry_run:
+                with open(os.path.join(d, tok_name), "w", encoding="utf-8") as fh:
+                    json.dump(tok, fh, ensure_ascii=False)
+            ex["tokenizer"]["path"] = tok_name
+    except (OSError, ValueError, TypeError, IndexError):
+        pass
 
     if dry_run:
         return ex, cx
