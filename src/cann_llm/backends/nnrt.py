@@ -243,6 +243,24 @@ class NnrtBackend(EngineBackend):
                     return p
         return None
 
+    def _predict_checked(self) -> None:
+        """跑一次 Predict 并**检查返回值**（失败时输出是空的，不检查会伪装成"能跑但输出垃圾"）。"""
+        st = self._predict()
+        if st != OH_AI_STATUS_SUCCESS:
+            raise GenerationError(
+                "NPU 执行失败：OH_AI_ModelPredict -> %d（0 才是成功）。模型是 %s"
+                % (st, os.path.basename(self._ms_path or self.model_dir)))
+
+    def _get_output_raw(self, name: str, nbytes: int) -> bytes:
+        """按名字把某个输出的数据整块读出来（分段 LLM 用）。"""
+        return self._output_bytes(self._index_of_output(name), nbytes)
+
+    def _output_bytes(self, i: int, nbytes: int) -> bytes:
+        p = self._output_data_ptr(i)
+        if not p:
+            raise GenerationError("拿不到输出张量 %d 的数据指针" % i)
+        return ctypes.string_at(p, nbytes)
+
     def _predict(self) -> int:
         """跑一次 Predict，返回状态码（0 = 成功）。"""
         lib = self._lib
@@ -263,7 +281,26 @@ class NnrtBackend(EngineBackend):
         return os.path.join(self.model_dir, found[0])
 
     def load(self) -> ModelInfo:
-        """加载并构建离线模型（这一步会让 NPU 侧解析/编译它）。"""
+        """加载并构建离线模型（这一步会让 NPU 侧解析/编译它）。
+
+        模型目录里若有 ``seg*`` 子目录，则进入**分段 LLM** 模式：
+        外层只建分段 runner（不加载整模型的 ``.ms``，因为整模型上不了 NPU）。
+        """
+        # ★ 分段 LLM：先判、先返回 —— 否则会在没有整模型 .ms 的目录上报错。
+        if (os.path.isdir(self.model_dir)
+                and os.path.isfile(os.path.join(self.model_dir, "tokenizer.json"))
+                and any(d.startswith("seg") and os.path.isdir(os.path.join(self.model_dir, d))
+                        for d in os.listdir(self.model_dir))):
+            from .nnrt_seg import SegmentedLlmRunner
+            runner = SegmentedLlmRunner(self.model_dir)
+            runner.load()
+            self._llm = runner
+            self._info = ModelInfo(
+                id=self.model_id, backend=self.name, path=self.model_dir,
+                extra={"device": self._device, "segments": len(runner.segs),
+                       "segments_dir": [os.path.basename(x.be.model_dir) for x in runner.segs]})
+            return self._info
+
         self._ms_path = os.environ.get("CANN_LLM_MSLITE_MODEL") or self._find_ms()
         lib = self._bind()
 
