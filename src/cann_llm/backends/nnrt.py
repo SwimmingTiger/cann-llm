@@ -384,13 +384,19 @@ class NnrtBackend(EngineBackend):
         # ★ LLM 模式（含分段）没有单一的 _model —— 必须先走这条路，
         #   否则会被下面那句"模型尚未 load()"误伤（分段模式下 _model 恒为 None）。
         if self._llm is not None:
+            # ★ 真正的流式：逐 token 把新增文本吐出去（见 runner.stream 的增量切法）
             params = request.params
-            text, toks, stats = self._llm.generate(
-                request.prompt, max_new=int(getattr(params, "max_tokens", 32) or 32),
-                stop_ids=self._stop_ids())
-            yield GenerationChunk(text=text, index=0, token_id=(toks[-1] if toks else None),
-                                  finish_reason=FINISH_STOP, stats=None)
-            self.last_stats = dict(stats)
+            max_new = int(getattr(params, "max_tokens", 32) or 32)
+            index, last_tok, n = 0, None, 0
+            for piece, tok_id, _ in self._llm.stream(request.prompt, max_new=max_new,
+                                                     stop_ids=self._stop_ids()):
+                last_tok, n = tok_id, n + 1
+                yield GenerationChunk(text=piece, index=index, token_id=tok_id,
+                                      finish_reason=None, stats=None)
+                index += 1
+            yield GenerationChunk(index=index, token_id=last_tok, finish_reason=FINISH_STOP,
+                                  stats=None)
+            self.last_stats = {"completion_tokens": float(n)}
             return
 
         if self._model is None:
@@ -454,6 +460,11 @@ class NnrtBackend(EngineBackend):
             return ()
         sp = self._llm.tok.special_ids
         return tuple(v for k, v in sp.items() if k in ("<|im_end|>", "<|endoftext|>"))
+
+    @property
+    def supports_streaming(self) -> bool:
+        """LLM 模式（含分段）支持真正的逐 token 流式；纯前向模式一次性返回。"""
+        return self._llm is not None
 
     @property
     def is_llm(self) -> bool:

@@ -158,6 +158,38 @@ class SegmentedLlmRunner:
         n = len(logits_bytes) // 4
         return list(struct.unpack("<%df" % n, logits_bytes[:n * 4]))
 
+    def stream(self, prompt: str, max_new: int = 32, stop_ids=()):
+        """真正的流式：每生成一个 token 就 yield 一段**新增文本**。
+
+        ★ 增量怎么切：**累积解码、只吐新增后缀**。
+        字节级 BPE 里一个汉字常跨多个 token，逐 token 单独 decode 会得到半个字符
+        （替换符）。所以每步都拿【到目前为止的全部 token】解码出整串，
+        再和上一次的整串比，只把多出来的部分交出去 —— 半个字符自然被留在里面等补齐。
+        """
+        assert self.tok is not None
+        ids = self.tok.encode(prompt)
+        if not ids:
+            return
+        pos = 0
+        logits: List[float] = []
+        for tid in ids:                       # prefill
+            logits = self.step(tid, pos)
+            pos += 1
+        out: List[int] = []
+        prev = ""
+        stop = set(stop_ids)
+        for _ in range(max(1, max_new)):
+            nxt = max(range(len(logits)), key=logits.__getitem__)
+            out.append(nxt)
+            cur = self.tok.decode(out)
+            if len(cur) > len(prev):
+                yield cur[len(prev):], nxt, None
+                prev = cur
+            if nxt in stop:
+                return
+            logits = self.step(nxt, pos)
+            pos += 1
+
     def generate(self, prompt: str, max_new: int = 32,
                  stop_ids=()) -> Tuple[str, List[int], Dict[str, float]]:
         import time
