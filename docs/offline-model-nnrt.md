@@ -265,7 +265,38 @@ OH_AI_ModelPredict -> 0 (SUCCESS)
 
 ---
 
-## 6. 已知问题
+## 6. 带权重的模型也验证过 ✓
+
+上面那个 `Add` 没有权重，容易让人怀疑"是不是只对无权重的小图有效"。我们另外做了一次
+**带权重**的验证：`y = Gelu(x @ W1 + b1) @ W2`（三个权重作为 ONNX initializer 内嵌）。
+
+```
+ONNX（权重内嵌）→ OMG → mlp_w.om（4.2 KB）→ converter_lite → mlp_w.ms（4.8 KB）
+设备上 NNRt 后端：
+  Build -> 0 (SUCCESS)
+  NPU :  -0.0794   0.0216   0.0823  -0.1355 …
+  参考:  -0.0795   0.0216   0.0823  -0.1355 …
+  最大偏差 0.000250 · 16 个元素全部在 1e-2 内 ✓
+```
+
+**结论：只要模型能被 OMG 编成 `.om`，就能通过这条路在 NPU 上跑起来**（含权重）。
+配套示例见 [`examples/mslite-nnrt/mlp_run.c`](../examples/mslite-nnrt/mlp_run.c)。
+
+> ⚠️ **一个容易走错的方向**：我们也试过直接把**厂商给 LLM 引擎用的 `.omc`**
+> （`qwen15b_repo.omc` 那种）拿来包成 `.ms`，**转换能成功**（`CONVERT RESULT SUCCESS:0`），
+> 但设备上 `Build -> -1` 失败。
+>
+> 原因不难理解：`third_party_model_parser.cc` 是把 **`.omc` 文件的内容整块**塞进 `.ms` 的
+> 一个 tensor 里（`ReadFile` + `memcpy_s`），而厂商 LLM 的 `.omc` **只有图、权重是外挂的**
+> （旁边 3 GB 的 `SubGraph_0.weight`），并且它本来就是设计给 **LLM 引擎**加载的
+> （引擎负责 KV 管理与权重分页）。
+>
+> **所以正确做法不是去包厂商的 LLM 产物，而是把我们自己的图（含我们自己设计的 KV 接口）
+> 交给 OMG 编成 `.om`** —— 这样权重随图走，也不需要迁就引擎的接口。
+
+---
+
+## 7. 已知问题
 
 * **进程退出阶段会 core dump**（`exit code 139`）。推理**结果已经正确**，
   崩在析构/动态库卸载阶段，是独立问题，尚未定位。

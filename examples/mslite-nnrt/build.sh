@@ -29,8 +29,11 @@ fi
 
 OUT="${OUT:-$HERE/bin}"
 mkdir -p "$OUT"
-echo "  cc mslite_run.c  (SDK=$SDK)"
-cc -O1 -I"$SDK" "$HERE/mslite_run.c" -o "$OUT/mslite_run" \
-   -L/system/lib64/ndk -lmindspore_lite_ndk
-echo "编译完成 -> $OUT/mslite_run"
+for src in mslite_run mlp_run; do
+    echo "  cc $src.c  (SDK=$SDK)"
+    cc -O1 -I"$SDK" "$HERE/$src.c" -o "$OUT/$src" \
+       -L/system/lib64/ndk -lmindspore_lite_ndk -lm
+done
+echo "编译完成 -> $OUT/"
 echo "运行示例: LD_LIBRARY_PATH=/system/lib64/ndk $OUT/mslite_run <model.ms> nnrt"
+echo "          LD_LIBRARY_PATH=/system/lib64/ndk $OUT/mlp_run   <model.ms> nnrt"
