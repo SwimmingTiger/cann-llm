@@ -559,11 +559,18 @@ OH_AI_ModelBuildFromFile -> 0 (SUCCESS)      ★ 53 输入 / 49 输出
   in[1] attention_mask  FP32  [1,1,1,2048]
   in[2] position_ids    INT32 [1,1]
   in[3+] past_key/value_in0..23  FP32 [2048,2,1,64]
-Predict ✓（输出了完整的 151936 个 logits）
+OH_AI_ModelPredict -> -1 (FAILED)            ★ 24 层这一版【执行不了】★
 ```
 
-**⇒ 一个真实的 LLM，用自己的图、自己的接口、自己的转换链路，在麒麟 NPU 上跑起来了** ——
-全程没有用到华为的 LLM 引擎。
+> ⚠️ **更正（本节原来写错了）**：这里原本写着「Predict ✓（输出了完整的 151936 个 logits）」——
+> 那是**误读**了示例程序里的兜底打印（`p ? p[k] : -1.0`：指针为空就打 `-1.000`，
+> 看着像"算出了 -1"，其实是根本没算）。
+> 真相是 **Predict 返回 -1** —— 图能被 NPU **接受并加载**（Build 成功、53 输入 / 49 输出形状全对），
+> 但**执行不了**。原因与解决办法见 §11（整模型规模超限 ⇒ 按层切段）。
+> 相关：那个 `-1` 来自 NNRt 侧，是它自己构造的"未分类通用失败"，见 §10.4。
+
+**⇒ 到这一步为止能确认的**：这条路能把一个真实 LLM 转成 NPU 能加载的 `.ms`，
+但**整模型跑不起来**；真正在 NPU 上跑通要用 §11 的分段方案。
 
 
 ---
@@ -706,6 +713,9 @@ frame #1: libmindspore_lite_ndk.so`OH_AI_ModelPredict + 1592   ← 就是那个 
 * 段与段的接口就是我们自己声明的 KV 张量（`past_key*` / `past_value*`）；
 * 顺序模型本来就是逐层算的 ⇒ 分段执行**没有额外计算开销**，只是多几次调用。
 
+> 切段的现成驱动见 [`scripts/model-conversion/seg_export.py`](../scripts/model-conversion/seg_export.py)
+> （用法与四个坑都写在文件头）。
+>
 > 厂商的导出器（`npu_tuned_export/`）**不支持"从第 k 层开始"**
 > （wrapper 里是 `enumerate(self.model.model.layers)` 全量遍历）。
 > 所以切段要自己做：导出前把 HF 模型的 `layers` 截成 `[k:k+n]`
