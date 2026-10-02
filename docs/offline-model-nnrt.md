@@ -646,6 +646,28 @@ cmp w8, #0x0
 ⇒ 在断点处读 `*(int*)*(void**)$x0` 就能拿到确切错误码，再对 MindSpore 的
 `StatusCode` 枚举即可知道是哪一类失败。
 
+### 10.4 实测结果：NNRt 只回了「通用失败 -1」
+
+按上面读出来了（Qwen2.5-0.5B 的图，FP16 与 W4 两个版本都是这个结果）：
+
+```
+frame #1: libmindspore_lite_ndk.so`OH_AI_ModelPredict + 1592   ← 就是那个 IsOk 检查
+状态码 = 0xffffffff  ( = -1 )
+```
+
+**这不是 MindSpore 的标准 `StatusCode` 枚举值**（那些是有编号的），
+而是 **NNRt 后端自己构造的一个"未分类通用失败"** —— 和 `OH_AI_ModelPredict`
+最终返回的 -1 一模一样。
+
+⇒ 所以：**失败源头在 NNRt 侧，而且它没给出更细的原因** ⇒ 这也解释了
+为什么 `hilog` 里抓不到任何 MindSpore/NNRt 的行（§9 那次尝试）。
+
+⇒ 排查只能从**输入/图**这一侧反推。结合前面所有证据，最强的嫌疑仍然是：
+**`.omc` 依赖外挂权重 `SubGraph_0.weight`，而通用「第三方离线模型」路径
+没有 `weightDir` 这样的通道告诉驱动权重在哪**（厂商的 LLM 引擎是靠
+`api_config.json` 里的 `weightDir` 传的）——
+⇒ 验证法：OMG 时**不加** `--save_weights_as_external_data`，让权重内嵌进 `.omc`。
+
 ## 11. 已知问题
 
 * **进程退出阶段会 core dump**（`exit code 139`）。推理**结果已经正确**，
