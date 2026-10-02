@@ -110,10 +110,12 @@ class NnrtBackend(EngineBackend):
         self._lib = None
         self._model = None
         self._ctx = None
+        self._outs = None
         self._ms_path = ""
         self._inputs: List[Tuple[str, int, Tuple[int, ...], int]] = []   # (name, dtype, shape, elems)
         self._outputs: List[Tuple[str, int, Tuple[int, ...], int]] = []
         self._default_params = GenerationParams()
+        self._llm = None
         #: 上一轮推理的统计（诊断用）
         self.last_stats: Dict[str, float] = {}
 
@@ -194,6 +196,55 @@ class NnrtBackend(EngineBackend):
             out.append((name, dt, shape, n))
         return out
 
+    # ---- 张量访问辅助（供 nnrt_llm 循环使用）----
+    def _handles(self, which: str):
+        lib = self._lib
+        assert lib is not None
+        arr = (lib.OH_AI_ModelGetInputs(self._model) if which == "in"
+               else lib.OH_AI_ModelGetOutputs(self._model))
+        return arr
+
+    def _index_of_input(self, name: str) -> int:
+        for i, t in enumerate(self._inputs):
+            if t[0] == name:
+                return i
+        raise KeyError(name)
+
+    def _index_of_output(self, name: str) -> int:
+        for i, t in enumerate(self._outputs):
+            if t[0] == name:
+                return i
+        raise KeyError(name)
+
+    def _input_data_ptr(self, i: int):
+        lib = self._lib
+        arr = self._handles("in")
+        return lib.OH_AI_TensorGetMutableData(ctypes.c_void_p(arr.handle_list[i]))
+
+    def _output_data_ptr(self, i: int):
+        """★ 必须用【传给 Predict 的那个数组】读输出。
+
+        MindSpore Lite 的语义是：调用方准备一个 OH_AI_TensorHandleArray 传给
+        OH_AI_ModelPredict，算完从**同一个数组**里取数据。重新调
+        OH_AI_ModelGetOutputs 拿到的句柄其 data 指针是空的（我们踩过：
+        "拿不到输出 past_key0 的数据指针"）。
+        """
+        lib = self._lib
+        arr = self._outs if self._outs is not None else self._handles("out")
+        h = ctypes.c_void_p(arr.handle_list[i])
+        p = lib.OH_AI_TensorGetData(h)
+        if not p:
+            p = lib.OH_AI_TensorGetMutableData(h)      # 输出侧常要 mutable
+        return p
+
+    def _predict(self) -> int:
+        """跑一次 Predict，返回状态码（0 = 成功）。"""
+        lib = self._lib
+        assert lib is not None
+        ins = lib.OH_AI_ModelGetInputs(self._model)
+        self._outs = lib.OH_AI_ModelGetOutputs(self._model)          # ★ 保留这个数组
+        return int(lib.OH_AI_ModelPredict(self._model, ins, ctypes.byref(self._outs), None, None))
+
     def _find_ms(self) -> str:
         if not self.model_dir or not os.path.isdir(self.model_dir):
             raise ModelLoadError(f"模型目录不存在: {self.model_dir!r}")
@@ -227,6 +278,16 @@ class NnrtBackend(EngineBackend):
 
         self._inputs = self._describe(lib.OH_AI_ModelGetInputs(self._model))
         self._outputs = self._describe(lib.OH_AI_ModelGetOutputs(self._model))
+
+        # ★ LLM 模式：目录里有分词器与嵌入表，就启用逐 token 的聊天循环
+        self._llm = None
+        if (os.path.isfile(os.path.join(self.model_dir, "tokenizer.json"))
+                and any("embedding_weights" in f for f in os.listdir(self.model_dir))
+                and any(n[0] == "embed_scales" for n in self._inputs)):
+            from .nnrt_llm import NnrtLlmRunner
+            runner = NnrtLlmRunner(self, self.model_dir)
+            runner.load()
+            self._llm = runner
         self._info = ModelInfo(
             id=self.model_id, backend=self.name, path=self._ms_path,
             context_length=self.context_length,
@@ -282,6 +343,16 @@ class NnrtBackend(EngineBackend):
         lib = self._lib
         assert lib is not None
 
+        if self._llm is not None:
+            params = request.params
+            text, toks, stats = self._llm.generate(
+                request.prompt, max_new=int(getattr(params, "max_tokens", 32) or 32),
+                stop_ids=self._stop_ids())
+            yield GenerationChunk(text=text, index=0, token_id=(toks[-1] if toks else None),
+                                  finish_reason=FINISH_STOP, stats=None)
+            self.last_stats = dict(stats)
+            return
+
         values = self._parse_prompt(request.prompt)
         t0 = time.time()
         # 第一个浮点输入吃 values，其余输入填 0
@@ -321,6 +392,18 @@ class NnrtBackend(EngineBackend):
         yield GenerationChunk(text="; ".join(parts), index=0,
                               finish_reason=FINISH_STOP,
                               stats=None)
+
+    def _stop_ids(self):
+        """停止 token：Qwen 的 <|im_end|> / <|endoftext|>。"""
+        if self._llm is None or self._llm.tok is None:
+            return ()
+        sp = self._llm.tok.special_ids
+        return tuple(v for k, v in sp.items() if k in ("<|im_end|>", "<|endoftext|>"))
+
+    @property
+    def is_llm(self) -> bool:
+        """是否启用了 LLM 聊天模式。"""
+        return self._llm is not None
 
     # ------------------------------------------------------------------ 释放
     def close(self) -> None:
