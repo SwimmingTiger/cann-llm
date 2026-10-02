@@ -565,7 +565,88 @@ Predict ✓（输出了完整的 151936 个 logits）
 **⇒ 一个真实的 LLM，用自己的图、自己的接口、自己的转换链路，在麒麟 NPU 上跑起来了** ——
 全程没有用到华为的 LLM 引擎。
 
-## 10. 已知问题
+
+---
+
+## 10. 调试这个平台上的原生进程（lldb）
+
+### 10.1 `lldb-server` 从哪来：CodeArts IDE
+
+系统自带的 `/data/service/hnp/bin/lldb-server` 在当前身份下会
+`ptrace failed: Permission denied`（应用沙箱禁 ptrace）；
+`hdc shell`（uid 2000）又处在另一个挂载命名空间、且 `/data/local/tmp` 不可执行。
+
+**可行方案**：应用商店里的 **CodeArts IDE**（`com.huawei.codearts`）自带一个
+只依赖 musl libc 的自包含 `huawei-debug-lldb-server`。它位于 CodeArts IDE
+自己的沙箱里，需要在 **CodeArts IDE 的终端**里拷到用户目录：
+
+```console
+$ mkdir -p ~/.local/bin
+$ cp /data/storage/el2/base/files/huawei-debug-lldb-server ~/.local/bin/
+```
+
+之后用 `~/.local/bin/huawei-debug-lldb-server` 就能正常拉起进程被 lldb 调试。
+
+### 10.2 ★ 只有它能 launch
+
+本机 `~/.harmonybrew/bin/lldb` 直接 `lldb -- ./prog args` **会失败**：
+
+```
+error: 'A' packet returned an error: 8
+```
+
+`'A'` 包是设置运行参数用的 —— 与「是否带参数」无关（不带参数同样报），
+**是这个平台上客户端自己拉起进程这条路不通**。必须由 `huawei-debug-lldb-server`
+先拉起、再让 lldb 连上去：
+
+```sh
+# ① 服务端（它会 launch 程序，并等你连）
+LD_LIBRARY_PATH=/system/lib64/ndk ~/.local/bin/huawei-debug-lldb-server \
+    gdbserver 127.0.0.1:<空闲端口> -- <可执行文件>
+
+# ② 客户端
+LD_LIBRARY_PATH=/system/lib64/ndk ~/.harmonybrew/bin/lldb --batch \
+  -o "gdb-remote 127.0.0.1:<空闲端口>" \
+  -o "breakpoint set -n OH_AI_ModelPredict" \
+  -o "continue" -o "bt 8" -o "detach"
+```
+
+两个坑：**端口**别用常见的（12345 被占会报 `Address in use`）；
+**参数要写死在程序里** —— 客户端侧的 `settings set target.run-args` 同样走 `'A'` 包 ✗。
+
+### 10.3 符号都在，可以逐层下断点
+
+`libmindspore-lite.so` / `libmindspore_lite_ndk.so` 都带符号：
+
+```
+mindspore::ModelImpl::Predict(...)          mindspore::Model::Predict(...)
+mindspore::lite::LiteSession::GetPredictions()
+mindspore::Status::IsOk() / StatusCode()    CustomPredictInferShape
+```
+
+实测一次定位（Qwen2.5-0.5B 图 `Build=0 / Predict=-1`）：
+
+```
+OH_AI_ModelPredict                                → 返回 -1
+  +1588: bl mindspore::Status::IsOk() const
+  +1600: b.ne  +2784        ← ★ Status 不 OK ⇒ 跳错误路径 ⇒ -1 ★
+        └ mindspore::ModelImpl::Predict  ← ★ 它执行完了（推理跑过了）★
+⇒ 失败不在推理本身，而在【Predict 返回的 Status 不是 OK】⇒ 包装层拒绝把结果交出去
+```
+
+`Status` 的布局（反汇编 `Status::operator bool` 得来）：
+
+```asm
+ldr x8, [x0]        ; Status 内部指针
+cbz x8, +24         ; 空 ⇒ OK(true)
+ldr w8, [x8]        ; ★ 状态码在这里 ★
+cmp w8, #0x0
+```
+
+⇒ 在断点处读 `*(int*)*(void**)$x0` 就能拿到确切错误码，再对 MindSpore 的
+`StatusCode` 枚举即可知道是哪一类失败。
+
+## 11. 已知问题
 
 * **进程退出阶段会 core dump**（`exit code 139`）。推理**结果已经正确**，
   崩在析构/动态库卸载阶段，是独立问题，尚未定位。
