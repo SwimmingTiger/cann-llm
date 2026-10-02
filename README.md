@@ -244,6 +244,7 @@ src/cann_llm/
 | **[docs/deployment.md](docs/deployment.md)** | **部署与运行**（装依赖、拿模型、启动、验证、常见问题）—— 上手第一篇 |
 | **[docs/get-models.md](docs/get-models.md)** | **下载官方模型**（Matrix 模型库网页点击步骤、选包提醒、SHA256） |
 | **[docs/model-conversion.md](docs/model-conversion.md)** | **模型转换全流程**（从 HF 检查点到能上 NPU，含最容易踩的量化坑） |
+| **[docs/offline-model-nnrt.md](docs/offline-model-nnrt.md)** | **离线模型 + NNRt**：把厂商离线模型包成 `.ms`，**不经过华为 LLM 引擎**、**不受**「逐层一对 K/V」那类结构约束的部署路（含自己编转换器） |
 | `docs/architecture.md` | 分层、数据流、为什么这样设计 |
 | `docs/cann-engine-notes.md` | **引擎笔记**：API 调用约定、回调签名、必须避开的崩溃点、上下文上限 |
 | `docs/agent.md` | 工具调用（function calling）的原理、用法与可靠性 |
@@ -263,6 +264,8 @@ src/cann_llm/
   或者绕开 python 层做最小复现。README 里记了三个坑（引擎是
   `/system/lib64/libhiai_llm_engine.so`；`modelPath` 只写文件名且要先 chdir 到模型目录；
   `GenerateAsync` 第 3 参是 prompt 文本、引擎自己分词）。
+
+* [`examples/mslite-nnrt/`](examples/mslite-nnrt/) —— 单文件 C 程序，在设备上用 **MindSpore Lite NDK + NNRt 后端**加载 `.ms` 做一次推理。配套的转换步骤见 **[docs/offline-model-nnrt.md](docs/offline-model-nnrt.md)**。
 
 * [`examples/nnrt-probe/`](examples/nnrt-probe/) —— 走 **Neural Network Runtime**
   （`libneural_network_runtime.so`）这条路：自己在线构图、在这块 NPU 上编译并执行，
