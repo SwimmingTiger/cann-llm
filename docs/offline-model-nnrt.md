@@ -711,6 +711,32 @@ frame #1: libmindspore_lite_ndk.so`OH_AI_ModelPredict + 1592   ← 就是那个 
 > 所以切段要自己做：导出前把 HF 模型的 `layers` 截成 `[k:k+n]`
 > （并同步 `config.num_hidden_layers`），或者导出一次后按同名 initializer 换各段权重。
 
+### 分段导出的做法（实测可行）
+
+厂商导出器不支持"从第 k 层开始"，用 **monkey-patch** 加一层壳即可，厂商代码不用改：
+
+1. **截层**：patch 封装类的 `__init__`，载入后把
+   `model.model.layers` 换成 `ModuleList(layers[k:k+n])`，
+   并同步 `model.config.num_hidden_layers = n`；
+2. **换成"分段 forward"**：首段吃 token id → 吐 hidden；中间段吃 hidden → 吐 hidden；
+   末段吃 hidden → 吐 `lm_logits`；每段都带自己的 KV 进出。
+   ★ 一定要用**子类**（hook `build_model` 返回子类）而不是只改类的 `forward` 属性 ——
+   实测后者不生效（跑的仍是原来那份）；
+3. **`embedding_separate` 按段切换**：
+   * 首段 `False` ⇒ 导出器给的 dummy 是 token id，输入名 `input_ids`；
+   * 其余段 `True` ⇒ 导出器会把 dummy 查表成 `[1,1,896]` 的 hidden，
+     输入名变成 `input_embed`，并附带 `embed_scales`（分段 forward 非首段不用它）；
+4. **`embedding_as_fp16` 也要按段给**：中间段的输入是 hidden states，
+   给 `False` 会被铸成 **int8**（错），必须给 `True`（得到 FP32）。
+
+其余坑：厂商脚本是 `from npu_tuned_model import build_model`（导入时绑定），
+所以 `EX.build_model` 与 `NT.build_model` **都要**替换；
+它的 `export_model` 读的是 `__main__` 里 `for seq_len in …` 设下的**全局** `seq_len`，
+直接调用要自己补 `EX.seq_len = …`。
+
+**实测**：4 层一段（KV 1024）→ OMG 成功 → `.omc` 123 MB →
+设备上 `Build 0 / Predict 0` **成功**（含**中间段**，即吃 hidden 吐 hidden 的那种）。
+
 ## 12. 已知问题
 
 * **进程退出阶段会 core dump**（`exit code 139`）。推理**结果已经正确**，
