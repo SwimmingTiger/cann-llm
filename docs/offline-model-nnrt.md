@@ -664,7 +664,54 @@ frame #1: libmindspore_lite_ndk.so`OH_AI_ModelPredict + 1592   ← 就是那个 
 `api_config.json` 里的 `weightDir` 传的）——
 ⇒ 验证法：OMG 时**不加** `--save_weights_as_external_data`，让权重内嵌进 `.omc`。
 
-## 11. 已知问题
+
+---
+
+## 11. ★ 规模限制（实测，写模型配置前必看）
+
+这条路的**离线模型是整图执行**的，NPU 对图的规模有硬限制。用 Qwen2.5-0.5B 实测：
+
+| 配置 | OMG | 设备 Predict |
+|---|---|---|
+| 1 层 + `kv_cache_max_len: 64` | ✓ | **✓ 成功** |
+| 1 层 + 1024 | ✓ | **✓ 成功** |
+| 1 层 + 2048 | ✓ | ✗ `-1` |
+| 4 层 + 1024 | ✓ | **✓ 成功** |
+| 12 层 + 2048 | ✓ | ✗ `-1` |
+| 24 层 + 64 / 512 / 1024 | ✗ 编不过 | — |
+| 24 层 + 2048 | ✓ | ✗ `-1` |
+
+两条**独立的**限制：
+
+1. **设备 Predict 侧的 KV 张量不能太大。**
+   同样 1 层，`64` 与 `1024` 都成功、`2048` 失败
+   （`past_key_in*` 张量 `[kv,2,1,64]` 在 2048 时是 1 MB）。
+   ⇒ **把 `kv_cache_max_len` 压到 1024 及以下**是可行的选择。
+2. **OMG 侧对"层数 × KV"另有限制。** 24 层时只有 KV 2048 能编过；
+   小 KV 会死在算子 shape 推断上：
+
+   ```
+   E op_ir_func_factory.cpp: "get [op:RmsNorm_/layers.0/input_layernorm/Sqrt
+        type:RmsNorm] infershape func failed."
+   ```
+
+   两者叠起来，**24 层这条直路走不通**（要 2048 才编得过，2048 又 Predict 不了）。
+
+### 可行做法：按层切段
+
+既然 **4 层 + KV 1024 能 Predict 成功**，就把模型**切成若干段**，
+每段单独编成 `.omc` / `.ms`，逐段调用：
+
+* 每段 4 层左右，KV 1024 ⇒ 落在实测能过的区间里；
+* 段与段的接口就是我们自己声明的 KV 张量（`past_key*` / `past_value*`）；
+* 顺序模型本来就是逐层算的 ⇒ 分段执行**没有额外计算开销**，只是多几次调用。
+
+> 厂商的导出器（`npu_tuned_export/`）**不支持"从第 k 层开始"**
+> （wrapper 里是 `enumerate(self.model.model.layers)` 全量遍历）。
+> 所以切段要自己做：导出前把 HF 模型的 `layers` 截成 `[k:k+n]`
+> （并同步 `config.num_hidden_layers`），或者导出一次后按同名 initializer 换各段权重。
+
+## 12. 已知问题
 
 * **进程退出阶段会 core dump**（`exit code 139`）。推理**结果已经正确**，
   崩在析构/动态库卸载阶段，是独立问题，尚未定位。
