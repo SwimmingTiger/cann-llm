@@ -26,10 +26,13 @@
 
 - 🗣 **交互式对话 CLI** —— 逐字流式输出、多轮上下文、采样参数热更新
 - 🔌 **OpenAI 兼容 HTTP 服务** —— `/v1/chat/completions`（含 SSE 流式）、`/v1/completions`、`/v1/models`
-- 🧩 **两个后端，同一套上层** —— 统一 `EngineBackend` 协议下目前实现了两个：
+- 🧩 **三个后端，同一套上层** —— 统一 `EngineBackend` 协议下目前实现了三个：
   **`cann`** 走华为官方 NDK 接口（`/system/lib64/ndk/libcann_llm_engine.so`），
-  **`hiai`** 走系统内部引擎（`/system/lib64/libhiai_llm_engine.so`）。
-  用 `-b cann` / `-b hiai` 切换，**CLI、HTTP 服务、对话模板都不用改**
+    **`hiai`** 走系统内部引擎（`/system/lib64/libhiai_llm_engine.so`），
+    **`nnrt`** 用 MindSpore Lite NDK 跑**第三方离线模型**（`.ms`）—— 它**不经过
+    华为 LLM 引擎**，所以模型结构不受「逐层一对 K/V」那类约束，见
+    [docs/offline-model-nnrt.md](docs/offline-model-nnrt.md)。
+    用 `-b cann` / `-b hiai` / `-b nnrt` 切换，**CLI、HTTP 服务、对话模板都不用改**
 - 📦 **Python 包层面零依赖** —— HTTP 层基于标准库 `http.server`。
   不过鸿蒙 PC **不自带 Python**，需先从应用市场装「Python安装器」，
   见[依赖与构建](#依赖与构建)
@@ -265,7 +268,7 @@ src/cann_llm/
   `/system/lib64/libhiai_llm_engine.so`；`modelPath` 只写文件名且要先 chdir 到模型目录；
   `GenerateAsync` 第 3 参是 prompt 文本、引擎自己分词）。
 
-* [`examples/mslite-nnrt/`](examples/mslite-nnrt/) —— 单文件 C 程序，在设备上用 **MindSpore Lite NDK + NNRt 后端**加载 `.ms` 做一次推理。配套的转换步骤见 **[docs/offline-model-nnrt.md](docs/offline-model-nnrt.md)**。
+* [`examples/mslite-nnrt/`](examples/mslite-nnrt/) —— 单文件 C 程序，在设备上用 **MindSpore Lite NDK + NNRt 后端**加载 `.ms` 做一次推理。配套的转换步骤见 **[docs/offline-model-nnrt.md](docs/offline-model-nnrt.md)**；这条路也接成了后端：`cann-llm -b nnrt -d <放 .ms 的目录>`。
 
 * [`examples/nnrt-probe/`](examples/nnrt-probe/) —— 走 **Neural Network Runtime**
   （`libneural_network_runtime.so`）这条路：自己在线构图、在这块 NPU 上编译并执行，

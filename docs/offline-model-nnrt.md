@@ -296,7 +296,40 @@ ONNX（权重内嵌）→ OMG → mlp_w.om（4.2 KB）→ converter_lite → mlp
 
 ---
 
-## 7. 已知问题
+## 7. 当作 cann-llm 的后端用（`-b nnrt`）
+
+这条路已经接成 cann-llm 的第三个后端：
+
+```sh
+cann-llm-chat --list-backends          # 后端: cann, hiai, nnrt
+cann-llm-chat -b nnrt -d <放 .ms 的目录>
+```
+
+* 后端实现：`src/cann_llm/backends/nnrt.py`（`ctypes` 直调 `libmindspore_lite_ndk.so`，
+  与 `cann` / `hiai` 后端同一套协议，上层零改动）；
+* 模型目录里放**一个** `.ms`（有多个会报错，要求明确）；`.ms` 依赖的权重文件要放在同一目录；
+* `CANN_LLM_MSLITE_LIB` 可换库路径，`CANN_LLM_MSLITE_DEVICE=cpu` 可切 CPU 对照，
+  `CANN_LLM_MSLITE_MODEL` 可直接指定 `.ms` 文件。
+
+> **它现在还不是 LLM 后端**：`generate()` 跑一次前向，prompt 里给第一个浮点输入的数据
+> （逗号分隔），输出以同样格式返回 —— 用来验证链路。要跑真正的 LLM，得把带 KV 接口的图
+> 交给 OMG 编成 `.om`（那才是这条路真正的用武之地）。
+
+实测（NNRt 后端跑 `Gelu(x@W1+b1)@W2`，与 CPU 参考对比）：
+
+```
+后端: -0.07941, 0.02164, 0.08228, -0.13550 …
+参考: -0.07954, 0.02163, 0.08233, -0.13555 …
+最大偏差 0.000250 · 超差 0/16  ✓
+```
+
+> 后端里特意**不调用** `OH_AI_ContextDestroy` / `OH_AI_ModelDestroy` ——
+> 它们会让进程在退出阶段 core dump（结果已经算对了，崩在析构/卸载）。
+> 这与 `cann` 后端不调用 `Context_Destroy` 是同一类处理。
+
+---
+
+## 8. 已知问题
 
 * **进程退出阶段会 core dump**（`exit code 139`）。推理**结果已经正确**，
   崩在析构/动态库卸载阶段，是独立问题，尚未定位。

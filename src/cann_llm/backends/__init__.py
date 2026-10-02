@@ -22,6 +22,16 @@ except Exception as _e:  # pragma: no cover
 
     warnings.warn(f"CANN 后端不可用: {_e}", RuntimeWarning, stacklevel=2)
 
+# --- nnrt 后端：用 MindSpore Lite NDK + NNRt 跑【第三方离线模型】（.ms）---
+# 与前两个后端的根本区别：它不经过华为 LLM 引擎，所以模型结构不受
+# 「逐层一对 K/V」那类约束。见 docs/offline-model-nnrt.md。
+try:  # pragma: no cover - 平台相关
+    from . import nnrt  # noqa: F401
+except Exception as _e:  # pragma: no cover
+    import warnings
+
+    warnings.warn(f"nnrt 后端不可用: {_e}", RuntimeWarning, stacklevel=2)
+
 # --- hiai 后端：驱动系统内部引擎（libhiai_llm_engine.so），认官方模型目录结构 ---
 try:  # pragma: no cover - 平台相关
     from . import hiai  # noqa: F401
