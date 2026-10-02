@@ -572,13 +572,17 @@ Predict ✓（输出了完整的 151936 个 logits）
 
 ### 10.1 `lldb-server` 从哪来：CodeArts IDE
 
-系统自带的 `/data/service/hnp/bin/lldb-server` 在当前身份下会
-`ptrace failed: Permission denied`（应用沙箱禁 ptrace）；
-`hdc shell`（uid 2000）又处在另一个挂载命名空间、且 `/data/local/tmp` 不可执行。
+> ⚠️ **先纠正一个常见错误说法**：鸿蒙 7 **没有系统自带的 `lldb` / `lldb-server`**，
+> 所以不要写成"系统自带的 `/data/service/hnp/bin/lldb-server` 不行"——
+> 那个路径本身就不成立。
 
-**可行方案**：应用商店里的 **CodeArts IDE**（`com.huawei.codearts`）自带一个
-只依赖 musl libc 的自包含 `huawei-debug-lldb-server`。它位于 CodeArts IDE
-自己的沙箱里，需要在 **CodeArts IDE 的终端**里拷到用户目录：
+在当前身份下会 `ptrace failed: Permission denied` 的是
+**DevBox、Harmonybrew 和 OHOS-SDK** 提供的 `lldb` / `lldb-server`（应用沙箱禁 ptrace）。
+
+**可行方案**：应用商店里的 **CodeArts IDE**（`com.huawei.codearts`；
+注意它与白名单一节提到的 `com.huawei.codearts.agent` 是**两个应用**）
+自带一个只依赖 musl libc 的自包含 `huawei-debug-lldb-server`。
+它躺在 CodeArts IDE 自己的沙箱里，需要在 **CodeArts IDE 的终端**里拷出来：
 
 ```console
 $ mkdir -p ~/.local/bin
@@ -613,6 +617,11 @@ LD_LIBRARY_PATH=/system/lib64/ndk ~/.harmonybrew/bin/lldb --batch \
 
 两个坑：**端口**别用常见的（12345 被占会报 `Address in use`）；
 **参数要写死在程序里** —— 客户端侧的 `settings set target.run-args` 同样走 `'A'` 包 ✗。
+
+> **查找这份 server 时别只试一个位置。** `hvm-cli` 的 `scripts/hwdbg.sh` 现在会：
+> ① 优先用 `HVM_LLDB_SERVER`；② 否则把 `~/.local/bin` 与
+> `/data/storage/el2/base/files` **追加到 `PATH` 末尾**（追加而非前插，免得盖掉
+> 用户已有的同名程序）再按名字找；③ 都没有才提示从 CodeArts IDE 里拷。
 
 ### 10.3 符号都在，可以逐层下断点
 
