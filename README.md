@@ -264,6 +264,13 @@ src/cann_llm/
   `/system/lib64/libhiai_llm_engine.so`；`modelPath` 只写文件名且要先 chdir 到模型目录；
   `GenerateAsync` 第 3 参是 prompt 文本、引擎自己分词）。
 
+* [`examples/nnrt-probe/`](examples/nnrt-probe/) —— 走 **Neural Network Runtime**
+  （`libneural_network_runtime.so`）这条路：自己在线构图、在这块 NPU 上编译并执行，
+  **完全不经过 LLM 引擎**。LLM 引擎要求模型必须是「逐层一对 K/V + 每层 `past_key_value`
+  进出」的结构，新架构（比如 Gemma 4 的每层不同配置、K=V、K/V 跨层共享）塞不进去；
+  而 NNRt 的输入/输出张量由模型自己声明，能容纳这类结构。README 里记了实测的算子支持矩阵、
+  NNRt 的建图规格（几条容易一直踩的坑），以及**怎么用 hilog 问出建图失败的真实原因**。
+
 ### 安装成 pip 包（可选，仍然没有编译）
 
 ```bash
