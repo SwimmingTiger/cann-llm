@@ -11,9 +11,17 @@
 这是 lldb 经 gdb-remote 协议设置 argv 失败（平台限制），不是被调试程序的问题。
 所以改为在系统自带的 gdbserver 里起进程，再用 lldb 的 `gdb-remote` 接上去。
 
-★ 本机目前**只有 huawei-debug-lldb-server 能正常调试**。找不到它时这里会给出警告
-（普通 `lldb -- <python>` 会报上面那个 `'A' packet` 错误）并建议从 CodeArts IDE 的
-终端运行；随后仍会尝试普通 lldb —— 别的平台这样是可行的。
+★ 本机目前**只有 huawei-debug-lldb-server 能正常调试**（鸿蒙 7 **没有**系统自带的
+`lldb` / `lldb-server`；会 `ptrace failed: Permission denied` 的是 DevBox、Harmonybrew
+和 OHOS-SDK 那几份）。它来自应用商店里的 CodeArts IDE（`com.huawei.codearts`，与
+`com.huawei.codearts.agent` 是两个应用），躺在 IDE 自己的沙箱里，要在 **CodeArts IDE
+的终端**里拷出来：
+
+    mkdir -p ~/.local/bin
+    cp /data/storage/el2/base/files/huawei-debug-lldb-server ~/.local/bin/
+
+找不到它时这里会给出同样的提示（普通 `lldb -- <python>` 会报上面那个 `'A' packet`
+错误）；随后仍会尝试普通 lldb —— 别的平台这样是可行的。
 """
 from __future__ import annotations
 
@@ -21,11 +29,46 @@ import os
 import shutil
 from typing import List, Optional, Sequence, Tuple
 
-__all__ = ["build_debug_argv", "is_real_executable",
-           "DEFAULT_GDBSERVER", "DEFAULT_LLDB_PORT"]
+__all__ = ["build_debug_argv", "is_real_executable", "find_gdbserver",
+           "GDBSERVER_NAME", "GDBSERVER_DIRS", "DEFAULT_GDBSERVER", "DEFAULT_LLDB_PORT"]
 
-#: HarmonyOS 上系统自带的 lldb-server（gdbserver 模式）
-DEFAULT_GDBSERVER = "/data/storage/el2/base/files/huawei-debug-lldb-server"
+#: 这份 gdbserver 的可执行名（来自 CodeArts IDE，不是系统自带）
+GDBSERVER_NAME = "huawei-debug-lldb-server"
+
+#: 按名字找不到时，顺带尝试的目录 —— **追加到 PATH 末尾**再查。
+#: 追加而不是前插：免得盖掉用户自己 PATH 里已有的同名程序。
+#:   · ~/.local/bin                  —— 文档推荐的拷贝目标
+#:   · /data/storage/el2/base/files  —— CodeArts IDE 沙箱里那份的原地
+GDBSERVER_DIRS = ("~/.local/bin", "/data/storage/el2/base/files")
+
+#: 兼容旧名字（调用方/测试可能引用过）
+DEFAULT_GDBSERVER = "/data/storage/el2/base/files/" + GDBSERVER_NAME
+
+
+def find_gdbserver(env: "Optional[dict]" = None) -> str:
+    """找 ``huawei-debug-lldb-server``，返回路径；找不到返回 ``""``。
+
+    顺序：① ``CANN_LLM_LLDB_SERVER`` 显式指定（给了就用它，不存在也算没找到）；
+    ② 把 :data:`GDBSERVER_DIRS` 追加到 ``PATH`` 末尾后按名字找。
+    """
+    env = os.environ if env is None else env
+    explicit = env.get("CANN_LLM_LLDB_SERVER")
+    if explicit:
+        return explicit if os.path.exists(explicit) else ""
+    # 把两个常见位置【追加到 PATH 末尾】，再按名字逐个目录找。
+    # 这里用 os.path.exists 而不是 shutil.which：单测会 mock 掉 os.path.exists
+    # 来模拟"某处存在/不存在"，走 which 会绕过 mock。
+    path = env.get("PATH", "")
+    dirs = [d for d in path.split(os.pathsep) if d]
+    for d in GDBSERVER_DIRS:
+        full = os.path.expanduser(d)
+        if full not in dirs:
+            dirs.append(full)
+    for d in dirs:
+        cand = os.path.join(d, GDBSERVER_NAME)
+        if os.path.exists(cand):
+            return cand
+    return ""
 
 DEFAULT_LLDB_PORT = 5091
 
@@ -71,12 +114,12 @@ def build_debug_argv(py: str, args: Sequence[str]
             "      请改用真正的解释器，例如同目录下带版本号的那个：\n"
             "      PYTHON=<同一目录>/python3.12 ./scripts/start_server.sh … --lldb")
 
-    gdbserver = env.get("CANN_LLM_LLDB_SERVER") or DEFAULT_GDBSERVER
+    gdbserver = find_gdbserver(env)
     lldb = (env.get("CANN_LLM_LLDB")
             or shutil.which("lldb")
             or "/storage/Users/currentUser/.harmonybrew/bin/lldb")
 
-    if os.path.exists(gdbserver):
+    if gdbserver:
         port = int(env.get("CANN_LLM_LLDB_PORT") or DEFAULT_LLDB_PORT)
         argv = [gdbserver, "gdbserver", "--native-regs",
                 f"127.0.0.1:{port}", "--", py, "-X", "faulthandler"] + list(args)
@@ -95,7 +138,9 @@ def build_debug_argv(py: str, args: Sequence[str]
         #   这里仍然回退（别的平台没问题），但必须把话说清楚，免得白折腾。
         argv = [lldb, "--", py, "-X", "faulthandler"] + list(args)
         return argv, [
-            f"⚠️ 没找到 {gdbserver}",
+            f"⚠️ 没找到 {GDBSERVER_NAME}"
+            "（已查 CANN_LLM_LLDB_SERVER、PATH，以及 "
+            + "、".join(GDBSERVER_DIRS) + "）",
             "     本机目前只有它能正常调试；普通 lldb 直接拉起进程会报",
             "     error: 'A' packet returned an error: 8。",
             "     建议从 CodeArts IDE 的终端运行。",
