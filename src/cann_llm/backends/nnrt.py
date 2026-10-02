@@ -381,12 +381,24 @@ class NnrtBackend(EngineBackend):
 
     def generate(self, request: GenerationRequest) -> Iterator[GenerationChunk]:
         """跑一次前向：prompt 当第一个浮点输入的数据，输出以逗号分隔文本返回。"""
+        # ★ LLM 模式（含分段）没有单一的 _model —— 必须先走这条路，
+        #   否则会被下面那句"模型尚未 load()"误伤（分段模式下 _model 恒为 None）。
+        if self._llm is not None:
+            params = request.params
+            text, toks, stats = self._llm.generate(
+                request.prompt, max_new=int(getattr(params, "max_tokens", 32) or 32),
+                stop_ids=self._stop_ids())
+            yield GenerationChunk(text=text, index=0, token_id=(toks[-1] if toks else None),
+                                  finish_reason=FINISH_STOP, stats=None)
+            self.last_stats = dict(stats)
+            return
+
         if self._model is None:
             raise GenerationError("模型尚未 load()")
         lib = self._lib
         assert lib is not None
 
-        if self._llm is not None:
+        if False:
             params = request.params
             text, toks, stats = self._llm.generate(
                 request.prompt, max_new=int(getattr(params, "max_tokens", 32) or 32),
