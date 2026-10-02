@@ -11,7 +11,17 @@
 #   SDK=/path/to/sysroot/usr/include OUT=/somewhere ./build.sh
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
-SDK="${SDK:-$HOME/work/hmos/ohos-sdk/ohos/native/sysroot/usr/include}"
+SDK="${SDK:-}"
+
+# 没显式给 SDK 时，从 DevEco / OpenHarmony SDK 的常见位置找一找
+if [ -z "$SDK" ]; then
+    for c in "$HOME"/ohos-sdk/*/native/sysroot/usr/include \
+             "$HOME"/OpenHarmony/Sdk/*/native/sysroot/usr/include \
+             "$HOME"/DevEco*/sdk/*/openharmony/native/sysroot/usr/include \
+             /opt/ohos-sdk/*/native/sysroot/usr/include; do
+        [ -d "$c/neural_network_runtime" ] && SDK="$c" && break
+    done
+fi
 OUT="${OUT:-$HERE/bin}"
 
 if [ ! -d "$SDK/neural_network_runtime" ]; then
@@ -21,7 +31,7 @@ if [ ! -d "$SDK/neural_network_runtime" ]; then
 fi
 
 mkdir -p "$OUT"
-for s in add_test block_test ops_probe offline_probe diag_spec_rule diag_spec_variant diag_dtype; do
+for s in add_test block_test ops_probe spec_fix offline_probe diag_spec_rule diag_spec_variant diag_dtype; do
     printf '  cc %s.c\n' "$s"
     cc -O1 -I"$SDK" "$HERE/$s.c" -o "$OUT/$s" \
         -L/system/lib64/ndk -lneural_network_runtime -lneural_network_core -lm

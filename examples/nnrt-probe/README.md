@@ -71,6 +71,7 @@ RunSync -> SUCCESS
 支持: MatMul · Add · Mul · Sub · Div · Reshape · Squeeze · Flatten · Stack · Clip
       Maximum · Greater · Select · RSqrt · Sqrt · Tanh · Sin · Cos · Exp · Neg · Abs
       Log · Square · Erf · Reciprocal · Floor · Ceil · Relu · Sigmoid
+      ★ 本轮新增确认：Softmax（注意力必需）· Concat · Split
 
 注意: 一个 Transformer 需要的算子基本齐了 —— 特别是 MatMul(矩阵乘)、Sin/Cos(位置编码)、
       RSqrt/Sqrt(归一化)、GELU 类激活。
@@ -82,16 +83,56 @@ RunSync -> SUCCESS
 
 1. **「无参数」必须传 `{NULL, 0}`**。传一个未初始化的非空数组指针（哪怕 `size` 是 0），
    会被当成「多传了参数」直接拒掉。这一条曾让 40 个算子里的 24 个"建图失败"。
-2. **轴 / 形状这类值是「INT64 的常量输入张量」，不是参数张量**。
-   Softmax / Squeeze / Stack / Split / Concat / Slice / Flatten 的 axis 都是如此，
-   而且要放进算子的 **input** 列表里，dtype 必须 `OH_NN_INT64`。
+2. **轴 / 形状这类值是「参数张量」，不是输入张量** —— 这一条最容易搞反。
+   Softmax / Concat / Squeeze / Split / Slice / Flatten 的 axis 都要先用
+   `OH_NNModel_SetTensorType(model, i, OH_NN_SOFTMAX_AXIS)` 之类声明成**参数**，
+   dtype 必须是 `OH_NN_INT64`、shape 必须是长度 1（标量）。
+   注意 hilog 那句 `The 2nd input axis should be type OH_NN_INT64` 说的是
+   "第 2 个**入参**"，不是"第 2 个输入张量" —— 按后者去做会把输入个数搞错，
+   于是收到 `Passed invalid input or output index`。
 3. **布尔类参数必须 `OH_NN_BOOL`** —— MatMul 的 transposeX/Y、GELU 的 approximate、
    ReduceMean 的 keep_dims 都是，写 `OH_NN_INT8` 会被拒。
 4. **每个算子的输入数与参数数必须精确匹配**：Gather 是 3 个输入（input/indices/axis）、
    MatMul 参数个数 ≥1、Cast 还要一个 `castType` 参数。多一个少一个都报
    `INVALID_PARAMETER`。
-5. **`OH_NNModel_GetAvailableOperations` 在本机返回 `opCount=0`**（模型明明有算子）。
+5. **输入 / 输出个数必须精确匹配**。`ops_builder.cpp` 里的 `CheckIOIndex` 只查两件事：
+   个数与算子常量相等、索引不越界。每个算子的 `INPUT_NUM` / `OUTPUT_NUM` / `PARAM_MAX_NUM`
+   都是源码里的常量。
+6. **`OH_NNModel_GetAvailableOperations` 在本机返回 `opCount=0`**（模型明明有算子）。
    实测更可靠的判据是**直接 `OH_NNCompilation_Build`** —— 能编译就是支持。
+
+## 规格不用猜 —— 直接读 NNRt 源码
+
+NNRt 是开源的，每个算子的规格就在源码里（权威且免费）。克隆下来即可：
+
+```sh
+git clone --depth 1 https://gitcode.com/openharmony/ai_neural_network_runtime.git
+# gitee 镜像：https://gitee.com/openharmony/ai_neural_network_runtime.git
+```
+
+看这两个地方：
+
+```
+frameworks/native/neural_network_runtime/ops/<算子>_builder.cpp   ← 单个算子的规格
+frameworks/native/neural_network_runtime/ops_builder.cpp          ← CheckIOIndex / CheckParamIndex
+```
+
+每个 `<算子>_builder.cpp` 里有：
+
+* `INPUT_NUM` / `OUTPUT_NUM` / `PARAM_MAX_NUM` —— 输入、输出与参数的个数；
+* `SetXxx(tensor)` 里的 dtype / shape 校验，以及它对应的报错文案
+  （拿 hilog 里的报错文案反查源码，定位最快）；
+* `REGISTER_OPS(XxxBuilder, OH_NN_OPS_XXX)` —— 对应的算子枚举名。
+
+也可以只取单个文件：
+
+```sh
+curl -sL -o softmax_builder.cpp \
+  https://raw.gitcode.com/openharmony/ai_neural_network_runtime/raw/master/frameworks/native/neural_network_runtime/ops/softmax_builder.cpp
+```
+
+> 注意：设备上的 NNRt 是厂商构建版本，个别算子（如 Squeeze / Slice）的支持情况
+> 可能与上游不同；两者对不上时以**设备实测 + hilog** 为准。
 
 ## 出问题时怎么查原因（关键技巧）
 
@@ -121,10 +162,23 @@ AI_NPUCL: CheckSupported: the op name [X:0] type [Y] is not supported
           in npucl store [elementary_lib] / [fe_lib]
 ```
 
+## 看日志时的一个注意点
+
+`Build` 失败有两种，含义完全不同，别混：
+
+* **建图失败**（`AddOperation` / `Finish` 返回非 0）—— 规格写错了，改图。
+* **NPU 编译失败**（`OH_NNCompilation_Build` 返回非 0）—— 算子在这块 NPU 上不支持，
+  或需要换形态（dtype / shape）。hilog 里会有
+  `CheckSupported: ... is not supported in npucl store [elementary_lib]/[fe_lib]`。
+
 ## 已知的、没做完的部分
 
-* **Softmax 还没跑通**：原因已查明（axis 要作为第 2 个 INT64 输入张量），但还没改完重测。
-  注意力机制需要它，是下一步的第一件事。
+* ~~Softmax 还没跑通~~ → **已跑通**：axis 作为参数张量、dtype `INT64`、shape 长度 1，
+  输入数必须是 1。Concat / Split 同理已通过。
+* **Squeeze / Slice 是「建图成功但 NPU 编译失败」**（`g_err == Build`），说明规格没问题、
+  是这块 NPU 不支持或需要别的输入形态 —— 与「建图失败」要区分开。
+  hilog 里那句 `SqueezeBuilder Passed invalid input or output index` 来自早期
+  「axis 当输入」的尝试，看日志时注意别把它当成当前这版的结论。
 * `ops_probe` 里 Gather / ReduceMean / GELU / LayerNorm / Concat / Split / Cast / Transpose
   这几项仍是「建图失败」——原因同上（规格没配全），**不代表 NPU 不支持**。
 * `offline_probe` 用 `.omc` 走离线模型接口时 `Construct` 成功但 `Build` 失败，
