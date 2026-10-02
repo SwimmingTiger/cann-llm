@@ -193,8 +193,9 @@ class NnrtLlmRunner:
             self._set_input(f"past_key_in{i}", bytes(self._kv[2 * i]))
             self._set_input(f"past_value_in{i}", bytes(self._kv[2 * i + 1]))
 
-        # ⑥ 跑
-        self.be._predict()
+        # ⑥ 跑（必须检查返回值：失败时输出缓冲是空的，
+        #    会伪装成「能跑但输出恒定垃圾」—— 本轮就是栽在这里）
+        self.be._predict_checked()
         for i in range(self.n_layers):
             self._kv[2 * i][:] = self._get_output(f"past_key{i}", self.kv_elems * 4)
             self._kv[2 * i + 1][:] = self._get_output(f"past_value{i}", self.kv_elems * 4)

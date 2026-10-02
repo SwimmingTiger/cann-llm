@@ -230,12 +230,18 @@ class NnrtBackend(EngineBackend):
         "拿不到输出 past_key0 的数据指针"）。
         """
         lib = self._lib
-        arr = self._outs if self._outs is not None else self._handles("out")
-        h = ctypes.c_void_p(arr.handle_list[i])
-        p = lib.OH_AI_TensorGetData(h)
-        if not p:
-            p = lib.OH_AI_TensorGetMutableData(h)      # 输出侧常要 mutable
-        return p
+        # 先试 Predict 时用的那个数组，再试重新查一次（NNRt 可能把结果写到新句柄）
+        cands = []
+        if self._outs is not None:
+            cands.append(ctypes.c_void_p(self._outs.handle_list[i]))
+        fresh = lib.OH_AI_ModelGetOutputs(self._model)
+        cands.append(ctypes.c_void_p(fresh.handle_list[i]))
+        for h in cands:
+            for getter in (lib.OH_AI_TensorGetData, lib.OH_AI_TensorGetMutableData):
+                p = getter(h)
+                if p:
+                    return p
+        return None
 
     def _predict(self) -> int:
         """跑一次 Predict，返回状态码（0 = 成功）。"""
