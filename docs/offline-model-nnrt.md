@@ -355,7 +355,114 @@ bot> y=-0.0794067,0.021637,0.0822754,-0.135498,-0.467773,-0.113281,…
 
 ---
 
-## 8. 已知问题
+
+---
+
+## 8. 把**真实 LLM** 放上去：一个关键前提
+
+我们拿 Qwen2.5-0.5B 做过一轮 PoC（接口由我们设计：`input_ids[1,16] → logits[1,16,151936]`，
+**完全不含 KV**）。结论是：**链路没问题，但模型侧必须用「NPU 亲和」的图**。
+
+### 8.1 直接用 HuggingFace 导出的原生 ONNX 不行
+
+用 `torch.onnx.export`（fp16 · opset 12 · `onnxsim.simplify`）导出的图，OMG 会在
+**算子兼容性检查**这一步拦下：
+
+```
+E model_compatibility_check.cpp CheckOpSupported:
+  "Node /m/model/layers.0/self_attn/Unsqueeze_2 type ExpandDims don't support!"
+E general_model_compiler.cpp: "check ir model compatibility failed"
+```
+
+**NPU 侧不支持 `ExpandDims` / `BroadcastTo` 这类算子**，而 HF 的原生图里就带着它们。
+这不是图画错了 —— 这正是硬件厂商要提供**定制导出脚本**的原因。
+
+### 8.2 用厂商的 NPU 亲和导出器（推荐）
+
+华为的 CANN LLM 示例里有针对每类模型的导出器（内含把不支持的算子消掉/融合的 wrapper）：
+
+```
+https://gitcode.com/HarmonyOS_Samples/cannkit_samplecode_lm_engine_cpp
+
+CANN_LLM/CANN_LLM_Engine_Model/npu_tuned_export/
+  export_model_single_qwen2.py / _qwen3.py / _glm.py
+  npu_tuned_model/{qwen2,qwen3,glm}/   ← ★ 这些 wrapper 就是"NPU 亲和的模型结构"
+  onnx_utils.py · do_opt.py            ← 图优化（GEMM→MatMul 等）
+  model_info_target.yaml               ← 配置模板
+```
+
+跑法（配置里改路径即可）：
+
+```sh
+python export_model_single_qwen2.py <你的 model_info.yaml>
+```
+
+它 30 秒左右就能导完一个 0.5B，产物**没有** `ExpandDims`/`BroadcastTo`：
+
+```
+opset 12 · 1744 节点 · 52 输入 / 49 输出（input_ids/attention_mask/position_ids/
+past_key_in0..N/past_value_in0..N/new_kv_cache_pos → lm_logits/past_key0..N/...）
+算子：Mul Reshape Add MatMul Transpose Slice Concat ReduceMean Sqrt Div ScatterND Softmax
+```
+
+配置里几个要点：
+
+| 配置项 | 说明 |
+|---|---|
+| `model_arch` | `qwen2` / `qwen3` / `zhipu`（对应上面三套 wrapper） |
+| `no_gemm: True` | 把 GEMM 拆成 MatMul（NPU 亲和） |
+| `onnx_opset: 12` | 厂商实测值 |
+| `layers` / `seq_len` / `kv_cache_max_len` | 要**对上你的模型**（0.5B 是 24 层） |
+| `quant_pth` | 量化权重；**为空时代码里虽然允许，但后面的流程仍会要 embedding 的量化 scale** |
+| `embedding_config.embedding_in_omc` | 这个为 `True` 时不需要外部传 `embed_scales`（我们踩过 `assert embed_scale is not None`） |
+
+> Python 依赖：厂商这版 wrapper 需要 **transformers ≥ 4.48**
+> （用到 `FlashAttentionKwargs`），torch 用 2.5.x 一档即可。
+
+### 8.3 OMG 参数：别手写，从 ONNX 里读
+
+厂商的参数长这样（`input_embed` 是 embedding 分离后的名字，我们自己的图可能叫 `input_ids`）：
+
+```
+--input_shape="input_embed:1,-1,1536;attention_mask:1,1,-1,2048;position_ids:1,-1;
+               past_key_in0:2048,2,1,128;…;new_kv_cache_pos:-1;embed_scales:1,-1,1"
+--dynamic_dims="1,1,1,1,1;64,64,64,64,64"
+--input_type="input_embed:INT8;attention_mask:FP32;position_ids:INT32;past_key_in0:FP32;…"
+--output_type="lm_logits:FP32;past_key0:FP16;past_value0:FP16;…"
+--weight_data_type FP16 --save_weights_as_external_data=true
+--platform=kirinx90 --target=omc
+```
+
+**最省事的做法：直接从 ONNX 的 `graph.input` 读每个张量的 dtype 与形状来生成**
+（项目里的 [`scripts/model-conversion/omg_convert.py`](../scripts/model-conversion/omg_convert.py)
+就是这么做的，可以直接借用）。我们手写时踩了三个坑：
+
+1. **输入类型必须与 ONNX 里的真实 dtype 一致** ——
+   `Gather` 的 indices（来自 `input_ids`）若是 `INT64`，OMG 直接拒绝：
+   `Verify failed, Input[1] DataType INT64 is wrong` ⇒ ONNX 里把 `input_ids` 改成 **INT32**；
+2. **`new_kv_cache_pos` 在 `--input_shape` 里要写 `-1`（动态）**，且
+   **不要**把它放进 `--input_type`（放了会报 `not supported type:INT32`）；
+3. **`--dynamic_dims` 的每组维数要和图里动态维的个数一致**
+   （厂商的图有 5 个动态维因为带 `embed_scales`，没有它就只有 4 个）。
+
+### 8.4 还有一个坑：KV 写入的几何要对上
+
+如果图里序列长度是**静态**的（例如我们为简化设了
+`embedding_config.embedding_separate: False`，图直接吃 `input_ids[1,64]`），
+OMG 会在 KV 写入那步失败：
+
+```
+E ScatterNdUpdateVerify: "The dim value should be same,
+   but now is indices.dim[0]:1, update.dim[0]:64"
+```
+
+厂商流程里序列维是**动态**的（`input_embed:1,-1,hidden`），ScatterND 的几何才对得上。
+**所以要用厂商那套配置（`embedding_separate: True`）**，而不是自己简化。
+
+> 一句话：**这条路的"最后一公里"不是 NNRt，而是把模型图做成 NPU 亲和的形态** ——
+> 那部分华为已经把工具和 wrapper 都给全了，照它的流程走即可。
+
+## 9. 已知问题
 
 * **进程退出阶段会 core dump**（`exit code 139`）。推理**结果已经正确**，
   崩在析构/动态库卸载阶段，是独立问题，尚未定位。
