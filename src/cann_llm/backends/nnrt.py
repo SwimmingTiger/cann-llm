@@ -389,7 +389,8 @@ class NnrtBackend(EngineBackend):
             max_new = int(getattr(params, "max_tokens", 32) or 32)
             index, last_tok, n = 0, None, 0
             for piece, tok_id, _ in self._llm.stream(request.prompt, max_new=max_new,
-                                                     stop_ids=self._stop_ids()):
+                                                     stop_ids=self._stop_ids(),
+                                                     params=params):
                 last_tok, n = tok_id, n + 1
                 yield GenerationChunk(text=piece, index=index, token_id=tok_id,
                                       finish_reason=None, stats=None)

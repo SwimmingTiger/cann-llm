@@ -203,6 +203,39 @@ class NnrtLlmRunner:
         return list(struct.unpack("<%df" % self.vocab, raw))
 
     # ------------------------------------------------------------------ 生成
+    def stream(self, prompt: str, max_new: int = 32, stop_ids=(), params=None):
+        """逐 token yield ``(新增文本, token_id, None)``（与分段 runner 接口一致）。"""
+        import random as _random
+        from ..sampling import sample_token
+        assert self.tok is not None
+        ids = self.tok.encode(prompt)
+        if not ids:
+            return
+        logits: List[float] = []
+        pos = 0
+        for tid in ids:
+            logits = self.step(tid, pos)
+            pos += 1
+        rng = _random.Random(getattr(params, "seed", None)) if params is not None else None
+        history = list(ids)
+        out: List[int] = []
+        prev = ""
+        stop = set(stop_ids)
+        stops = tuple(getattr(params, "stop", ()) or ()) if params is not None else ()
+        for _ in range(max(1, max_new)):
+            nxt = (sample_token(logits, params, history, rng) if params is not None
+                   else max(range(len(logits)), key=logits.__getitem__))
+            history.append(nxt)
+            out.append(nxt)
+            cur = self.tok.decode(out)
+            if len(cur) > len(prev):
+                yield cur[len(prev):], nxt, None
+                prev = cur
+            if nxt in stop or (stops and any(x in prev for x in stops)):
+                return
+            logits = self.step(nxt, pos)
+            pos += 1
+
     def generate(self, prompt: str, max_new: int = 32,
                  stop_ids: Sequence[int] = ()) -> Tuple[str, List[int], Dict[str, float]]:
         """贪心解码（PoC 阶段：确定性、可复现）。返回 (文本, 新 token, 统计)。"""

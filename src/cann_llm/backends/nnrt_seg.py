@@ -158,7 +158,7 @@ class SegmentedLlmRunner:
         n = len(logits_bytes) // 4
         return list(struct.unpack("<%df" % n, logits_bytes[:n * 4]))
 
-    def stream(self, prompt: str, max_new: int = 32, stop_ids=()):
+    def stream(self, prompt: str, max_new: int = 32, stop_ids=(), params=None):
         """真正的流式：每生成一个 token 就 yield 一段**新增文本**。
 
         ★ 增量怎么切：**累积解码、只吐新增后缀**。
@@ -178,14 +178,26 @@ class SegmentedLlmRunner:
         out: List[int] = []
         prev = ""
         stop = set(stop_ids)
+        # ★ 采样：给了 params 就按它来（温度/top-k/top-p/重复惩罚/seed），
+        #   没给则保持贪心。history 传 prompt+已生成，供重复惩罚使用。
+        import random as _random
+        from ..sampling import sample_token
+        rng = _random.Random(getattr(params, "seed", None)) if params is not None else None
+        history: List[int] = list(ids)
         for _ in range(max(1, max_new)):
-            nxt = max(range(len(logits)), key=logits.__getitem__)
+            nxt = (sample_token(logits, params, history, rng) if params is not None
+                   else max(range(len(logits)), key=logits.__getitem__))
+            history.append(nxt)
             out.append(nxt)
             cur = self.tok.decode(out)
             if len(cur) > len(prev):
                 yield cur[len(prev):], nxt, None
                 prev = cur
             if nxt in stop:
+                return
+            # 额外停止串（params.stop）：解码后一旦出现就收尾
+            stops = tuple(getattr(params, "stop", ()) or ()) if params is not None else ()
+            if stops and any(x in prev for x in stops):
                 return
             logits = self.step(nxt, pos)
             pos += 1
