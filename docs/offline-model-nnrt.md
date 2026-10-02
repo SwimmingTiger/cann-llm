@@ -462,7 +462,110 @@ E ScatterNdUpdateVerify: "The dim value should be same,
 > 一句话：**这条路的"最后一公里"不是 NNRt，而是把模型图做成 NPU 亲和的形态** ——
 > 那部分华为已经把工具和 wrapper 都给全了，照它的流程走即可。
 
-## 9. 已知问题
+
+---
+
+## 9. ★ 完整走通：真实 LLM 在 NPU 上跑起来（Qwen2.5-0.5B 实测）
+
+这一节是**已跑通的完整配方**，每一步都在 x570 + MateBook Pro 上实测过。
+
+```
+HF 权重 → dopt 三阶段量化 → 厂商导出器(NPU 亲和) → OMG → .omc
+        → converter_lite(--fmk=THIRDPARTY) → .ms → 设备 NNRt 加载并推理 ✓
+```
+
+### 9.1 量化（dopt，用 GPU）
+
+```sh
+QLIBS=<ddk>/tools/tools_dopt/dopt_pytorch_py3
+export PYTHONPATH=$QLIBS:$PYTHONPATH DEVICE=cuda CUDA_VISIBLE_DEVICES=0
+python -u $QLIBS/dopt/dopt_lm/opt_main.py --model-path <HF> \
+    --optimize-config ./config.yaml --quant-stage $1 \
+    --group-size 128 --w-bits 4 --act-bits 16 --block-size 128 \
+    --dopt-config ./output_dir/dopt_config.json --output-dir ./output_dir/train_output
+```
+
+* `config.yaml` 里 **`quant_param_2: False`**（kirinx90 ✓；写错会把权重负半轴钳成 0）；
+* 首次运行会生成 `dopt_config.json` 后退出 ⇒ 用
+  `scripts/model-conversion/set_quant_strategy.py` 填入量化策略，再跑 `stage1/2/3`；
+* 跑完用 `check_quant_clamp.py` 验证：**负值占比应 ≈43~45%、全非负张量 0 个**；
+* 0.5B 三阶段合计 **~2 分钟**（4B 要几十分钟）。
+
+### 9.2 导出（厂商 NPU 亲和导出器 + 量化权重）
+
+配置（`quant_pth` / `config_file` 指向 9.1 的产物，**`embedding_separate: True`**）：
+
+```yaml
+embedding_config: {embedding_separate: True, embedding_as_fp16: False, mul_twice: False}
+no_gemm: True
+model_arch: qwen2
+config_file: <quant>/output_dir/dopt_config.json
+quant_pth:   <quant>/output_dir/train_output/fake_quant_weight.pth
+onnx_opset: 12
+batch: 1
+kv_cache_max_len: 2048
+layers: 24            # ← 要对上你的模型
+seq_len: [1]          # ★★ 见下
+```
+
+```sh
+python export_model_single_qwen2.py <你的 yaml>
+```
+
+> ★★ **`seq_len` 必须让 KV 写入的几何自洽**。OMG 会校验 `ScatterND`：
+> `indices.dim[0]` 与 `update.dim[0]` 必须相等。
+> 用 `seq_len: [64]` 时我们一直撞
+> `ScatterNdUpdateVerify: indices.dim[0]:1, update.dim[0]:64`；
+> **改成 `seq_len: [1]`（decode 步形态）后 OMG 一次通过**。
+
+### 9.3 OMG
+
+参数**从 ONNX 的 `graph.input` 读**（dtype 映射用
+`{1:FP32, 2:UINT8, 3:INT8, 6:INT32, 7:INT64, 10:FP16}` —— 注意 **3 才是 INT8**，
+写成 2 会得到 `UINT8`），并**全静态形状**：
+
+```sh
+omg --model qwen05_w4.onnx --framework 5 --output qwen05s1 \
+    --input_shape="input_embed:1,1,896;attention_mask:1,1,1,2048;position_ids:1,1;
+                   past_key_in0:2048,2,1,64;…;new_kv_cache_pos:1" \
+    --input_type="input_embed:INT8;attention_mask:FP32;position_ids:INT32;past_key_*:FP32;…" \
+    --output_type="lm_logits:FP32;past_key0:FP32;…" \
+    --weight_data_type FP16 --save_weights_as_external_data=true \
+    --platform=kirinx90 --target=omc
+```
+
+产物：`qwen05s1/qwen05s1.omc`（1.3 MB）+ `qwen05s1/SubGraph_0.weight`（**951 MB**）。
+日志出现 `OMG generate offline model success.` 即成功。
+
+> 动态形状（`input_embed:1,-1,896` + `--dynamic_dims`）我们**没试通** ——
+> 静态 + `seq_len=1` 这条路是通的。
+
+### 9.4 转 `.ms` 并在设备上加载
+
+`[third_party_model]` 扩展配置按 ONNX 的 53 输入 / 49 输出逐条生成
+（dtype 用小写 `float32/int8/int32/float16`），然后：
+
+```sh
+converter_lite --fmk=THIRDPARTY --modelFile=qwen05s1.omc \
+               --outputFile=qwen05s1 --configFile=llm05.cfg
+# CONVERT RESULT SUCCESS:0 → qwen05s1.ms (1.3 MB)
+```
+
+`.ms` 与 `SubGraph_0.weight` **放同一目录**，设备上：
+
+```
+OH_AI_ModelBuildFromFile -> 0 (SUCCESS)      ★ 53 输入 / 49 输出
+  in[0] input_embed     INT8  [1,1,896]
+  in[1] attention_mask  FP32  [1,1,1,2048]
+  in[2] position_ids    INT32 [1,1]
+  in[3+] past_key/value_in0..23  FP32 [2048,2,1,64]
+Predict ✓（输出了完整的 151936 个 logits）
+```
+
+**⇒ 一个真实的 LLM，用自己的图、自己的接口、自己的转换链路，在麒麟 NPU 上跑起来了** ——
+全程没有用到华为的 LLM 引擎。
+
+## 10. 已知问题
 
 * **进程退出阶段会 core dump**（`exit code 139`）。推理**结果已经正确**，
   崩在析构/动态库卸载阶段，是独立问题，尚未定位。
