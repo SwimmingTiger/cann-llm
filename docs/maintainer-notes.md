@@ -21,3 +21,21 @@
 * 查找这份 server 时**别只试一个位置**：`CANN_LLM_LLDB_SERVER` 是显式覆盖点；
   没有它时把 `~/.local/bin` 与 `/data/storage/el2/base/files` **追加**到 `PATH`
   末尾（追加而非前插，免得盖掉用户已有的同名程序）再按名字找。
+
+### 想调试 Python 的话
+
+* `/data/service/hnp/` 里那份 Python（`/data/service/hnp/bin/python3`）**无法被 lldb 调试**。
+* 把它**拷出来并重新签名**之后也**不行** —— cann-llm 的推理跑不起来，
+  会报内存分配相关的错误：
+
+  ```
+  MemoryError:
+  ```
+
+  ⇒ **拷出来这条路也不通，别在上面花时间。**
+* ⇒ 想调试 Python，**得自己编译一份不使用 `libmusl_compat` 垫片的 Python**。
+  原因：引擎 `libcann_llm_engine.so` / `libhiai_llm_engine.so` 是按 musl 编译的，
+  而 glibc 构建的 Python 靠 `libmusl_compat` 垫片运行，
+  把 musl 版引擎加载进来就会崩（README「依赖与构建」里那段"不要用 glibc 构建的
+  Python"说的就是这件事）—— 换个壳（拷贝 / 重新签名）解决不了。
+
