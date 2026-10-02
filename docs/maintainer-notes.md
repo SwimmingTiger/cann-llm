@@ -14,6 +14,10 @@
   注意与白名单里的 `com.huawei.codearts.agent` 是**两个应用**）自带那份
   只依赖 musl libc 的自包含 `huawei-debug-lldb-server`。它躺在 IDE 自己的沙箱里，
   必须在 **CodeArts IDE 的终端**里拷出来（源文件在 `/data/storage/el2/base/files/`）。
+  ```
+  $ mkdir -p ~/.local/bin
+  $ cp /data/storage/el2/base/files/huawei-debug-lldb-server ~/.local/bin/
+  ```
 * 本机 lldb 客户端直接 `lldb -- <prog>` 会报
   `error: 'A' packet returned an error: 8` —— 这是**平台限制**，
   与"是否带参数"无关（不带参数也一样）。必须由它 `gdbserver` 先拉起进程，
