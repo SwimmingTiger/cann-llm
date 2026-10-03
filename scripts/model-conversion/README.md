@@ -7,6 +7,7 @@
 | 目录/文件 | 内容 |
 |---|---|
 | **`gemma4/`** | ★Gemma 4 的全部脚本★：5 个图的导出器 + `gemma4_batch.sh` + 对拍/验证工具 ⇒ 见 `gemma4/README.md` |
+| **`int8/`** | int8 量化链路（ONNX → dopt → OMG → .ms）★模型无关★；★本设备跑不通，原因在设备侧✗★，详见其 README 与 `docs/maintainer-notes.md` |
 | **`qwen/`** | Qwen 系列（`build_model.py` 一条命令从 HF 检查点产出模型目录；`patch_qwen3_*.py` 为官方示例打补丁） |
 | `omg_convert.py` | 通用：生成并执行华为 OMG 的转换命令（ONNX → `.omc`） |
 | `onnx_weights_to_fp16.py` | 通用：权重转 FP16（就地插入 Cast，保持拓扑顺序） |
