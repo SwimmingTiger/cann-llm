@@ -108,6 +108,10 @@ class Gemma4SegRunner:
         self.pl_dim = man["embed_tokens_per_layer"]["shape"][1]
         self._f_emb = open(os.path.join(self.wdir, "embed_tokens.f16"), "rb")
         self._f_pl = open(os.path.join(self.wdir, "embed_tokens_per_layer.f16"), "rb")
+        # ★ 段图里【故意去掉了最终的 self.norm】（否则每段都会归一一次 ✗）
+        #   ⇒ 这里必须在 lm_head 之前补上 ✓（曾经漏掉 ⇒ lm_head 拿到的 hidden 是原始尺度 ⇒ 乱码 ✗）
+        self._f_norm = open(os.path.join(self.wdir, "final_norm.f16"), "rb")
+        self.norm_w = struct.unpack("<%de" % self.e_dim, self._f_norm.read(self.e_dim * 2))
         iod = os.path.join(model_dir, "io")
         self.cos_sl = open(os.path.join(iod, "cos_sl.bin"), "rb").read()
         self.sin_sl = open(os.path.join(iod, "sin_sl.bin"), "rb").read()
@@ -180,6 +184,12 @@ class Gemma4SegRunner:
                       "fk": r["fk_out"], "fv": r["fv_out"]}
         off = (n - 1) * self.e_dim * 4
         h_last = hidden[off:off + self.e_dim * 4]
+        # ★ 最终 RMSNorm（Gemma4RMSNorm：用 pow 而非 rsqrt；eps=1e-6）★
+        hv = struct.unpack("<%df" % self.e_dim, h_last)
+        ms = sum(v * v for v in hv) / self.e_dim + 1e-6
+        sc = ms ** -0.5
+        h_last = struct.pack("<%df" % self.e_dim,
+                             *[v * sc * w for v, w in zip(hv, self.norm_w)])
         logits: List[float] = []
         for J in range(4):
             logits.extend(_f32(self.ms.run(os.path.join(self.dir, "lm", "lm%d.ms" % J),
