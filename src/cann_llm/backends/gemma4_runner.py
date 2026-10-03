@@ -329,6 +329,16 @@ class Gemma4ChatRunner(Gemma4SegRunner):
 class Gemma4KvRunner(Gemma4ChatRunner):
     KVMAX = 128
 
+    def __init__(self, model_dir: str):
+        super().__init__(model_dir)
+        # ★ 只保留【同时有 pre 图】的尺寸 —— 否则长 prompt 会去找不存在的 pre{st}_s128/ ✗
+        self.sizes = [S for S in self.sizes
+                      if os.path.exists(os.path.join(self.dir, self._pre_dir(0, S), "pre.ms"))]
+        if not self.sizes:
+            raise FileNotFoundError("KV 路径需要 pre{st}/pre.ms")
+        self._masks = {S: self._causal_mask(S) for S in self.sizes}
+        self.pos = None
+
     def _pre_dir(self, st: int, S: int) -> str:
         return ("pre%d" % st) if S == self.SEQ_BIG else ("pre%d_s%d" % (st, S))
 
