@@ -211,3 +211,70 @@ hilog -x | grep -aiE "MS_LITE|NNRt|CANN|AI_FMK|hiai"
 | 归属 | **设备/固件侧** ✓ | **设备/固件侧** ✓ |
 
 ⇒ **两者同型：通路俱全，设备端能力不足** ✓ —— 不是我们的代码问题 ✓。
+
+---
+
+# ★NPU 能否跑自定义 kernel / int8 的最终归因（逆向证据）★
+
+材料：固件解包里的 `system/lib64/platformsdk/libneural_network_runtime_ext.so`（0.1 MB）
++ `system/lib64/libhiai_*.z.so`（proxy）+ `libhiai_llm_engine.so`，
+用 idalib（`~/rev/nnrt_ext.so`）反编译 ✓。
+
+## 1. `HIAIDevice`（麒麟 NPU 后端）的真实接口
+
+```
+★ 全部围绕 ★mindspore::lite::LiteGraph★★：
+    PrepareModel(shared_ptr<const LiteGraph>, const ModelConfig&)
+    BuildLiteGraph(shared_ptr<hiai::HiaiExecutor>, shared_ptr<const LiteGraph>)
+    PrepareOfflineModel(...) · GetOfflineModelFromLiteGraph(...)
+    PrepareModelFromModelCache(...) · GetSupportedOperation(shared_ptr<const LiteGraph>)
+    AllocateDeviceBufferForOfflineModel · CopyOfflineModelToDevice · ConvertShape
+    AllocateTensorBuffer · ReleaseBuffer · ReadOpVersion
+    IsFloat16PrecisionSupported · IsPrioritySupported · IsModelCacheSupported
+    IsDynamicInputSupported · IsPerformanceModeSupported · IsSupportNpu
+⇒ ★算子集由 hiai 决定；没有任何"自定义算子"入口★ ✗
+```
+
+## 2. 三条关键证据
+
+```
+★★ ① `GetSupportedOperation` 是【空实现】：反编译结果就是 `return 0;` ★★
+     ⇒ 这个后端【不暴露"支持哪些算子"】✗
+     ⇒ ★这正好解释了为什么用 `OH_NNModel_GetAvailableOperations` 得到"算子数=0"✓★
+
+★★ ② 能力查询族里【只有 fp16，没有 int8】✗★★
+     有：IsFloat16PrecisionSupported / IsDynamicInputSupported / IsPerformanceModeSupported …
+     ★没有：IsInt8Supported / IsQuantSupported 之类 ✗★
+     ⇒ ★"int8" 根本不是这个后端的能力维度★ ✓
+
+★★ ③ 有 `TransDataType`，且会【拒绝不支持的 dtype】✗：
+     字符串：`TransDataType failed, data type is unsupported.`
+             `AllocateTensorBuffer failed, transform data type failed.`
+     ⇒ ★dtype 支持集合是【固定枚举】；不在集合内即报此错★ ✓
+     （分支被优化得很难逐条读，但"存在固定白名单"这一点是确定的 ✓）
+
+★ ④ 底层 hiai 在固件里只有【IPC 代理】：
+     libhiai_nn_proxy_1.0/1.1/2.0/2.1.z.so（7–8 KB）· libhiai_single_op_proxy_*.z.so
+     · libhiai_aiv_proxy_*.so · libhiai_infra_proxy_*.so · libhiai_llm_engine.so（3.2 MB）
+     ⇒ ★真正的 NPU 实现在【驱动/固件】侧，用户态拿不到★ ✗
+```
+
+## 3. 结论（三条路都堵死）
+
+```
+★ 通过 NNRt  → ✗ 后端只认 LiteGraph，算子集固定；连算子支持查询都是空实现
+★ 通过 Ascend C / asc-devkit → ✗ 需要 CANN 运行时 + NPU 驱动接口（npu-smi / CANN 包），
+                                 设备上【全部缺失】；HarmonyOS SDK 里也没有 CANN Kit 工具链
+★ 通过 hiai  → ✗ 只有 IPC 代理，实现在固件/驱动侧
+⇒ ★★ 本设备上【无法】运行自定义 NPU kernel ★★ ✗
+```
+
+## 4. int8 的三层归因（最终）
+
+| 层面 | 状态 | 依据 |
+|---|---|---|
+| 硬件 / 指令集 | ★支持 int8 / uint8★ ✓ | asc-devkit 官方类型表（Kirin X90 含 `int8_t`/`uint8_t`）· X90∩int8 API 150/300 |
+| 算子层（Ascend C） | ★有量化 API★ ✓ | `adv_api/quantization/`（AntiQuantize/AscendAntiQuant）· Matmul SetQuant*/SetAntiQuant*/SetDequantType |
+| **端侧运行时（NNRt / HIAIDevice / hiai）** | ★**没有 int8 维度**★ ✗ | 能力查询无 int8 ✗ · dtype 固定白名单 ✗ · 模型转换链无量化途径 ✗ · int8 图 Build FAILED ✗ |
+
+⇒ **硬件能算 int8，但端侧运行时不给这条通路；而"自己写 kernel"这条路也在本设备上不可行** ✓
