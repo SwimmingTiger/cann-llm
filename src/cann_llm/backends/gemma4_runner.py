@@ -130,6 +130,12 @@ class Gemma4SegRunner:
             #   13/14 与共享层被拆开也没关系 —— 含 13/14 的段会输出槽，后面的段消费它 ✓
             self.SEG_STARTS = (0, 8, 16, 24, 30)
             self.SEG_NO = {0: 8, 8: 8, 16: 8, 24: 6, 30: 5}
+            # ★ 合并段目前只有 S=32 一版 ⇒ 尺寸必须限定为它 ✓
+            #   （否则长 prompt 会选 S=128、拿到 S=32 的图 ⇒ "输入 hidden 大小不符" ✗）
+            #   若要支持长上下文，需要另建 mseg*_s128/ ✓
+            self.SIZES = tuple(S for S in self.SIZES
+                               if os.path.exists(os.path.join(self.dir, "mseg%d_s%d" % (0, S), "seg.ms"))
+                               or S == 32)
         else:
             self.MERGED = False
             self.SEG_STARTS = self.SEG_STARTS_ALL
