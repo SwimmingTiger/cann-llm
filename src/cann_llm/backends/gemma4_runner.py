@@ -95,7 +95,8 @@ class Gemma4SegRunner:
          tokenizer.json · io/{cos,sin}_{sl,fu}.bin
     """
     SEQ_BIG = 128                      # 主尺寸（段目录 seg{st}/）
-    SIZES = (32, 128)                  # ★ 可选尺寸：短上下文用小图，少算 padding ✓
+    SIZES = (32, 72, 128)              # ★ 可选尺寸：S=72 是给聊天用的中间档 ✓
+#   （CLI 的对话模板 prompt 是 66 token ⇒ 66>32 却远小于 128 ⇒ 用 72 少算 44% ✓）
     SEQ = 128                          # 兼容旧引用（默认尺寸）
     SEG_STARTS_ALL = (0, 4, 8, 12, 16, 20, 24, 28, 32)   # 未合并时的 9 段
     N_LAYERS, PLE = 35, 256
