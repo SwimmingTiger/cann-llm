@@ -26,6 +26,12 @@ __all__ = ["main"]
 #: 引擎库（按后端分开）
 LIBS = {
     "cann": ("CANN_LLM_LIB", "/system/lib64/ndk/libcann_llm_engine.so", "cann NDK 库"),
+    # ★ nnrt 后端【不用】系统里的 hiai 引擎 ✓ ——
+    #   它自己 ctypes 直调 MindSpore Lite 的 NDK，并选 OH_AI_DEVICETYPE_NNRT(=60) ✓。
+    #   以前这张表里没有 nnrt ⇒ LIBS.get("nnrt", LIBS["hiai"]) 回落到 hiai ✗，
+    #   于是 -b nnrt 会误导性地打印 "✓ hiai 引擎: /system/lib64/libhiai_llm_engine.so" ✗
+    "nnrt": ("CANN_LLM_NNRT_LIB", "/system/lib64/ndk/libmindspore_lite_ndk.so",
+             "nnrt 引擎 (MindSpore Lite NDK)"),
     "hiai": ("CANN_LLM_HIAI_LIB", "/system/lib64/libhiai_llm_engine.so", "hiai 引擎"),
 }
 
