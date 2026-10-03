@@ -416,3 +416,56 @@ ge::AttrUtils::SetInt(opDesc, "dtype", opParam->dtype);         // SetScaleOffse
     但它必须经【扩展配置】送入 ⇒ 设备侧 hiai foundation 拒绝扩展配置 ✗
 ⇒ ★两条路都断在"量化配置 blob 送不进去 / 形态凑不齐"★★
 ```
+
+## 6. 尝试结果与最后一环：hiai 适配层支持的量化能力
+
+**尝试**：用 NNRt 的量化专用算子 `OH_NN_OPS_QUANT_DTYPE_CAST`（= 52）
+拼出 GE 期望的量化形态。踩到两个坑后★构图层全通★：
+
+| 坑 | 设备库原话 | 正确做法 |
+|---|---|---|
+| 参数张量用 `OH_NN_INT32` | `"SetSrcT failed, the src_t should be type OH_NN_INT64"` | ★必须 `OH_NN_INT64`★ |
+| 参数张量 type 用 `OH_NN_TENSOR` | — | 专属 type：`OH_NN_QUANT_DTYPE_CAST_SRC_T=72` / `_DST_T=73` / `_AXIS=126` |
+
+满足后 6 个 dtype 变体（U8→F32 / I8→F32 / F32→U8 / F32→I8 / 无 axis / F32→F32）
+`AddOperation` 与 `Finish` **全部 SUCCESS** ✓
+
+**但 Build 仍 FAILED**，hilog 原文：
+
+```
+E NNRt_HiAIAdapter: ★Unrecognized node type 113 for QuantDTypeCast:0.★
+E NNRt_HiAIAdapter: Exec Op Convert failed.
+E NNRt_HiAIAdapter: Convert CNode to hiai op failed.
+E NNRt_HiAIAdapter: Create Op Convert failed for node type 113 for QuantDTypeCast.
+E NNRt_HiAIAdapter(via MindIROpConvertFactory): CreateOpConvert: Not supported Type: QuantDTypeCast
+```
+
+**适配层实际支持什么**（`libhiai_adapter.so` 字符串为证 ✓）：
+
+```
+✓ 反量化：★DequantData★（逐张量）· ★DequantPerChannelData★（逐通道）
+    （"DequantData failed, Quant params is empty." / "DequantPerChannelData failed, …"）
+✓ 反量化卷积权重："Dequant conv weight tensor enter." / "Dequant weight failed!"
+✓ Cast："Convert cast node failed, datatype %d of input/output is not supported."
+✗ ★没有 QuantDTypeCast（node type 113）的转换器★ ⇒ Unrecognized node type
+★ 其它限制："arithmetic op not supported in IR." · "Not support NPU." ·
+   "Dst data type fp16 is not support now!" · "currently do not support scale with actType other than relu."
+```
+
+**⇒ 卡点在 `MindIROpConvertFactory::CreateOpConvert` 的查找表里没有 113** ✓
+
+## 7. int8 归因的最终全图（逐层都有出处）
+
+| 层 | int8 状态 | 证据 |
+|---|---|---|
+| ① 硬件/指令集 | ★支持★ ✓ | asc-devkit 类型表；X90∩int8 API 150/300 |
+| ② NPU 算子实现 | ★有 int8 代码路径★ ✓ | `libai_npucore_elementary.so`：`DT_FLOAT16/DT_FLOAT/DT_INT8`、`TransFilterConvForInt8` |
+| ③ 固件 `npu.img` | 无精度概念（只管调度） | LiteOS；int8/FP16 字符串 0 次 |
+| ④ GE 通用算子 InferShape | ★只认 float/int32★ ✗ | `"Data type of add OP must be float or int32."`；`[op:Add type:0] Infershape failed` |
+| ⑤ GE 量化形态 | 需四要素 + 配置 blob | `quant_type`/`scale`·`offset` 属性、Quant/Dequant 节点、`"Quant config buffer is empty."` |
+| ⑥ 配置 blob 通道 | ★被设备拒绝★ ✗ | `"hiai foundation not support extension config"` |
+| ⑦ NNRt 量化算子接口 | ★有★ ✓ | `QUANT_DTYPE_CAST=52` + `NN_QuantParam` 系列；构图层全通 |
+| ⑧ hiai 适配层 | ★无 113 的转换器★ ✗ | `Unrecognized node type 113 for QuantDTypeCast` |
+
+⇒ **每层都"差一点点"：硬件有、算子实现有、NNRt 接口有；
+   但 GE 通用算子不收 int8，且 hiai 适配层没有量化算子转换器** ✓
