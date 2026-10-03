@@ -624,3 +624,60 @@ ida_bytes.get_bytes(0x52D34, 0x78)      # 15 条 int32 配对
 `UpdateDataType4CPUCLSubGraph` ·
 `HIAI_HCL_BuiltModel_CheckCompatibility_Impl`（对外 C 接口）
 ⇒ CPUCL = **CPU Compute Library**，实现库为 `libcpucl_itf.so` / `libcpucl_rom.so` ✓
+
+## 10. ★★ 找到了 GE 侧 MatMul 的 dtype 白名单（决定"合法量化形态"）★★
+
+**起因**：按 §9 的 `IsCompatibleQuantType` 白名单试 `(DT_FLOAT16, DT_INT8)`（W8A16），仍然失败。
+hilog 给出确切原因：
+
+```
+E AI_FMK: math_op_infershapes.cpp VerifyMatMulInputsDataType(765)
+  ::"Node:Matmul:0 Verify inputs data type:1 and filter data type:2 fail, not support currently."
+E AI_FMK: ir_infer_shape_optimizer.cpp RunInferShape(296)::"Infershape for [op:Matmul:0 type:MatMul] failed."
+E HIAI_DDK_MSG: hiai_model_runtime_repo.c ModelRuntimeRepo_TryBuild(154)::"no runtime support the Model."
+```
+（`inputs data type:1` = DT_FLOAT16，`filter data type:2` = DT_INT8）
+
+**逆向 `libgraph.so` 的 `VerifyMatMulInputsDataType`**（反编译）：
+它建两个 `set<ge::DataType>` 分别调 `ge::InferUtil::VerifyInputDataType(node, 0/1, set)`：
+
+```
+① 输入张量白名单：@unk_2A270，28 字节 = 7 个 DataType
+     DT_FLOAT(0) · DT_UINT16(7) · DT_UINT8(6) · DT_INT32(4) · DT_INT8(2) ·
+     DT_RESOURCE(22) · DT_FLOAT6_E2M3(36)
+   ★ 注意：★没有 DT_FLOAT16(1)★
+② 权重白名单：@unk_2A28C，40 字节 = 10 个 DataType
+     DT_FLOAT(0) · DT_INT8(2) · DT_RESOURCE(22) · DT_VARIANT(25) · DT_INT4(26) ·
+     DT_COMPLEX32(30) · DT_UINT1(27) · DT_UINT16(7) · DT_UINT8(6) · DT_INT32(4)
+```
+
+**⇒ 合法的量化 MatMul 只有 `(DT_FLOAT, DT_INT8)`（W8A32）** ✓
+—— 与 §9 的 `IsCompatibleQuantType` 白名单第 0 条完全一致，两张表互相印证 ✓
+
+## 11. ★★ W8A32 实测：越过两道检查，卡在 QuantizeOptimizer ★★
+
+`MatMul(x: FP32, w: INT8) -> y: FP32`，w 挂 `SetTensorQuantParams`，实测 hilog：
+
+```
+✓ VerifyMatMulInputsDataType 【本次不再报错】 ⇒ dtype 校验通过
+✓ CheckCompatibility          【本次不再报错】 ⇒ 量化类型白名单通过
+✗ AI_NPUCL: quantize_optimizer.cc QuantizeOptimizer(28)::"QuantizeOptimizer Fail!"
+✗ AI_NPUCL: sub_graph_optimizer.cc QuantizeOptimizer(200)::"graph[SubGraph_0] quantize optimizer fail."
+✗ AI_FMK: model_optimizer.cpp GraphPreGraphSaveOptimize(320)::"optimizer_presave in cl NPUCL failed !"
+⇒ HIAI_DDK_MSG: "no runtime support the Model." → NNRt Build failed
+```
+（CL 名从 CPUCL 变为 **NPUCL** ⇒ 该图已被分给 NPU 计算库 ✓）
+
+**⇒ 闭环结论**：
+
+```
+✓ 白名单合法形态 (DT_FLOAT × DT_INT8) 能过 dtype 校验 + 量化兼容性检查
+✗ 但卡在 QuantizeOptimizer —— 它要求 §3 的【四个量化要素】：
+    quant_type 属性 · scale/offset 属性 · Quant/Dequant 节点 · ★量化配置 blob★
+⇒ 而配置 blob 只能经【扩展配置】送入 ✗（设备侧 hiai foundation 拒绝）
+⇒ ★★ 与 §8 的结论闭环：量化形态与配置 blob 两条路在本设备都不通 ★★
+```
+
+**新增探针**：`w8a16.c`（4 变体，含 MATMUL 参数要求）· `w8a32.c`（白名单合法形态单测）
+**MATMUL 参数要求（NNRt 源码 `ops/matmul_builder.cpp` 原文）**：
+`TransposeA/TransposeB` 必须 **OH_NN_BOOL 标量**；`ActivationType` 必须 **OH_NN_INT8 标量** ✓
