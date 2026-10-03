@@ -25,6 +25,13 @@ class GemmaTokenizer:
         self.bos_id = self.added.get("<bos>", 2)
         self.eos_ids = {1, self.added.get("<turn|>", 106), 50}
 
+    @property
+    def special_ids(self):
+        """停用符 id 集合（NnrtBackend._stop_ids 会取它 ✓）
+        Gemma 的 generation_config 里 eos_token_id = [1, 106, 50]，
+        其中 106 就是 <turn|> ✓"""
+        return {1, self.added.get("<turn|>", 106), 50}
+
     def _bpe(self, piece):
         if len(piece) <= 1:
             return [piece]
