@@ -193,6 +193,24 @@ def split_known(argv: "List[str]") -> "tuple[Optional[str], str, List[str]]":
 
 # ---------------------------------------------------------------- 两条入口
 
+#: ★引擎库的依赖搜索路径★ ——
+#  libmindspore_lite_ndk.so 的 DT_NEEDED 里有 libmindspore-lite.so /
+#  libmindspore-lite-train.so / libhilog.so / libsec_shared.z.so，
+#  它们【不在】/system/lib64/ndk ✓ 而在 ★/system/lib64/platformsdk★ ✓
+#  ⇒ 搜索路径少一个目录时，musl 的 dlopen 会在解析失败的分支上★段错误★ ✗
+#    （实测：只有 /system/lib64/ndk 时，python-3.14 一 CDLL 就 core dump ✗；
+#      补上 platformsdk 立刻正常 ✓ —— 这正是"3.14 兼容性问题"的真身 ✓）
+ENGINE_LIB_DIRS = ("/system/lib64/ndk", "/system/lib64/platformsdk")
+
+
+def ensure_engine_lib_path(env: "dict") -> None:
+    """把引擎库需要的目录补进 LD_LIBRARY_PATH（缺了会段错误 ✗，不是"找不到"那么温和 ✓）"""
+    cur = [d for d in env.get("LD_LIBRARY_PATH", "").split(":") if d]
+    add = [d for d in ENGINE_LIB_DIRS if d not in cur]
+    if add:
+        env["LD_LIBRARY_PATH"] = ":".join(add + cur)
+
+
 def run_chat(root: str, argv: "List[str]") -> int:
     model_dir, backend, rest = split_known(argv)
     # ★ 没显式给 -b（也没设 CANN_LLM_BACKEND）时，按模型目录自动判断后端 ★
@@ -244,6 +262,7 @@ def run_chat(root: str, argv: "List[str]") -> int:
             info("改单轮上限：--max-tokens <n>   例：scripts/start_chat.sh -d … --max-tokens 512")
 
     env = dict(os.environ)
+    ensure_engine_lib_path(env)          # ★ 补全引擎库依赖路径（缺了会段错误 ✗）★
     env["PYTHONPATH"] = os.path.join(root, "src") + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env[var] = lib

@@ -321,6 +321,10 @@ def run_server(root: str, argv: "List[str]") -> int:
     if o.get("model_dir"):
         from .omcimport import ensure_model_dir
         ensure_model_dir(str(o["model_dir"]), backend)
+    from .launcher import ensure_engine_lib_path
+    _env = dict(os.environ)
+    ensure_engine_lib_path(_env)
+    os.environ["LD_LIBRARY_PATH"] = _env.get("LD_LIBRARY_PATH", "")
     host, port = str(o["host"]), int(o["port"])
     p = paths(root)
 
