@@ -820,3 +820,59 @@ B=${MSLITE_BUILD:-/src/mindspore-src/source/output/tmp/mindspore-lite-2.7.0-linu
 **⇒ 下一步**：在 CANN 容器内（或找到等价版本）跑
 `converter_lite --fmk=THIRDPARTY --modelFile=mm.omc --outputFile=wq7_mm --configFile=mm.cfg`
 （cfg 用 `quant_type=WEIGHT_QUANT` + `[third_party_model]` 段 ✓）
+
+## 15. ★★★★★ int8 首次在 NPU 上跑通：完整可行配方 ★★★★★
+
+**结果**：`Build 0 · Predict -> 0` ✓，且 hilog 证明在 NPU 上执行：
+
+```
+W AI_NPUCL: npu_graph_executor_om.cc Init(115)::"load model succ: modelName=default_ndk modelId=64"
+W AI_NPUCL: npu_graph_executor_client.cc Init(406)::"client executor id = 65536"
+W AI_NPUCL: npu_graph_executor_service_init.cc GraphExecutorInit(129)::"load model finish, pid: 9484, client id: 65536, server id: 828"
+E AI_NPUCL: npu_graph_executor_om.cc EnableIfuPrelod(1752)::"smDesc is null, kernelInfo.stubName = ★executor_batchmatmul_cube★"
+W hiaiserver/RUNTIME: rpc_request_service.cpp BindCurTidToMidBigCore(55)::"Bind Core Success, tid:9497"
+```
+
+**关键结论：合法形态 = `(FP32 激活 × INT8 权重)` = W8A32**
+（与 §9 的 `IsCompatibleQuantType` 第 0 条、§10 的 `VerifyMatMulInputsDataType` 两张表一致 ✓；
+ 纯 int8×int8 两者都不接受 ✗）
+
+### 完整配方（四步）
+
+```sh
+# ① 准备 ONNX（W8A32 的目标形态；本仓库 mm.onnx 为 175 字节手写样例：
+#    y[1,4] = MatMul(x[1,4], w[4,4])，注意 opset_import 的 version 是字段 2）
+
+# ② OMG ⇒ .omc
+DDK=$HOME/ddk
+LD_LIBRARY_PATH=$DDK/tools/tools_omg/master/lib64:$DDK/tools/platform/kirinx90/lib64 \
+  $DDK/tools/tools_omg/omg --model mm.onnx --framework 5 --output mm \
+  --input_shape "x:1,4" --out_nodes "y:0" --platform=kirinx90 --target=omc
+#   ⇒ "OMG generate offline model success."  mm.omc
+
+# ③ ★在 mslite-dev 容器内★ converter（--fmk=THIRDPARTY 只有容器内那版支持）
+#    mm.cfg: [common_quant_param] quant_type=WEIGHT_QUANT / bit_num=8 / ...
+#            [third_party_model]  input_names/input_dtypes/input_shapes/
+#                                 output_names/output_dtypes/output_shapes
+docker cp mm.omc mslite-dev:/tmp/ && docker cp mm.cfg mslite-dev:/tmp/
+docker exec mslite-dev bash -c '
+  B=/src/mindspore-src/source/output/tmp/mindspore-lite-2.7.0-linux-x64
+  cd /tmp && $B/tools/converter/converter/converter_lite --fmk=THIRDPARTY \
+    --modelFile=mm.omc --outputFile=wq7_mm --configFile=mm.cfg'
+#   ⇒ CONVERT RESULT SUCCESS:0   wq7_mm.ms（比 .omc 略大，量化信息已写入）
+
+# ④ 设备：MS-Lite + NNRt（不传扩展配置，量化信息已在模型里）
+python3.14 scripts/model-conversion/int8/probe_quant.py wq7_mm.ms - QuantConfigData 60
+#   ⇒ ★Build 0 · Predict -> 0 ✓★
+```
+
+### 三个必须同时满足的条件（少一个都不行）
+
+| 条件 | 原因 | 错则报 |
+|---|---|---|
+| ★量化组合 = WEIGHT_QUANT★（激活浮点 × 权重 int8） | GE/hiai 白名单只收 `(FLOAT/FP16, INT8)` | `VerifyMatMulInputsDataType … fail` / `Infershape failed` |
+| ★必须带 third-party 标记★ | MS-Lite 的 NNRt delegate 只处理 third-party 模型 | `nnrt_delegate.cc:237 "not third party model"` |
+| ★`--fmk=THIRDPARTY` 需容器内 converter★ | x570 上两版都不支持该取值 | `Flags Init failed Ret:-600` / `only support micronization` |
+
+**不需要扩展配置** ✓：量化信息随模型一起下发（`AddExtensionConfig` 那条路设备端不支持 ✗，
+但那不是必经之路 ✓）

@@ -6,6 +6,12 @@
 > ## ⚠️ 结论先说：**本设备上跑不通，原因在设备侧** ✗
 >
 > 设备固件的 hiai foundation 明确声明 **"not support extension config"** ✗，
+> ★★★ 2026-10 更新：★int8 已在本设备上跑通★ ★★★
+> 正确组合是【weight-only int8】（激活浮点 × 权重 int8 = W8A32/W8A16），
+> 而不是 dopt 的 int8×int8；且必须经 OMG + 容器内 converter `--fmk=THIRDPARTY`。
+> 完整配方见 `docs/maintainer-notes.md` §15（四步命令 + 已实测 `Build 0 · Predict 0` ✓）。
+>
+> 下面这段是旧结论，仅在【int8×int8】或【缺 third-party 标记】时成立：
 > 而厂商的 int8 量化链路（dopt）**恰恰必须通过扩展配置把量化参数传给它** ✓
 > ⇒ 编译 int8 模型必然失败（`Build -1`）✓。
 >
