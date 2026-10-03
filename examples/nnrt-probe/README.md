@@ -187,3 +187,42 @@ AI_NPUCL: CheckSupported: the op name [X:0] type [Y] is not supported
 * 运行时会看到几条无害警告：`libai_npucore_ascendc.so` 不存在、`dma_heap_alloc`
   打不开若干共享内存堆、`[BackendManager] RegisterBackend failed` ——
   实测不影响在线构图这条路的编译与执行。
+
+---
+
+## int8 探索（新增，未完成）
+
+### 已确认的关键结论 ✓
+
+```
+★ 设备：NNRt 直连可见 NPU（device type=3，name=NPU_ohos.boot.hardware.KirinX90_v2_0）✓
+★ ★★ 量化参数通道【可用】★★：
+    OH_NNQuantParam_Create / SetNumBits / SetScales / SetZeroPoints
+    ⇒ OH_NNModel_SetTensorQuantParams(model, index, qp)  ★rc=0 (SUCCESS)★ ✓
+  ⇒ 与"扩展配置"那条路【完全不同】✗：
+    OH_NNCompilation_AddExtensionConfig("QuantConfigData", …) 在设备侧被拒
+    （hilog: "hiai foundation not support extension config" ✗）
+  ⇒ ★★ 也就是说：int8 若走【张量量化参数】而不是【扩展配置】，设备是接受的 ★★
+```
+
+### 还没走通的一步 ✗
+
+```
+✗ OH_NNModel_AddOperation(model, OH_NN_OPS_ADD / OH_NN_OPS_MATMUL, …) ⇒ rc=2 (INVALID_PARAMETER)
+  · 张量全部 AddTensor 成功 ✓、量化参数全部成功 ✓、SetTensorData 成功 ✓
+  · 仅 AddOperation 失败 ⇒ 属于【图构造细节】（参数/索引数组的写法），与 int8 无关
+```
+
+### 新增文件
+
+| 文件 | 作用 |
+|---|---|
+| `int8_probe.c` | 搭最小 int8 图（ADD / MATMUL）+ 挂 `NN_QuantParam` + 编译；当前停在 `AddOperation` rc=2 |
+| `avail_probe.c` | 调 `OH_NNModel_GetAvailableOperations` 问设备支持哪些算子（也受同一个 `AddOperation` 阻塞） |
+| `inc/neural_network_runtime/` | 官方 NNRt 头文件副本（枚举/Signature 的权威出处 ✓）：`neural_network_runtime.h` · `_type.h` · `_core.h` · `_inner.h` |
+
+### 下一步（明确）
+
+1. 修 `AddOperation` 的 rc=2（对照官方文档示例逐字段核对参数/索引数组）
+2. 通了之后 ⇒ `GetAvailableOperations` 问 NPU 是否支持 int8 的 ADD/MATMUL
+3. ⇒ `OH_NNCompilation_Build` + `OH_NNExecutor_RunSync` ⇒ **int8 在 NPU 上跑通与否，即见分晓**
