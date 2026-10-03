@@ -234,6 +234,10 @@ class Gemma4SegRunner:
                               self._pl_off(t) + (st + i + 1) * self.PLE * 4]
                     for t in range(S))
             r = self.ms.run(os.path.join(self.dir, self._seg_dir(st, S), "seg.ms"), feeds)
+            # ★ 合并布局：含层 13/14 的段会输出 2 个共享槽（sk/sv/fk/fv）⇒ 传给后面的共享段 ✓
+            if "sk_out" in r:
+                kv = {"sk": r["sk_out"], "sv": r["sv_out"],
+                      "fk": r["fk_out"], "fv": r["fv_out"]}
             hidden = r["hidden_out"]
             if "sk_out" in r:
                 kv = {"sk": r["sk_out"], "sv": r["sv_out"],
