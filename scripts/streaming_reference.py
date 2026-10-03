@@ -20,8 +20,8 @@
   * 绝不能在生成期间从外部读 Context（会与工作线程竞态 → abort / segfault）
 """
 import ctypes, os, sys, threading, time
-sys.path.insert(0, "/storage/Users/currentUser/work/llm/cann-llm/src")
-D = "/storage/Users/currentUser/work/llm/models/qwen25_coder_7b_omc1024"
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
+D = os.environ.get("MODEL_DIR", "")
 from cann_llm.backends.hiai_tokenizer import QwenTokenizer
 L = ctypes.CDLL("/system/lib64/libhiai_llm_engine.so", mode=ctypes.RTLD_LOCAL)
 def b(n, r, a):

@@ -2,7 +2,7 @@
 import ctypes as C, struct, sys, os
 
 LIB = "/system/lib64/ndk/libmindspore_lite_ndk.so"
-D   = "/storage/Users/currentUser/work/llm/models/g4seg3d"
+D   = os.environ.get("MODEL_DIR", "")
 IO  = os.path.join(D, "io")
 lib = C.CDLL(LIB)
 

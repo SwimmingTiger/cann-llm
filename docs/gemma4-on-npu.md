@@ -112,13 +112,12 @@
 导出脚本（在转换机上跑，需厂商 DDK 与 MindSpore Lite 转换工具链）：
   scripts/model-conversion/gemma4/gemma4_model.py      分段实现（3 维 + KV 共享）
   scripts/model-conversion/gemma4/gemma4_export_seg.py 段图导出（= prefill，含 KV 共享槽）
-  scripts/model-conversion/gemma4/gemma4_export_seg.py 段图即 prefill ⇒ 已并入上一行
   scripts/model-conversion/gemma4/gemma4_export_decode.py decode 图（seq=1 + KV）
-  scripts/model-conversion/gemma4_batch.sh            9 段批量：导出 → OMG → converter_lite
+  scripts/model-conversion/gemma4/gemma4_batch.sh            9 段批量：导出 → OMG → converter_lite
 设备侧：
   src/cann_llm/backends/gemma4_runner.py   Gemma4SegRunner / ChatRunner / KvRunner
   src/cann_llm/tokenizer_gemma.py          GemmaTokenizer（与 HF 7/7 一致）
-模型目录：~/work/llm/models/gemma4_chat/（seg{0..32}[/_s32]、dec{0..32}、pre{..}_s32、lm0..3、weights、io、tokenizer.json）
+模型目录：`<模型目录>/`（seg*/mseg*、dec*、pre*、lm*、weights、io、tokenizer.json）
 ```
 
 
