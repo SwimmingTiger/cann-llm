@@ -1153,3 +1153,66 @@ subGraph[0] name = subgraph_0_main_graph      tensors = 446   nodes = 255
 **⇒ 这也印证了另一条线索**：使用 `BuildOfflineModel`（third-party 专用通道）去加载原生 `.ms`
 本就不是它的加载方式（`nnrt_delegate.cc:237 "not third party model"` ✓）；
 原生 `.ms` 有它自己的加载路径 ✓
+
+## 22. ★★★★★ 原生 int8 模型的正确加载方式：设备 id 必须指向 NPU ★★★★★
+
+**问题**：原生 int8 `.ms`（`--fmk=ONNX` + `WEIGHT_QUANT`）在 NNRt 下也 `Build -1`，
+且 hilog 显示它走了 `BuildOfflineModel` 并报 `not third party model` ✓。
+
+**根因（源码逐层追出）**：
+
+```
+NNRTDelegate::Build()
+  ├─ is_kirin_online = IsKirinNPUWithOnlineInference()   // 前缀 "NPU_"
+  │    ⇒ 真 ⇒ BuildKirinNPUModel()      ← ★原生模型应走这条★
+  ├─ is_kirin_offline = IsKirinNPUWithOfflineInference() // 前缀 "HIAI_F"
+  │    ⇒ 真 ⇒ BuildOfflineModel()       // 要求 IsCustomModel() = 单节点 Custom
+  └─ 都不匹配 ⇒ 直接 kSuccess（不建 kernel）
+
+bool CheckNPUPrefix(prefix) {
+  auto device_id = nnrt_device_info_.device_id_;
+  NNDeviceGetName(device_id, &device_name);
+  return strncmp(prefix, device_name, prefix.size()) == 0;
+}
+
+// NNRtDeviceInfo 默认值（inner_context.h:79）
+struct NNRtDeviceInfo { size_t device_id_ = ★0★; ... };
+```
+
+```
+⇒ ★因为 `device_id_` 默认 0，`NNDeviceGetName(0,…)` 拿到的名字不是 "NPU_…"，
+  于是 online=false、offline 也判为真路径但 `IsCustomModel()`=false ⇒ 报 not third party model★ ✗
+```
+
+**赋值链（device_id 从 API 一路到 delegate）**：
+
+```
+converters.cc:185  AddNNRtDevice(inner_context, ★nnrt_device_info->GetDeviceID()★, …)
+converters.cc:89   device_info.nnrt_device_info_.device_id_ = device_id;
+lite_session.cc:700 delegate_ = make_shared<NNRTDelegate>(iter->device_info_.nnrt_device_info_);
+```
+
+**⇒ 正确做法：把 device id 设成 NNRt 枚举出来的 NPU 设备** ✓
+
+设备侧 `libmindspore_lite_ndk.so` 导出的相关 API（权威清单）：
+
+```
+★ OH_AI_DeviceInfoSetDeviceId ★        ← 设置设备 id
+★ OH_AI_GetDeviceIdFromNNRTDeviceDesc ★ ← 由 NNRt 设备描述符取得 MS-Lite 认的 id
+OH_AI_DeviceInfoCreate / Destroy / GetDeviceId / GetDeviceType /
+Set/GetEnableFP16 / Set/GetFrequency / Set/GetPerformanceMode / Set/GetPriority /
+Set/GetProvider / Set/GetProviderDevice / AddExtension
+（共 18 个）
+```
+
+**⇒ 因此原生 int8 `.ms` 的加载方式应为**：
+
+```
+① OH_NNDevice_GetAllDevicesID(...)            // NNRt 枚举，取 NPU 设备
+② OH_AI_GetDeviceIdFromNNRTDeviceDesc(...)    // 转成 MS-Lite 的设备 id
+③ OH_AI_DeviceInfoSetDeviceId(dev, id)        // 写入 DeviceInfo
+④ OH_AI_ContextAddDeviceInfo(context, dev)    // 之后即走 BuildKirinNPUModel（在线）
+```
+
+⇒ 写入正确 id 后 `CheckNPUPrefix("NPU_")` 应匹配，
+⇒ 原生模型不再走 `BuildOfflineModel`，`not third party model` 也不会再出现 ✓
