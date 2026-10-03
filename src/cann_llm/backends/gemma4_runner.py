@@ -12,7 +12,7 @@
   · ★已 build 的模型要缓存★：build 是慢的根源；★故意不 destroy★（销毁会 core dump）
 """
 from __future__ import annotations
-import ctypes as C, json, math, os, struct
+import ctypes as C, json, math, os, struct, time
 from typing import Iterator, List
 
 _NDK = "/system/lib64/ndk/libmindspore_lite_ndk.so"
@@ -149,6 +149,7 @@ class Gemma4SegRunner:
         #   按实测规律：full_attention 层在 4/9/14/19/24/29/34（即 i % 5 == 4），head_dim=512；
         #   其余是 sliding_attention，head_dim=256 ✓
         self.dims_all = [512 if (i % 5 == 4) else 256 for i in range(35)]
+        self._timing = {}
 
     def _pl_off(self, t: int) -> int:
         """第 t 个 token 在分块 per_layer buffer 里的【字节】偏移 ✓"""
@@ -219,13 +220,31 @@ class Gemma4SegRunner:
         return struct.pack("<%df" % (seq * seq), *out)
 
     # ---------- 前向 ----------
+    def _tstage(self, name: str, t0: float) -> float:
+        """★ 分段计时（CANN_LLM_TIMING=1 时开启）★ 用来看时间到底花在哪 ✓"""
+        if not os.environ.get("CANN_LLM_TIMING"):
+            return 0.0
+        t1 = time.perf_counter()
+        self._timing[name] = self._timing.get(name, 0.0) + (t1 - t0)
+        return t1
+
+    def timing_report(self) -> str:
+        tot = sum(self._timing.values()) or 1.0
+        rows = sorted(self._timing.items(), key=lambda kv: -kv[1])
+        return "  ".join("%s=%.1fs(%.0f%%)" % (k, v, 100 * v / tot) for k, v in rows)
+
+    def reset_timing(self):
+        self._timing = {}
+
     def forward(self, ids: List[int]) -> List[float]:
         n = len(ids)
         S = self._pick_seq(n)                       # ★ 选最小的够用尺寸 ✓
         mask = self._masks[S]
         pad = list(ids) + [0] * (S - n)
         # 图 P 按 S=1 导 ⇒ 逐 token 跑再拼（有缓存，每次只剩一次 Predict）✓
+        _t = time.perf_counter()
         per_layer = self._per_layer_chunked(pad, S)
+        _t = self._tstage("graphP", _t)
         hidden = b"".join(self.emb(i) for i in pad)
         kv = {}
         for st in self.SEG_STARTS:
