@@ -1,127 +1,132 @@
-"""Gemma 4 E2B 文本侧的分段构建（3 维 NPU 友好实现）。
+"""NPU 友好的 Gemma 4 分段实现（3 维数学 + KV 共享）。
 
-为什么必须这样写（全部来自实测，细节见 docs/offline-model-nnrt.md §13）：
-  ① 分段是硬要求：embed_tokens_per_layer = [262144, 8960] = 2.35e9 元素，
-     超过 OMG 的单张量 INT_MAX 上限 ⇒ 只能按层切开，每段只带自己那几层；
-  ② 段内 config 一律不动（num_hidden_layers / num_kv_shared_layers 都要保持全局，
-     否则 first_kv_shared_layer_idx 算错、KV 共享语义全错 —— 实测输出会差 350）；
-  ③ per_layer 要预先切片传进来，并把 project_per_layer_inputs 换成"直通"
-     （它被无条件调用且按全局层数 reshape）；段内末尾的 self.norm 要关掉；
-  ④ rotate_half 必须用【常量矩阵乘法】实现（x @ P）：
-     原实现会把 head_dim 切成两半 ⇒ 4 维 StridedSlice ⇒ OMG 直接拒收；
-  ⑤ 注意力全部用【3 维】张量（[heads, seq, head_dim]）：NPU-CL 对 ≥4 维支持很差；
-  ⑥ P 必须注册成 module buffer：若在 forward 里构造，ONNX 追踪会把它展开成
-     上万个节点（实测 1 层 21521 节点 ⇒ 注册后 599 节点）。
+复刻自 modeling_gemma4.py，关键差异（全部来自实测）：
+  · 全部 3 维张量 [heads, seq, head_dim] —— NPU-CL 对 ≥4 维支持很差
+  · rotate_half 用常量矩阵乘法 x@P —— 原实现切 head_dim ⇒ 4 维 StridedSlice ⇒ OMG 拒收
+  · P 注册成 module buffer —— forward 里构造会被 ONNX 追踪展开成上万节点
+  · head_dim 逐层不同（sliding 256 / full 512）⇒ 逐层取用
+  · ★KV 共享★：层 15~34 没有 k_proj/v_proj，复用共享槽；
+    只有层 13（sliding）与层 14（full）store_full_length_kv=True ⇒ 只有它们写槽
+    ⇒ 段间传 2 组 KV（sliding / full 各一）✓
 """
-"""NPU 友好的 Gemma 段图（3 维数学），先只做 prefill、不带 KV，验证数值与 HF 一致。
-
-复刻自 modeling_gemma4.py（已逐行读过）：
-  DecoderLayer: input_norm → attn → post_attn_norm → +res
-                → pre_ffn_norm → mlp → post_ffn_norm → +res
-                → (per_layer 分支) → × layer_scalar
-  Attention  : q=q_proj→q_norm→rope→(transpose)；k/v 同（v 只 v_norm）
-               打分 sdpa(q,k,v, mask, scaling) → reshape → o_proj
-差异：全部用【3 维】张量（[heads, seq, head_dim]），不用 4 维 ⇒ 绕开 NPU-CL 的限制 ✓
-"""
-import torch, torch.nn as nn, torch.nn.functional as F, time
+import os, torch, torch.nn as nn, torch.nn.functional as F
 from transformers import AutoModelForCausalLM
 
 M = "/home/hu60/work/llm/ddk-llm/models/gemma-4-E2B-it"
-START, NO, SEQ = 0, 4, 4
 
-m = AutoModelForCausalLM.from_pretrained(M, dtype=torch.float32, low_cpu_mem_usage=True).eval()
-tm = m.model.language_model
-print("  载入 ✓", flush=True)
-
-ids  = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
-mask4 = torch.zeros([1, 1, SEQ, SEQ], dtype=torch.float32)
-ref = {}
-h = tm.layers[3].register_forward_hook(
-        lambda mo, i, o: ref.__setitem__("h", (o[0] if isinstance(o, tuple) else o).detach().clone()))
-with torch.no_grad():
-    tm(input_ids=ids, attention_mask=mask4, use_cache=False)
-h.remove()
-print("  HF 参考 layer3 输出:", tuple(ref["h"].shape), flush=True)
-
-def rmsnorm(x, w, eps):
+def rmsnorm(x, mod):
+    e = getattr(mod, "eps", 1e-6)
     v = x.float()
-    v = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + eps)
-    return (v.to(x.dtype)) * w
+    v = v * torch.pow(v.pow(2).mean(-1, keepdim=True) + e, -0.5)
+    if getattr(mod, "with_scale", True) and hasattr(mod, "weight"):
+        v = v * mod.weight.float()
+    return v.type_as(x)
 
-def rope3(x, cos, sin):
-    """x: [heads, seq, d] · cos/sin: [seq, d] ⇒ 用矩阵版 rotate_half（无切片）✓"""
-    d = x.shape[-1]; h = d // 2
-    P = torch.zeros(d, d)
-    for i in range(h):
-        P[i, i + h] = -1.0; P[i + h, i] = 1.0
-    rh = x @ P.to(x.dtype)
-    c = cos.unsqueeze(0); s = sin.unsqueeze(0)
-    return x * c + rh * s
+def rope3(x, cos, sin, P):
+    return x * cos.unsqueeze(0) + (x @ P.to(x.dtype)) * sin.unsqueeze(0)
 
 class Seg3D(nn.Module):
     def __init__(self, tm, start, no):
         super().__init__()
         self.layers = nn.ModuleList(list(tm.layers)[start:start + no])
-        self.eps = 1e-6
-        self.scaling = None
-    def attn(self, L, x, cos, sin, mask3):
+        self.start, self.no = start, no
+        self.layer_types = list(tm.config.layer_types)[start:start + no]
+        self.dims = [int(tm.layers[start + i].self_attn.head_dim) for i in range(no)]
+        for d in sorted(set(self.dims)):
+            Pm = torch.zeros(d, d); hh = d // 2
+            for i in range(hh):
+                Pm[i, i + hh] = -1.0; Pm[i + hh, i] = 1.0
+            self.register_buffer("rot_P_%d" % d, Pm.t().contiguous())
+
+    def attn(self, L, x, cos, sin, mask3, P, kv=None):
         A = L.self_attn
         B, S, _ = x.shape
-        heads = A.q_proj.out_features // A.head_dim
-        kvh   = A.k_proj.out_features // A.head_dim
-        D = A.head_dim
-        q = A.q_proj(x).view(heads, S, D)
-        q = rmsnorm(q, A.q_norm.weight, self.eps)
-        q = rope3(q, cos, sin)
-        k = A.k_proj(x).view(kvh, S, D)
-        k = rmsnorm(k, A.k_norm.weight, self.eps)
-        k = rope3(k, cos, sin)
-        v = A.v_proj(x).view(kvh, S, D) if A.v_proj is not None else k
-        v = rmsnorm(v, A.v_norm.weight, self.eps)          # ★ v 只做 norm，不做 rope ✓
-        sc = self.scaling if self.scaling is not None else (D ** -0.5)
-        att = torch.matmul(q, k.transpose(-1, -2)) * sc     # [heads, S, S] ✓ 3 维
-        att = att + mask3                                    # mask3: [1, S, S] 广播 ✓
-        att = F.softmax(att, dim=-1)
-        o = torch.matmul(att, v)                             # [heads, S, D]
-        o = o.reshape(B, S, heads * D)
-        return A.o_proj(o)
-    def ffn(self, L, x):
-        return L.mlp(x)
-    def forward(self, x, cos, sin, mask3, *per_layers):
+        D = int(A.head_dim)
+        heads = A.q_proj.out_features // D
+        kvh = (A.k_proj.out_features // D) if A.k_proj is not None else 1
+        q = A.q_proj(x).view(S, heads, D).transpose(0, 1)
+        q = rope3(rmsnorm(q, A.q_norm), cos, sin, P)
+        if kv is None:
+            k = A.k_proj(x).view(S, kvh, D).transpose(0, 1)
+            k = rope3(rmsnorm(k, A.k_norm), cos, sin, P)
+            v = A.v_proj(x).view(S, kvh, D).transpose(0, 1) if A.v_proj is not None else k
+            v = rmsnorm(v, A.v_norm)
+            new_kv = (k, v)
+        else:
+            k, v = kv; new_kv = None
+        sc = getattr(A, "scaling", None) or (D ** -0.5)
+        att = F.softmax(torch.matmul(q, k.transpose(-1, -2)) * sc + mask3, dim=-1)
+        o = torch.matmul(att, v).transpose(0, 1).reshape(B, S, heads * D)
+        return A.o_proj(o), new_kv
+
+    def forward(self, x, mask3, sk, sv, fk, fv, *args):
+        """sk/sv = sliding 共享槽 · fk/fv = full 共享槽（来自上游段；无则传 0 张量）
+        args = cos_0,sin_0,...,cos_{n-1},sin_{n-1}, per_layer_0,...,per_layer_{n-1}"""
+        n = len(self.layers)
+        cossin, ples = args[:2 * n], args[2 * n:]
         for i, L in enumerate(self.layers):
+            A = L.self_attn
+            lt = self.layer_types[i]
+            P = getattr(self, "rot_P_%d" % self.dims[i])
             residual = x
             xn = L.input_layernorm(x)
-            xn = self.attn(L, xn, cos, sin, mask3)
-            xn = L.post_attention_layernorm(xn)
-            x = residual + xn
+            if getattr(A, "is_kv_shared_layer", False):
+                kv = (sk, sv) if lt == "sliding_attention" else (fk, fv)
+            else:
+                kv = None
+            xn, nkv = self.attn(L, xn, cossin[2*i], cossin[2*i+1], mask3, P, kv)
+            if nkv is not None and getattr(A, "store_full_length_kv", False):
+                if lt == "sliding_attention": sk, sv = nkv
+                else: fk, fv = nkv
+            x = residual + L.post_attention_layernorm(xn)
             residual = x
-            xn = L.pre_feedforward_layernorm(x)
-            xn = self.ffn(L, xn)
-            xn = L.post_feedforward_layernorm(xn)
-            x = residual + xn
+            xn = L.mlp(L.pre_feedforward_layernorm(x))
+            x = residual + L.post_feedforward_layernorm(xn)
             if getattr(L, "hidden_size_per_layer_input", 0):
                 residual = x
-                xn = L.per_layer_input_gate(x)
-                xn = L.act_fn(xn)
-                xn = xn * per_layers[i]
-                xn = L.per_layer_projection(xn)
-                xn = L.post_per_layer_input_norm(xn)
-                x = residual + xn
+                xn = L.act_fn(L.per_layer_input_gate(x)) * ples[i]
+                x = residual + L.post_per_layer_input_norm(L.per_layer_projection(xn))
             x = x * L.layer_scalar
-        return x
+        return x, sk, sv, fk, fv
 
-w = Seg3D(tm, START, NO).eval()
-# 取 HF 的 cos/sin 与 per_layer（复用它的 helper ✓）
-with torch.no_grad():
-    hidden = tm.embed_tokens(ids)
-    ple = tm.get_per_layer_inputs(ids, hidden)
-    ple = tm.project_per_layer_inputs(hidden, ple)          # [1,4,35,256]
-    cos, sin = tm.rotary_emb(hidden, torch.arange(SEQ).unsqueeze(0), tm.config.layer_types[0])
-    print("  cos/sin:", tuple(cos.shape), tuple(sin.shape), "· ple:", tuple(ple.shape), flush=True)
-    mask3 = torch.zeros([1, SEQ, SEQ])
-    out = w(hidden, cos[0], sin[0], mask3,
-            *[ple[:, :, i, :] for i in range(START, START + NO)])
-print("  3D 段输出:", tuple(out.shape), flush=True)
-d = (out - ref["h"]).abs().max().item()
-print("  ★ 与 HF layer3 输出最大差 = %.3e ⇒ %s" %
-      (d, "★★ 3D 版数学一致 ★★" if d < 1e-3 else "✗ 有差异，要查"), flush=True)
+def load():
+    m = AutoModelForCausalLM.from_pretrained(M, dtype=torch.float32, low_cpu_mem_usage=True).eval()
+    return m, m.model.language_model
+
+if __name__ == "__main__":
+    import sys
+    NO = int(os.environ.get("NO", "4")); SEQ = 4
+    m, tm = load()
+    ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+    mask4 = torch.zeros([1, 1, SEQ, SEQ])
+    NTOT = len(tm.layers)
+    caps = {}
+    hk = [tm.layers[i].register_forward_hook(
+            (lambda i: lambda mo, inp, o: caps.__setitem__(i, (o[0] if isinstance(o, tuple) else o).detach().clone()))(i))
+          for i in range(NTOT)]
+    with torch.no_grad():
+        tm(input_ids=ids, attention_mask=mask4, use_cache=False)
+    for h in hk: h.remove()
+    with torch.no_grad():
+        x = tm.embed_tokens(ids)
+        ple = tm.project_per_layer_inputs(x, tm.get_per_layer_inputs(ids, x))
+        pos = torch.arange(SEQ).unsqueeze(0)
+        sk = sv = fk = fv = torch.zeros(1)
+        st = 0; bad = 0
+        while st < NTOT:
+            no = min(NO, NTOT - st)
+            w = Seg3D(tm, st, no).eval()
+            cs = []
+            for i in range(st, st + no):
+                c, s2 = tm.rotary_emb(x, pos, tm.config.layer_types[i])
+                cs += [c[0], s2[0]]
+            x, sk, sv, fk, fv = w(x, torch.zeros([1, SEQ, SEQ]), sk, sv, fk, fv,
+                                  *cs, *[ple[:, :, i, :] for i in range(st, st + no)])
+            last = st + no - 1
+            d = (x - caps[last]).abs().max().item(); b = caps[last].abs().max().item()
+            ok = d / b < 1e-3
+            bad += 0 if ok else 1
+            print("  段 [%2d:%2d] head_dim=%-22s → 与 HF layer%-2d 相对差 %.2e %s"
+                  % (st, st + no, str(w.dims), last, d / b, "✓" if ok else "✗"), flush=True)
+            st += no
+        print("  ★ 全链 %d 层：%s" % (NTOT, "★★ 全部一致 ★★" if bad == 0 else "✗ %d 段不符" % bad), flush=True)
