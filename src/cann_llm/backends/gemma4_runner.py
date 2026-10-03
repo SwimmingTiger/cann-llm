@@ -12,7 +12,7 @@
   · ★已 build 的模型要缓存★：build 是慢的根源；★故意不 destroy★（销毁会 core dump）
 """
 from __future__ import annotations
-import ctypes as C, json, math, os, struct, time
+import ctypes as C, json, math, os, struct, sys, time
 from typing import Iterator, List
 
 _NDK = "/system/lib64/ndk/libmindspore_lite_ndk.so"
@@ -153,6 +153,11 @@ class Gemma4SegRunner:
         #   其余是 sliding_attention，head_dim=256 ✓
         self.dims_all = [512 if (i % 5 == 4) else 256 for i in range(35)]
         self._timing = {}
+        # ★ CANN_LLM_TIMING=1 时，进程退出前把各阶段耗时打出来 ★
+        #   （只统计不打印的话什么也看不到 ✗ —— 上次就是这么翻车的 ✓）
+        if os.environ.get("CANN_LLM_TIMING"):
+            import atexit
+            atexit.register(lambda: print("[timing] " + self.timing_report(), file=sys.stderr))
 
     def _pl_off(self, t: int) -> int:
         """第 t 个 token 在分块 per_layer buffer 里的【字节】偏移 ✓"""
@@ -270,9 +275,7 @@ class Gemma4SegRunner:
                 kv = {"sk": r["sk_out"], "sv": r["sv_out"],
                       "fk": r["fk_out"], "fv": r["fv_out"]}
             hidden = r["hidden_out"]
-            if "sk_out" in r:
-                kv = {"sk": r["sk_out"], "sv": r["sv_out"],
-                      "fk": r["fk_out"], "fv": r["fv_out"]}
+        _t = self._tstage("segments", _t)
         off = (n - 1) * self.e_dim * 4
         h_last = hidden[off:off + self.e_dim * 4]
         # ★ 最终 RMSNorm（Gemma4RMSNorm：用 pow 而非 rsqrt；eps=1e-6）★
@@ -281,10 +284,12 @@ class Gemma4SegRunner:
         sc = ms2 ** -0.5
         h_last = struct.pack("<%df" % self.e_dim,
                              *[v * sc * w for v, w in zip(hv, self.norm_w)])
+        _t = time.perf_counter()
         logits: List[float] = []
         for J in range(4):
             logits.extend(_f32(self.ms.run(os.path.join(self.dir, "lm", "lm%d.ms" % J),
                                            {"hidden": h_last})["logits"]))
+        self._tstage("lm", _t)
         return [math.tanh(v / self.LOGIT_CAP) * self.LOGIT_CAP for v in logits]
 
     # ---------- 采样 ----------
