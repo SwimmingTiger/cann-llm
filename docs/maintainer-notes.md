@@ -681,3 +681,50 @@ E HIAI_DDK_MSG: hiai_model_runtime_repo.c ModelRuntimeRepo_TryBuild(154)::"no ru
 **新增探针**：`w8a16.c`（4 变体，含 MATMUL 参数要求）· `w8a32.c`（白名单合法形态单测）
 **MATMUL 参数要求（NNRt 源码 `ops/matmul_builder.cpp` 原文）**：
 `TransposeA/TransposeB` 必须 **OH_NN_BOOL 标量**；`ActivationType` 必须 **OH_NN_INT8 标量** ✓
+
+## 12. ★★ `.ms` 路线的正确组合：converter 的 `quant_type=WEIGHT_QUANT` ★★
+
+**问题**：既然已知合法形态是 `(浮点激活, INT8 权重)`（§10 §11），能否产出这样的 `.ms`？
+
+**排查**：
+
+```
+✗ dopt 路径：只有一种组合
+  tools_dopt/dopt_tf_py3/dopt/notrain_tensorflow/quant_utils/tf_quant_int8_8_utils.so
+  tools_dopt/dopt_tf_py3/dopt/notrain_tensorflow/quant_utils/tf_quant_int8_8_hp.so
+  ⇒ 库名即组合：★只有 int8_8★（激活 8bit × 权重 8bit）⇒ 必然落在 GE 白名单之外
+  · dopt_onnx_py3 甚至没有 strategy/ 目录（tf/pytorch 版才有）
+  · dopt.so 符号：StrategyManager / create_strategy / StrategyImport
+    ⇒ strategy 由名字 import 对应策略模块，没有对应模块就无法换组合
+✓ converter_lite 自带量化器：模板在 MindSpore Lite 源码树
+  mindspore-lite/tools/converter/quantizer/config/
+    dynamic_quant.cfg · fixed_bit_weight_quant.cfg · full_quant.cfg · mixed_bit_weight_quant.cfg
+```
+
+**★ 关键：`quant_type` 的三个取值（模板原文注释）★**
+
+| 取值 | 含义 | 是否合法 |
+|---|---|---|
+| ★`WEIGHT_QUANT`★ | ★只量化权重（激活保持浮点）★ | ★✓ 即 W8A16/W8A32，白名单第 0/1 条★ |
+| `FULL_QUANT` | 激活与权重都量化 | ✗ int8×int8，白名单之外 |
+| `DYNAMIC_QUANT` | 动态量化 | 待测 |
+
+`fixed_bit_weight_quant.cfg` 原文：
+
+```
+[common_quant_param]
+# Supports WEIGHT_QUANT or FULL_QUANT
+quant_type=WEIGHT_QUANT
+# Weight quantization support the number of bits [0,16] ...
+bit_num=8
+min_quant_weight_size=0
+min_quant_weight_channel=16
+```
+
+**⇒ 结论**：
+之前 converter 路线失败的原因之一是用了 `FULL_QUANT`（int8×int8）✗；
+改用 ★`quant_type=WEIGHT_QUANT`★ 才能产出 GE/hiai 白名单认可的形态 ✓
+（且与 HF 上 "weight-only INT8" gemma-4 模型同构 ✓）
+
+**下一步**：用 `WEIGHT_QUANT` 产 `.ms`，走 MS-Lite + NNRt 实测
+（预期可越过 §10 的 dtype 校验与 §9 的兼容性检查；能否过 `QuantizeOptimizer` 待验 ✓）
