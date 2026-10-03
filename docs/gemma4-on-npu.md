@@ -461,3 +461,33 @@ SIGSEGV · fault address = 0x0（空指针解引用 ✗）
 ⇒ 已修：launcher / launcher_server 统一补 ENGINE_LIB_DIRS =
     (/system/lib64/ndk, /system/lib64/platformsdk) ✓
 ```
+
+### 8.7 ★"python 3.14 段错误"的真身：我漏了一个 ctypes 声明★
+
+**症状**：同一个 runner，python-3.12 正常 ✓，python-3.14 在第一次建图时 SIGSEGV ✗。
+
+**定位（每步都有对照，没有猜）**：
+
+```
+① 最小复现（CDLL + ModelBuildFromFile）在 3.14 下 ★成功 ✓★ ⇒ 不是加载/Build 的问题
+② 3.14 下建★真实的大图★（594MB 段图 / lm / graphP）⇒ ★全部 Build 0 ✓★
+③ 但走 runner 就崩 ⇒ ★问题在 runner 的 ctypes 调用方式★
+④ 对照 nnrt.py 的正确绑定，发现 `gemma4_runner._bind()` 有两处错：
+     · OH_AI_TensorGetElementNum 声明成 c_size_t ✗（应为 c_int64）
+     · ★OH_AI_TensorGetDataType 压根没声明★ ✗ —— 而新加的大小检查里调用了它
+```
+
+**机制**：
+
+```
+★ ctypes 对【未声明 argtypes】的函数，会把指针参数按默认的 32 位 int 传 ✗
+  ⇒ 64 位下指针被截断 ⇒ NPU 解引用坏指针 ⇒ SIGSEGV ✓
+★ 3.12 之所以"没事"：地址布局不同，指针恰好没被截断坏 ⇒ ★侥幸★ ✓
+  ⇒ 所以这不是"3.14 特有的问题"，而是★一直存在的隐患★，被 3.14 暴露了 ✓
+```
+
+**修法**：补齐/改正声明（`GetDataType`、`GetDataSize`、`GetElementNum=c_int64`）✓
+**验证**：python-3.14 下跑真实聊天 ⇒ `bot> 2` ✓✓
+
+> 结论：遇到"某版本才崩"的段错误，先怀疑**自己的 ctypes/FFI 声明**，别急着怪版本或 ABI ✓ ——
+> 这次就是漏一个 `argtypes` 造成的 ✓。
