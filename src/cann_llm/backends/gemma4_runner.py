@@ -54,6 +54,10 @@ class _Mslite:
                 f.argtypes = at
 
 
+def _f32(b: bytes) -> List[float]:
+    return list(struct.unpack("<%df" % (len(b) // 4), b))
+
+
 class Gemma4SegRunner:
     """model_dir 布局（本会话产出的目录）：
          graphP/graphP.ms · seg{0,4,...,32}/seg.ms · lm/lm{0..3}.ms
