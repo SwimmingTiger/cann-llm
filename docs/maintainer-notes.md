@@ -1216,3 +1216,67 @@ Set/GetProvider / Set/GetProviderDevice / AddExtension
 
 ⇒ 写入正确 id 后 `CheckNPUPrefix("NPU_")` 应匹配，
 ⇒ 原生模型不再走 `BuildOfflineModel`，`not third party model` 也不会再出现 ✓
+
+## 23. ★★★★★ 里程碑：device_id 指向 NPU 后，原生模型走上【在线通道】★★★★★
+
+按 §22 的思路实现后（挑选 device_name 以 `NPU_` 开头的 NNRt 设备，取其 id 写入 DeviceInfo），
+hilog 首次出现 **`BuildKirinNPUModel`** —— 即原生模型不再被当成 third-party ✗。
+
+**正确的加载序列（实测通过 ✓）**：
+
+```python
+ctx = OH_AI_ContextCreate()
+
+# ① 枚举 NNRt 设备（注意：返回指针，只有一个出参）
+num   = c_size_t(0)
+descs = OH_AI_GetAllNNRTDeviceDescs(byref(num))          # ★ NNRTDeviceDesc *  (size_t *num) ★
+                                                          #   不是 (NNRTDeviceDesc**, size_t*) ✗
+# 实测返回 2 个设备：
+#   [0] name = NPU_ohos.boot.hardware.KirinX90_v2_0   id = 5337627887595434492
+#   [1] name = HIAI_F                                 id = 8987859593747354028
+for i in range(num.value):
+    d   = OH_AI_GetElementOfNNRTDeviceDescs(descs, i)
+    nm  = OH_AI_GetNameFromNNRTDeviceDesc(d)
+    if nm.startswith(b"NPU_"):                            # ★ 选“在线推理”设备 ★
+        dev_id = OH_AI_GetDeviceIdFromNNRTDeviceDesc(d)
+        break
+
+# ② 写进 DeviceInfo
+dev = OH_AI_DeviceInfoCreate(OH_AI_DEVICETYPE_NNRT)       # 60
+OH_AI_DeviceInfoSetDeviceId(dev, dev_id)                  # ★★ 关键一步 ★★
+OH_AI_DestroyAllNNRTDeviceDescs(...)
+OH_AI_ContextAddDeviceInfo(ctx, dev)
+
+# ③ 构建模型（★第三个参数必须为 0★；写 1 会 "Read model file failed"）
+OH_AI_ModelBuildFromFile(model, model_path, ★0★, ctx)
+```
+
+**两处必须注意的细节（都踩过 ✓）**：
+
+| 项 | 错误写法 | 正确写法 | 错误现象 |
+|---|---|---|---|
+| `OH_AI_GetAllNNRTDeviceDescs` | `(NNRTDeviceDesc**, size_t*)` | ★`(size_t*)` 返回指针★ | 返回乱码、count=0 |
+| `OH_AI_ModelBuildFromFile` 第 3 参 | `1` | ★`0`★ | `lite_session.cc:2126 Read model file failed` |
+| DeviceInfo | 只 `Create(60)`，不设 id | ★`SetDeviceId(dev, NNRt 设备 id)`★ | `device_id_=0` ⇒ 落到 offline ⇒ `not third party model` |
+
+**改动后的实测日志（关键行）**：
+
+```
+E NNRt_HiAIAdapter: BuildImpl from lite graph failed, failed to parse from lite graph.
+E NNRt: [NNCompiler] Build failed, fail to build model online.
+E NNRt: OH_NNCompilation_Build failed, fail to build compilation.
+E MS_LITE: [nnrt_delegate.cc:772] InitNNCompilation# Build NNCompilation failed, ret: 1
+E MS_LITE: [nnrt_delegate.cc:308] CreateFullModelKernel# Init NNCompilation failed
+E MS_LITE: [nnrt_delegate.cc:220] ★BuildKirinNPUModel★# Create full model kernel failed
+```
+
+**⇒ 结论（本步）**：
+
+```
+✓ device_id 修正【确实有效】：模型走上 BuildKirinNPUModel（在线通道）
+  —— 不再出现 "not third party model" ✓
+✗ 新的卡点在更后一层：hiai 适配层解析 LiteGraph 失败
+  （`BuildImpl from lite graph failed, failed to parse from lite graph`）
+  —— 与 §6 中 QUANT_DTYPE_CAST 的 `Unrecognized node type 113` 属同族问题
+⇒ 下一步：查 hiai 适配层解析该 LiteGraph 时具体在哪一步失败
+```
