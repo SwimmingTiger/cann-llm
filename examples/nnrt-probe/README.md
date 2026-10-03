@@ -373,3 +373,45 @@ AI_NPUCL: CheckSupported: the op name [X:0] type [Y] is not supported
 ⇒ 想用上 int8 ⇒ 只能【用 Ascend C 手写 NPU 算子】✗
 ⇒ 对 LLM 分段方案 = 重写 35 层 kernel ✗（工程量与风险极大，已脱离"模型转换"范畴 ✓）
 ```
+
+### ★ 尝试：量化专用算子 `OH_NN_OPS_QUANT_DTYPE_CAST`（已试，结论明确）★
+
+**动机**：GE 的量化是"算子 + 量化属性"的形态（详见 `docs/maintainer-notes.md`），
+而 NNRt 头文件里正好有一个量化专用算子：
+
+```
+OH_NN_OPS_QUANT_DTYPE_CAST = 52 —— "Converts the data type."
+  Inputs:  input —— "If it is a conversion between a quantized type and a floating-point
+           type, the input tensor should contain quantized parameters."
+  Params:  srcT（输入 dtype）· dstT（输出 dtype）· axis（量化参数抽取维度；
+           size==1 ⇒ 层量化；size>1 ⇒ 逐通道量化）
+  Outputs: 类型由 dstT 决定，shape 同输入
+```
+
+**踩到的两个关键点**：
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| `AddOperation` 一直 `rc=2` | 参数张量用了 `OH_NN_INT32` | ★必须 `OH_NN_INT64`★（设备库原话：`"SetSrcT failed, the src_t should be type OH_NN_INT64"`） |
+| 同上 | 参数张量 type 用 `OH_NN_TENSOR` | 必须用专属 type：★`OH_NN_QUANT_DTYPE_CAST_SRC_T=72` / `_DST_T=73` / `_AXIS=126`★ |
+
+**满足后**：6 个 dtype 变体（U8→F32 / I8→F32 / F32→U8 / F32→I8 / 无 axis / F32→F32）
+★`AddOperation` 与 `Finish` 全部 SUCCESS★ ✓ —— **NNRt 构图层完全接受这个算子**。
+
+**但 `OH_NNCompilation_Build` 仍然 FAILED** ✗，hilog 给出确切原因：
+
+```
+E NNRt_HiAIAdapter: ★Unrecognized node type 113 for QuantDTypeCast:0.★
+E NNRt_HiAIAdapter: Exec Op Convert failed.
+E NNRt_HiAIAdapter: Convert CNode to hiai op failed.
+E NNRt_HiAIAdapter: BuildImpl from lite graph failed, failed to parse from lite graph.
+```
+
+⇒ ★★ 卡点在【CNode → hiai op 的转换】，比 GE 的 InferShape 还早：
+     **hiai 适配层没有实现 node type 113（QuantDTypeCast）** ✗★★
+
+**结论**：NNRt 这一层**有**量化算子接口与量化参数 API，
+但**麒麟的 hiai 后端没有实现对应算子映射** ⇒ ★端侧仍无量化通路★ ✓
+（与 GE 侧"通用算子只认 float/int32"是同一结论的两个侧面）
+
+**新增**：`qcast.c`（QUANT_DTYPE_CAST 的 6 种形态穷举）· `quant_probe.c`
