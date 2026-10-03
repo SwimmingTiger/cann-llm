@@ -290,8 +290,12 @@ class NnrtBackend(EngineBackend):
         if (os.path.isdir(self.model_dir)
                 and os.path.isdir(os.path.join(self.model_dir, "graphP"))
                 and os.path.isdir(os.path.join(self.model_dir, "lm"))):
-            from .gemma4_runner import Gemma4ChatRunner
-            runner = Gemma4ChatRunner(self.model_dir)
+            from .gemma4_runner import Gemma4ChatRunner, Gemma4KvRunner
+            # ★ 有 decode/prefill 图就走 KV 路径（每 token 只算 1 个）；
+            #   没有则回退到"每 token 重跑全上下文"的旧路径 ✓
+            _kv = all(os.path.isdir(os.path.join(self.model_dir, d))
+                      for d in ("dec0", "pre0"))
+            runner = (Gemma4KvRunner if _kv else Gemma4ChatRunner)(self.model_dir)
             runner.load()
             self._llm = runner
             self._info = ModelInfo(

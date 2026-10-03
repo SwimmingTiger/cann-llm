@@ -442,6 +442,17 @@ class Gemma4KvRunner(Gemma4ChatRunner):
         self.pos = pos + 1
         return self._tail_logits(hidden, 1)
 
+    # ★ 覆盖 forward：让继承来的 generate/stream 不用改就能走 KV 路径 ✓
+    #   规则：若新 ids 只比上次多一个 token 且前缀一致 ⇒ 只算这一个（decode）；
+    #         否则重新 prefill（新对话 / prompt 变了 / 首次）
+    def forward(self, ids: List[int]) -> List[float]:
+        pos = getattr(self, "pos", None)
+        pref = getattr(self, "_prefix", None)
+        if pos is not None and len(ids) == pos + 1 and pref == ids[:-1]:
+            return self.decode_one(ids[-1])
+        self._prefix = list(ids)
+        return self.prefill(ids)
+
     def _tail_logits(self, hidden: bytes, n: int) -> List[float]:
         off = (n - 1) * self.e_dim * 4
         hv = struct.unpack("<%df" % self.e_dim, hidden[off:off + self.e_dim * 4])
