@@ -337,3 +337,39 @@ AI_NPUCL: CheckSupported: the op name [X:0] type [Y] is not supported
     · 在线构图 int8 / uint8 图 ⇒ `Build` 一律 FAILED ✗（fp32 对照 SUCCESS ✓）
 ⇒ ★★ int8 在本设备上【明确不可行】，原因在厂商的端侧软件栈 ★★ ✓
 ```
+
+### ★★ 补：硬件层面的权威依据（来自本机 `asc-devkit`）★★
+
+`~/work/hmos/asc-devkit`（Ascend C 开发套件，320 MB）里的官方文档给出：
+
+```
+★ Kirin X90 处理器系列【支持的类型】含 ★int8_t / uint8_t / half / float★★ ✓
+  （例：docs/zh/api/SIMD-API/adv_api/tensor_transform/Broadcast.md 的类型表 ✓）
+★ 架构指南的"产品→dtype 事实矩阵"：
+    Ascend 950PR/950DT ⇒ int8_t · uint8_t · fp4x2 · hifloat8 · fp8_e5m2/e4m3fn …
+    Atlas A2/A3        ⇒ int8_t · uint8_t · int16/32/64 · half · bfloat16 …
+  （表里没有 X90 单独一行，但有 ★242 个文档带 `npu="x90"` 标记★ ✓；
+    X90 属 ★DAV_3510★ 代，支持 hifloat8 / fp8 / int4x2 等低精度 ✓）
+★ ★X90 标记 ∩ int8 ⇒ 150/300 个 API 文档★ ⇒ int8 在 X90 上是一等公民 ✓
+★★ 专门的量化 API 套件：★docs/zh/api/SIMD-API/adv_api/quantization/★★
+     `AntiQuantize.md` · `AscendAntiQuant.md` · …
+     Matmul 侧：`SetQuantScalar` / `SetQuantVector` / `SetAntiQuantScalar` /
+                `SetAntiQuantVector` / `SetDequantType` ✓
+```
+
+**但该套件的定位是【Ascend C 算子开发】**（quick_start：编译本仓 + 运行算子 ✓），
+**不是"把量化模型交给运行时"** ✗。
+
+### ★★ int8 的三层结论（最终）★★
+
+| 层面 | 状态 |
+|---|---|
+| 硬件 / 指令集 | ★**支持 int8 / uint8**★ ✓ |
+| 算子层（Ascend C） | ★**有完整量化 API**★ ✓ |
+| 模型转换层（OMG / NNRt / hiai） | ★**无 int8 通路**★ ✗ |
+
+```
+⇒ ★硬件能算 int8，但模型转换链不开放 int8 ✗★
+⇒ 想用上 int8 ⇒ 只能【用 Ascend C 手写 NPU 算子】✗
+⇒ 对 LLM 分段方案 = 重写 35 层 kernel ✗（工程量与风险极大，已脱离"模型转换"范畴 ✓）
+```
