@@ -517,3 +517,52 @@ hilog 原话 `[NNBackend] CreateCompiler failed, ★only support build NN model 
 
 **下一步**：查 `CheckCompatibility by cl CPUCL` 为何失败 ——
 这个检查针对的是模型的**算子/精度兼容性**，是 int8 通路最后一个已知关卡 ✓
+
+## 9. ★★ 找到了：`CheckCompatibility failed by cl CPUCL` 的原因 = 量化类型白名单 ★★
+
+**逆向目标**：`libai_fmk_hcl_model_runtime_impl.so`
+（`/vendor/lib64/passthrough/indirect/`，2.24 MB；`general_compiled_model.cpp` 与
+ `compatibleHelper CheckCompatibility failed by cl %s` 都在此库 ✓）
+
+**调用链**：`GeneralCompiledModel::CheckCompatibility(vector<string>&)` 用 `GraphListWalker`
+遍历图上所有节点，对每个节点调 `OpKernelStoreManager::GetCompatibleHelper(CL名)`；
+CL 名为 `CPUCL` 时取不到 helper ⇒ 打印 `compatibleHelper CheckCompatibility failed by cl CPUCL`。
+
+**决定性的函数**：`hiai::IsCompatibleQuantType(ge::DataType, ge::DataType)` @0xe7e5c
+反编译即：静态初始化一个 `vector<QuantDataType>`（每条 8 字节 = 两个 int32），
+然后**线性查找配对**；在表里 ⇒ true，不在 ⇒ false。
+
+**表地址 `unk_52D34`，长度 0x78 = 120 字节 = 15 条**（用 ida_bytes 读出）：
+
+| # | 配对 | 含义 |
+|---|---|---|
+| 0 | DT_FLOAT ⇄ DT_INT8 | W8A32 |
+| 1 | DT_FLOAT16 ⇄ DT_INT8 | W8A16 |
+| 2 | DT_INT32 ⇄ DT_INT8 | — |
+| 3 | DT_RESOURCE ⇄ DT_RESOURCE | 资源 |
+| 4 | DT_INT32 ⇄ DT_QUINT16 | — |
+| 5 | DT_UINT8 ⇄ DT_VARIANT | — |
+| 6 | DT_UINT8 ⇄ DT_INT4 | 低比特 |
+| 7 | DT_UINT8 ⇄ DT_UINT1 | 低比特 |
+| 8 | DT_INT8 ⇄ DT_INT4 | 低比特 |
+| 9 | DT_INT8 ⇄ DT_VARIANT | — |
+| 10 | DT_INT8 ⇄ DT_UINT1 | 低比特 |
+| 11–14 | (36=HiFloat8) ⇄ VARIANT / INT4 / UINT1 / (30) | 新型低精度 |
+
+**★ 关键结论 ★**
+
+```
+✗ 表里【没有 (DT_INT8, DT_INT8)】，也【没有 (DT_UINT8, DT_UINT8)】
+  ⇒ "int8 × int8"（纯 int8 计算）不在白名单 ⇒ CheckCompatibility 必失败
+  ⇒ 我们此前所有"全 INT8 / 全 UINT8 张量"的探针都落在这里 ✓
+✓ 白名单里合法的量化形态只有两类：
+  ① 浮点 × INT8：DT_FLOAT16 ⇄ DT_INT8（W8A16）· DT_FLOAT ⇄ DT_INT8（W8A32）
+     · DT_INT32 ⇄ DT_INT8
+  ② 低比特：UINT8/INT8 × INT4/UINT1
+⇒ ★设备真正接受的量化 = 【激活保持浮点、权重用 INT8】（weight-only / W8A16·W8A32）★
+```
+
+**这也解释了 HF 上 gemma-4 的 int8 模型为何是 "weight-only INT8"** ——
+weight-only 正是这台设备白名单里的形态 ✓（"纯 int8 计算"不是）。
+
+**下一步**：按白名单构造 **FP16 激活 × INT8 权重** 的图/模型再试 ✓
