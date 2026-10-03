@@ -1280,3 +1280,49 @@ E MS_LITE: [nnrt_delegate.cc:220] ★BuildKirinNPUModel★# Create full model ke
   —— 与 §6 中 QUANT_DTYPE_CAST 的 `Unrecognized node type 113` 属同族问题
 ⇒ 下一步：查 hiai 适配层解析该 LiteGraph 时具体在哪一步失败
 ```
+
+## 24. 在线通道的新卡点精确定位：hiai 适配层转换 `/embeddings/Gather` 失败
+
+§23 之后走上 `BuildKirinNPUModel`（在线），新的失败点已在 hilog 中定位到**具体节点**：
+
+```
+E NNRt_HiAIAdapter: gather op x_input invalid.
+E NNRt_HiAIAdapter: gather op axis param invalid.
+E NNRt_HiAIAdapter: Convert failed for node /embeddings/Gather.
+E NNRt_HiAIAdapter: Exec Op Convert failed.
+E NNRt_HiAIAdapter: Convert CNode to hiai op failed.
+E NNRt_HiAIAdapter: BuildImpl from lite graph failed, failed to parse from lite graph.
+```
+
+**反编译适配层的 Gather 参数解析（`libhiai_adapter.so`，sub_54594）**：
+
+```c
+MindIR_Tensor_GetData(&v13, (*a1)[2], a2);     // 第 3 个输入（axis）的数据
+if (v13 == v14) { LOG("gather op axis param invalid"); return 1; }        // ① axis 数据为空
+
+DataType = MindIR_Tensor_GetDataType((*a1)[2], …);
+if (DataType == 35)      v7 = *(int64 *)v13;   // Int32
+else if (DataType == 34) v7 = *(int32 *)v13;   // Int16
+else LOG("Gather op: dataType %d not support.", DataType);                // ② 其它 dtype
+*a2 = v7;
+
+MindIR_Tensor_GetDims(&v11, **a1, …);          // 第 1 个输入（x_input）的 dims
+if (v11 == v12) { LOG("gather op x_input invalid."); return 1; }          // ③ ★dims 为空★
+if (*a2 >= (v12 - v11) / 4) { LOG("gather op axis param invalid, axis = %ld"); return 1; }  // ④ axis 越界
+return 0;
+```
+
+**⇒ 判定**：
+
+```
+★ 失败发生在【③ x_input 的 dims 为空】或【④ axis 越界】★
+  —— 都是形状/参数问题，★与 int8 权重无关★ ✓
+★ dtype 这一关是过的：Gather 的 axis 支持 Int16(34)/Int32(35)，
+  而模型中相关张量正是 34 (Int16) ✓
+★ 适配层有专门的 `hiai::mindir::GatherOpConvert` ⇒ 它【认识】Gather，
+  只是该校验未通过 ✓
+```
+
+**⇒ 下一步**：
+定位 `/embeddings/Gather` 这个节点在 LiteGraph 里的实际输入张量
+（哪个是 x_input、其 dims 为何为空），以及 axis 的实际取值 ✓
