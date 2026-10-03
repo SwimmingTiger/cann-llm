@@ -474,7 +474,13 @@ class NnrtBackend(EngineBackend):
         if self._llm is None or self._llm.tok is None:
             return ()
         sp = self._llm.tok.special_ids
-        return tuple(v for k, v in sp.items() if k in ("<|im_end|>", "<|endoftext|>"))
+        base = tuple(v for k, v in sp.items() if k in ("<|im_end|>", "<|endoftext|>"))
+        # ★ Gemma 4：它的停用符在 generation_config.eos_token_id = [1,106,50]，
+        #   名字不是 Qwen 那套 ⇒ 直接用 runner 声明的 STOP_IDS ✓
+        extra = getattr(self._llm, "STOP_IDS", None)
+        if extra:
+            return tuple(sorted(set(base) | set(extra)))
+        return base
 
     @property
     def supports_streaming(self) -> bool:
