@@ -5,7 +5,7 @@ lm_head 与 embed_tokens 是 tied 的 ✓ ⇒ 直接用 embed_tokens^T 的分块
 """
 import os, sys, torch, torch.nn as nn
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 可移植 ✓
-import g4_seg3d as G
+import gemma4_model as G
 
 DTYPE = os.environ.get("DTYPE", "fp32")
 _TD = __import__("torch").float16 if DTYPE == "fp16" else __import__("torch").float32

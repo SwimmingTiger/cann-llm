@@ -3,8 +3,8 @@
 （之前逐段单独测都喂 embedding 是错的 —— 段 k 的输入必须是段 k-1 的输出 ✓）
 """
 import os, sys, torch
-sys.path.insert(0, "/home/hu60/work/llm/.tmp")
-import g4_seg3d as G
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gemma4_model as G
 
 NO, SEQ, NSEG = 4, 4, int(os.environ.get("NSEG", "3"))
 m, tm = G.load()

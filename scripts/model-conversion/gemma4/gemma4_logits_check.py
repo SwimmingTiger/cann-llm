@@ -4,8 +4,8 @@
 ⇒ lm_head 放在【主机侧】做（本脚本就是在验证这条路线 ✓）。
 """
 import os, sys, torch
-sys.path.insert(0, "/home/hu60/work/llm/.tmp")
-import g4_seg3d as G
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gemma4_model as G
 
 NO, SEQ = 4, 4
 m, tm = G.load()

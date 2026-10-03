@@ -1,10 +1,10 @@
 """为设备端 9 段串联准备输入：hidden / 每段的 per_layer 切片 / 两组 cos-sin / mask3 / HF 参考 top5。"""
 import os, sys, torch
-sys.path.insert(0, "/home/hu60/work/llm/.tmp")
-import g4_seg3d as G
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gemma4_model as G
 
 SEQ, NO = 4, 4
-OUT = "/home/hu60/work/llm/ddk-llm/llm-poc/g4chainio"; os.makedirs(OUT, exist_ok=True)
+OUT = os.path.join(os.environ.get("OUTDIR") or os.path.join(os.getcwd(), "out"), "gemma4"); os.makedirs(OUT, exist_ok=True)
 m, tm = G.load()
 ids = torch.tensor([[1, 42, 777, 9000]], dtype=torch.long)
 mask4 = torch.zeros([1, 1, SEQ, SEQ])

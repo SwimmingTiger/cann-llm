@@ -1,7 +1,7 @@
 """设备跑出的 hidden → 主机侧 norm + lm_head + softcap → 与 HF 的 top-5 对拍（目标验收）。"""
 import sys, torch
-sys.path.insert(0, "/home/hu60/work/llm/.tmp")
-import g4_seg3d as G
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gemma4_model as G
 
 m, tm = G.load()
 ids = torch.tensor([[1, 42, 777, 9000]], dtype=torch.long)
@@ -10,7 +10,7 @@ with torch.no_grad():
     ref = m(input_ids=ids, attention_mask=mask4, use_cache=False).logits
 
 raw = torch.from_numpy(__import__("numpy").fromfile(
-    "/home/hu60/work/llm/ddk-llm/llm-poc/g4chainio/dev_hidden.bin", dtype="float32"))
+    os.path.join(os.environ.get("OUTDIR") or os.path.join(os.getcwd(), "out"), "gemma4"), dtype="float32"))
 h = raw.view(1, 4, 1536)
 print("  设备 hidden:", tuple(h.shape), flush=True)
 

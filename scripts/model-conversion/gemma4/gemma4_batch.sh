@@ -1,7 +1,7 @@
 #!/bin/bash
 # 9 段（4×8 + 3）整条流水线：ONNX → OMG → converter_lite
 DDK=$HOME/ddk
-B=/src/mindspore-src/source/output/tmp/mindspore-lite-2.7.0-linux-x64
+B=${MSLITE_BUILD:-/src/mindspore-src/source/output/tmp/mindspore-lite-2.7.0-linux-x64}  # 容器内路径，可用 MSLITE_BUILD 覆盖 ✓
 POC=$HOME/work/llm/ddk-llm/llm-poc
 TT=$HOME/work/hmos/third_party_mindspore/tiny-test
 OUTROOT=$HOME/g4segs; mkdir -p "$OUTROOT"

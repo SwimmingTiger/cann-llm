@@ -1,4 +1,5 @@
-"""decode 图导出器（seq=1 + KV）—— 支持三种形态。
+"""★可移植版：模型用 MODEL_DIR / 输出用 OUTDIR 指定 ✓（原脚本写死本机路径 ✗）★
+decode 图导出器（seq=1 + KV）—— 支持三种形态。
 
 为什么需要 decode 图：现在的段图是 prefill-only ⇒ 每生成一个 token 都要重跑整个上下文
 （实测 60~100 秒 / 8 token）。decode 图每步只算 1 个 token ⇒ 这是数量级的提速。
@@ -18,13 +19,18 @@
   而共享层的槽由主机在段 12 之后维持（槽里第 pos 个位置 = 段 12 输出的新 K/V ✓）。
 """
 import os, io, sys, torch, torch.nn as nn, torch.nn.functional as F
-sys.path.insert(0, "/home/hu60/work/llm/.tmp")
-import g4_seg3d as G
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 可移植 ✓
+import gemma4_model as G
 
 START = int(os.environ.get("START", "0")); NO = int(os.environ.get("NO", "4"))
 KVMAX = int(os.environ.get("KVMAX", "128"))
 MODE = os.environ.get("MODE") or ("shared" if START >= 16 else "own")
-OUT = os.environ.get("OUTDIR") or ("/home/hu60/work/llm/ddk-llm/llm-poc/g4dec%d" % START)
+# ★ KV 的 I/O dtype：fp32（默认）/ fp16 / ★int8★ —— 用来测设备对不同 dtype 的 KV 张量上限 ✓
+# ★ KVND=4：把 KV 槽张量改成 4 维 [KV,2,1,D/2]（元素数不变）—— 用来判定"限制是否来自 4 维" ✓
+KVND = int(os.environ.get("KVND", "3"))
+KVDT = os.environ.get("KVDT", "fp32")
+_TDT = {"fp32": torch.float32, "fp16": torch.float16, "int8": torch.int8}[KVDT]
+OUT = os.environ.get("OUTDIR") or (os.path.join(os.environ.get("OUTDIR") or os.path.join(os.getcwd(), "out"), "g4seg") % START)
 os.makedirs(OUT, exist_ok=True)
 
 m, tm = G.load()
@@ -59,7 +65,14 @@ class Dec(nn.Module):
             kvs = rest[n:n + nk]
             vvs = rest[n + nk:n + 2 * nk]
             ownpos = {gi: p for p, gi in enumerate(OWN)}
-        slot = {}                                  # ★ 段内共享槽（层 13/14 写、后续共享层读）
+        slot = {}
+        # ★ 输入侧的 KV 若是低精度，先转 fp32 再算（图内只做类型转换，不改数值语义）
+        if self.mode == "shared":
+            kvs = [t.float() if t.dtype != torch.float32 else t for t in kvs]
+            vvs = [t.float() if t.dtype != torch.float32 else t for t in vvs]
+        else:
+            kvs = [t.float() if t.dtype != torch.float32 else t for t in kvs]
+            vvs = [t.float() if t.dtype != torch.float32 else t for t in vvs]
         x = hidden
         outs_k, outs_v = [], []
         for i, L in enumerate(self.layers):
@@ -86,7 +99,7 @@ class Dec(nn.Module):
                 vv = torch.cat([base_v, v], dim=1)
                 if getattr(A, "store_full_length_kv", False):
                     slot[lt] = (kk, vv)                     # ★ 层 13/14 写段内共享槽
-                outs_k.append(k); outs_v.append(v)
+                outs_k.append(k); outs_v.append(v)   # 先按 fp32 收集，最后统一转换
             sc = getattr(A, "scaling", None) or (D ** -0.5)
             att = F.softmax(torch.matmul(q, kk.transpose(-1, -2)) * sc + kv_mask, dim=-1)
             o = torch.matmul(att, vv).transpose(0, 1).reshape(1, 1, heads * D)
@@ -102,6 +115,10 @@ class Dec(nn.Module):
             x = x * L.layer_scalar
         if self.mode == "shared":
             return (x,)
+        # ★ 输出侧也按目标 dtype：新 K/V 用 .to(int8) 截断（数值无意义，只测设备接受度与大小）✓
+        if _TDT is not torch.float32:
+            outs_k = [t.to(_TDT) for t in outs_k]
+            outs_v = [t.to(_TDT) for t in outs_v]
         return (x, *outs_k, *outs_v)
 
 
@@ -116,7 +133,10 @@ if MODE == "shared":
     d_sl = next((DIMS[i] for i in range(NO) if LTYPES[i] == "sliding_attention"), 256)
     d_fu = next((DIMS[i] for i in range(NO) if LTYPES[i] == "full_attention"), 512)
     for nm, d in (("slot_sl_k", d_sl), ("slot_sl_v", d_sl), ("slot_fu_k", d_fu), ("slot_fu_v", d_fu)):
-        args.append(torch.zeros([1, KVMAX + 1, d])); names.append(nm)
+        if KVND == 4:
+            args.append(torch.zeros([KVMAX + 1, 2, 1, d // 2])); names.append(nm)
+        else:
+            args.append(torch.zeros([1, KVMAX + 1, d])); names.append(nm)
     onam = ["hidden_out"]
 else:
     for i in OWN:
@@ -125,6 +145,16 @@ else:
         args.append(torch.zeros([1, KVMAX, DIMS[i]])); names.append("v_%d" % i)
     onam = ["hidden_out"] + ["k_%d_out" % i for i in OWN] + ["v_%d_out" % i for i in OWN]
 
+_KVIDX = None
+if KVDT != "fp32":
+    # KV 相关的输入（shared: 4 个槽；own: k_*/v_* 各 len(OWN) 个）全部换成目标 dtype
+    if MODE == "shared":
+        for j in range(len(args) - 4, len(args)):
+            args[j] = args[j].to(_TDT)
+    else:
+        nk = len(OWN)
+        for j in range(len(args) - 2 * nk, len(args)):
+            args[j] = args[j].to(_TDT)
 with torch.no_grad():
     o = w(*args)
 print("  前向 ✓ 输出 %s" % str([tuple(t.shape) for t in o]), flush=True)

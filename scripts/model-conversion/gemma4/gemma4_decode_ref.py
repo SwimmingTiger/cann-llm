@@ -24,8 +24,8 @@ Gemma 4 的 KV 语义（本文件用逐位对拍证明复刻正确）：
 验证：4 个 token 的 prefill 结果 必须等于 4 次 decode 的结果（逐位）。
 """
 import sys, os, math, torch
-sys.path.insert(0, "/home/hu60/work/llm/.tmp")
-import g4_seg3d as G
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gemma4_model as G
 from collections import UserDict
 
 rmsnorm = G.rmsnorm

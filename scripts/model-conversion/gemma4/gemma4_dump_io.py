@@ -5,13 +5,13 @@
 全部存成 float32 裸二进制（设备端用纯 Python 读，不依赖 numpy）。
 """
 import os, sys, torch, struct
-sys.path.insert(0, "/home/hu60/work/llm/.tmp")
-import g4_seg3d as G
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gemma4_model as G
 from transformers import AutoModelForCausalLM
 
 tm = G.tm
 SEQ, NO = 4, 4
-OUT = "/home/hu60/work/llm/ddk-llm/llm-poc/g4io"; os.makedirs(OUT, exist_ok=True)
+OUT = os.path.join(os.environ.get("OUTDIR") or os.path.join(os.getcwd(), "out"), "gemma4"); os.makedirs(OUT, exist_ok=True)
 
 # 用一组【非平凡】的 token，避免全 0 导致看不出问题
 ids = torch.tensor([[1, 42, 777, 9000]], dtype=torch.long)

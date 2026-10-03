@@ -1,4 +1,5 @@
-"""Gemma 4 分段导出（统一接口，含 KV 共享槽）。
+"""★可移植版：模型用 MODEL_DIR / 输出用 OUTDIR 指定 ✓（原脚本写死本机路径 ✗）★
+Gemma 4 分段导出（统一接口，含 KV 共享槽）。
 
 图接口（所有段一致 ✓）：
   输入 : hidden[1,seq,1536] · mask3[1,seq,seq] · cos_sl/sin_sl[seq,256] · cos_fu/sin_fu[seq,512]
@@ -11,13 +12,17 @@
   · 末尾的 norm / lm_head 不做（词表 262144×4B = 1MB 顶到设备上限 ✗ ⇒ 主机侧做 ✓）
 """
 import os, sys, torch, torch.nn as nn
-sys.path.insert(0, "/home/hu60/work/llm/.tmp")
-import g4_seg3d as G
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 可移植 ✓
+import gemma4_model as G
 
+# ★ DTYPE=fp16 ⇒ 整图 fp16（权重 + 激活 + I/O 全 fp16）★
+#   比"混合精度 + 激活侧 Cast"干净得多：没有 Cast、走 NPU 原生 fp16 路径 ✓
+DTYPE = os.environ.get("DTYPE", "fp32")
+_DT = torch.float16 if DTYPE == "fp16" else torch.float32
 START = int(os.environ.get("START", "0"))
 NO    = int(os.environ.get("NO", "4"))
 SEQ   = int(os.environ.get("SEQ", "4"))
-OUT   = "/home/hu60/work/llm/ddk-llm/llm-poc/g4seg%d" % START
+OUT   = os.environ.get("OUTDIR") or (os.path.join(os.environ.get("OUTDIR") or os.path.join(os.getcwd(), "out"), "g4seg") % START)
 os.makedirs(OUT, exist_ok=True)
 
 tm = G.tm if hasattr(G, "tm") else None
@@ -26,36 +31,62 @@ if tm is None:
 NTOT = len(tm.layers)
 no = min(NO, NTOT - START)
 w = G.Seg3D(tm, START, no).eval()
+if DTYPE == "fp16":
+    w = w.half()          # ★ 权重/常量全转 fp16 ✓
 print("  段 [%d:%d] · head_dim=%s" % (START, START + no, w.dims), flush=True)
 
+# ★ KV 槽只在需要的段出现（避免"输入即输出"的别名，OMG 会报 cannot find output tensor ✗）
+#   段内层号决定：含层 13/14 ⇒ 产出；含层 >=15 且不含 13/14 ⇒ 接收；否则都不带
+has_store = any(13 <= START + i <= 14 for i in range(no))
+has_shared = any(START + i >= 15 for i in range(no))
+KV_OUT = has_store            # ★只要段内含 13/14 就【输出】槽 ✓
+#   这样"12-23"（含写槽者+部分共享层）也能把槽传给后面的 "24-34" ✓
+#   （原来要求 not has_shared ⇒ 段内自洽但不外传 ⇒ 无法再分段 ✗）        # 段 3：含 13/14，且层 15 也在段内自洽 ⇒ 只产出 ✓
+KV_IN  = has_shared and not has_store        # 段 4~8：只接收 ✓
+if KV_IN:  MODE = "in"
+elif has_store: MODE = "out"
+else: MODE = "none"
+print("  KV 模式: %s (has_store=%s has_shared=%s)" % (MODE, has_store, has_shared), flush=True)
+
 class W(nn.Module):
-    def __init__(self, w, n): super().__init__(); self.w = w; self.n = n
-    def forward(self, hidden, mask3, cos_sl, sin_sl, cos_fu, sin_fu, sk, sv, fk, fv, *ples):
+    def __init__(self, w, n, mode): super().__init__(); self.w = w; self.n = n; self.mode = mode
+    def forward(self, hidden, mask3, cos_sl, sin_sl, cos_fu, sin_fu, *rest):
         ln = list(self.w.layer_types)
+        if self.mode == "in":
+            sk, sv, fk, fv = rest[0], rest[1], rest[2], rest[3]; ples = rest[4:]
+        else:
+            sk = sv = fk = fv = torch.zeros(1); ples = rest
         args = []
         for i in range(self.n):
-            lt = ln[i]
-            args += [cos_sl, sin_sl] if lt == "sliding_attention" else [cos_fu, sin_fu]
+            args += [cos_sl, sin_sl] if ln[i] == "sliding_attention" else [cos_fu, sin_fu]
         args += list(ples)
         out = self.w(hidden, mask3, sk, sv, fk, fv, *args)
-        return out            # (x, sk, sv, fk, fv)
+        x, sk2, sv2, fk2, fv2 = out
+        if self.mode == "in":   return x
+        if self.mode == "out":  return x, sk2, sv2, fk2, fv2
+        return x
 
 H, PLE = tm.config.hidden_size, tm.config.hidden_size_per_layer_input
-ww = W(w, no).eval()
-hidden = torch.zeros([1, SEQ, H]); mask3 = torch.zeros([1, SEQ, SEQ])
-cos_sl = torch.zeros([SEQ, 256]); sin_sl = torch.zeros([SEQ, 256])
-cos_fu = torch.zeros([SEQ, 512]); sin_fu = torch.zeros([SEQ, 512])
-sk = torch.zeros([1, SEQ, 256]); sv = torch.zeros([1, SEQ, 256])
-fk = torch.zeros([1, SEQ, 512]); fv = torch.zeros([1, SEQ, 512])
-ples = [torch.zeros([1, SEQ, PLE]) for _ in range(no)]
-names = ["hidden", "mask3", "cos_sl", "sin_sl", "cos_fu", "sin_fu", "sk", "sv", "fk", "fv"]
-onam  = ["hidden_out", "sk_out", "sv_out", "fk_out", "fv_out"]
+ww = W(w, no, MODE).eval()
+hidden = torch.zeros([1, SEQ, H], dtype=_DT); mask3 = torch.zeros([1, SEQ, SEQ], dtype=_DT)
+cos_sl = torch.zeros([SEQ, 256], dtype=_DT); sin_sl = torch.zeros([SEQ, 256], dtype=_DT)
+cos_fu = torch.zeros([SEQ, 512], dtype=_DT); sin_fu = torch.zeros([SEQ, 512], dtype=_DT)
+sk = torch.zeros([1, SEQ, 256], dtype=_DT); sv = torch.zeros([1, SEQ, 256], dtype=_DT)
+fk = torch.zeros([1, SEQ, 512], dtype=_DT); fv = torch.zeros([1, SEQ, 512], dtype=_DT)
+ples = [torch.zeros([1, SEQ, PLE], dtype=_DT) for _ in range(no)]
+names = ["hidden", "mask3", "cos_sl", "sin_sl", "cos_fu", "sin_fu"]
+onam  = ["hidden_out"]
+ARGS = [hidden, mask3, cos_sl, sin_sl, cos_fu, sin_fu]
+if MODE == "in":
+    ARGS += [sk, sv, fk, fv]; names += ["sk", "sv", "fk", "fv"]
+if MODE == "out":
+    onam += ["sk_out", "sv_out", "fk_out", "fv_out"]
 with torch.no_grad():
-    o = ww(hidden, mask3, cos_sl, sin_sl, cos_fu, sin_fu, sk, sv, fk, fv, *ples)
-print("  前向 ✓ 输出 %s" % str([tuple(t.shape) for t in o]), flush=True)
+    o = ww(*ARGS, *ples)
+print("  前向 ✓ 输出 %s" % str([tuple(t.shape) for t in (o if isinstance(o, tuple) else (o,))]), flush=True)
 
 p = os.path.join(OUT, "seg.onnx")
-torch.onnx.export(ww, (hidden, mask3, cos_sl, sin_sl, cos_fu, sin_fu, sk, sv, fk, fv, *ples), p,
+torch.onnx.export(ww, (*ARGS, *ples), p,
                   input_names=names + ["per_layer_%d" % i for i in range(no)],
                   output_names=onam, opset_version=14, do_constant_folding=True, dynamo=False)
 import onnx
@@ -74,7 +105,7 @@ ops = {}
 for n in g.node: ops[n.op_type] = ops.get(n.op_type, 0) + 1
 print("  ★ 导出 ✓ 节点 %d · ≥4维 %d · Slice %d · %.2f GB" %
       (len(g.node), n4, ops.get("Slice",0)+ops.get("StridedSlice",0),
-       sum(os.path.getsize(os.path.join(OUT,f)) for f in os.listdir(OUT))/1e9), flush=True)
+       sum(os.path.getsize(os.path.join(OUT,f)) for f in os.listdir(OUT) if os.path.isfile(os.path.join(OUT,f)))/1e9), flush=True)
 print("  算子:", ", ".join("%s×%d" % kv for kv in sorted(ops.items(), key=lambda x:-x[1])[:12]), flush=True)
 T = {1:"FP32",6:"INT32",7:"INT64",9:"BOOL",10:"FP16"}; T2 = {1:"float32",6:"int32",7:"int64",9:"bool",10:"float16"}
 def sh(t): return ",".join(str(x) for x in shp[t.name])
