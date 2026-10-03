@@ -51,6 +51,9 @@ class _Mslite:
             #   （实测：3.14 下必崩 ✓、3.12 下因地址布局侥幸没崩 ✓ —— 就是"兼容性问题"的真身 ✓）
             ("OH_AI_TensorGetElementNum", C.c_int64, [C.c_void_p]),   # int64，不是 size_t ✓
             ("OH_AI_TensorGetDataType", C.c_int, [C.c_void_p]),       # ★原来漏了 ✗
+            # ★用模型自报的字节数，别再硬编码 dtype→字节表 ✗★
+            #   （硬编码表踩过两次坑：42=FP16/43=FP32 是对的，但 34=INT32 我当成了 1 字节 ✗）
+            ("OH_AI_TensorGetDataSize", C.c_size_t, [C.c_void_p]),
             ("OH_AI_TensorGetDataSize", C.c_size_t, [C.c_void_p]),
             ("OH_AI_TensorGetName", C.c_char_p, [C.c_void_p]),
             ("OH_AI_ModelPredict", C.c_int, [C.c_void_p, _TA, C.POINTER(_TA), C.c_void_p, C.c_void_p]),
@@ -92,13 +95,13 @@ class _Mslite:
             nm = L.OH_AI_TensorGetName(t).decode()
             n = L.OH_AI_TensorGetElementNum(t)
             d = feeds[nm]
-            # ★ 按张量真实 dtype 算字节数（整图 fp16 时是 2 字节/元素 ✗ 不能写死 4 ✓）
-            #   MindSpore Lite：kNumberTypeFloat16 = 42 · kNumberTypeFloat32 = 43 ✓
+            # ★ 期望字节数直接问模型（GetDataSize）✓ —— 不再硬编码 dtype→字节表 ✗
+            #   历史教训：硬编码表把 INT32(34) 当成 1 字节 ⇒ 误报"大小不符" ✗
+            _want = int(L.OH_AI_TensorGetDataSize(t))
             _dt = L.OH_AI_TensorGetDataType(t)
-            _esz = 2 if _dt == 42 else (1 if _dt in (32, 34) else 4)
-            if len(d) != n * _esz:
-                raise ValueError("输入 %s 大小不符: %d vs %d（dtype=%d, %d 字节/元素）"
-                                 % (nm, len(d), n * _esz, _dt, _esz))
+            if len(d) != _want:
+                raise ValueError("输入 %s 大小不符: %d vs %d（dtype=%d, %d 元素）"
+                                 % (nm, len(d), _want, _dt, n))
             C.memmove(L.OH_AI_TensorGetMutableData(t), d, len(d))
         outs = _TA()
         if L.OH_AI_ModelPredict(m, ins, C.byref(outs), None, None) != 0:
