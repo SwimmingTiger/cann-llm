@@ -876,3 +876,63 @@ python3.14 scripts/model-conversion/int8/probe_quant.py wq7_mm.ms - QuantConfigD
 
 **不需要扩展配置** ✓：量化信息随模型一起下发（`AddExtensionConfig` 那条路设备端不支持 ✗，
 但那不是必经之路 ✓）
+
+## 17. 用调试器确认"模型被解析成了什么"（方法与实测数据）
+
+**动机**：§15 曾据"体积 + 字节搜索"间接推断该 `.ms` 不是 int8。**间接证据不足以定性** ✗ ——
+改为用调试器直接观察解析过程与结果。
+
+**调试姿势**（仅用 `python3.14` 运行探针 ✓）：
+
+```
+lldb-server gdbserver <host>:<port> -- <python3.14> <probe_quant.py> <model.ms> - …
+断点（符号取自 /system/lib64/platformsdk/libmindspore-lite.so）：
+  · mindspore::lite::LiteModel::ConstructModel(char const*, unsigned long, bool)
+  · mindspore::lite::LiteModel::PrepareInnerTensors()
+  · mindspore::lite::LiteModel::CheckQuantAllInit(flatbuffers::Vector<QuantParam> const*)
+  · mindspore::lite::Tensor::Tensor(mindspore::TypeId, std::vector<int>, Format const&, Category)
+```
+
+**实测 1：模型缓冲区被确认** ✓
+
+```
+LiteModel::ConstructModel 命中，参数：
+  x0 = LiteModel this
+  x1 = 模型缓冲区地址
+  x2 = ★19712★  ← 与 wq7_mm.ms 的字节数完全一致
+用 lldb 把 x1 处 19712 字节 dump 出来（memory read --force --binary --outfile …）：
+  ★与 wq7_mm.ms 逐字节完全一致★ ✓（说明调试器读到的就是被解析的原始数据）
+```
+
+**实测 2：缓冲区头与标记** ✓
+
+```
+头 8 字节：24 00 00 00 4d 53 4c 32   ⇒ "★MSL2★"（MS-Lite v2）
+可读串：★subgraph_0_third_party★ · ★ThirdPartyModel★ ·
+        IMOD · ge_default · x:0 · Node_Output:0 · attr_* · NCHW
+⇒ ★该模型确实带 third-party 标记★ ✓（与 Build 0 · Predict 0 相符）
+```
+
+**实测 3：张量创建时的 TypeId** ✓
+
+`Tensor::Tensor(TypeId, …)` 命中 5 次，`x1`（TypeId）为：
+
+```
+0x2b = 43 (x4)   ·   0x25 = 37 (x1)
+```
+`TypeId` 枚举（`mindspore/core/include/mindapi/base/type_id.h`，自 0 顺序计数）：
+
+```
+30 kNumberTypeBegin · 31 Bool · 32 Int · ★33 Int8★ · 34 Int16 · 35 Int32 · 36 Int64 ·
+37 UInt · ★38 UInt8★ · 39 UInt16 · 40 UInt32 · 41 UInt64 · 42 Float ·
+★43 Float16★ · 44 Float32 · 45 Float64 · 46 BFloat16 …
+⇒ 43 = kNumberTypeFloat16，37 = kNumberTypeUInt ⇒ 本次创建的张量为 float16 / uint ✓
+```
+
+**记录边界**（避免再次过度推断 ✗）：
+
+```
+· 5 次命中说明的是【这些张量创建时】的类型；权重张量若在别处创建或延后创建则未被覆盖
+· CheckQuantAllInit 未命中，可能只是该分支未走到，不能据此断言"模型无量化信息"
+· 因此本条【只记录事实与方法】，不对"该 .ms 是否为 int8"下结论
+```
