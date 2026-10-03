@@ -167,6 +167,17 @@ class Gemma4SegRunner:
         #   其余是 sliding_attention，head_dim=256 ✓
         self.dims_all = [512 if (i % 5 == 4) else 256 for i in range(35)]
         self._timing = {}
+        # ★ 整图 fp16 的模型目录里放一个 dtype 标记文件（内容是 fp16）★
+        #   .ms 内部 dtype 读不出来，所以用标记文件告诉 runner 该按 fp16 打包/解包 ✓
+        _df = os.path.join(self.dir, "dtype")
+        self.f16 = bool(os.path.exists(_df) and
+                        open(_df).read().strip().lower().startswith("fp16"))
+        if self.f16:
+            # 一次性把 io/*.bin 的 fp32 转成 fp16（省得每次 forward 重复转 ✓）
+            import array as _arr
+            for nm in ("cos_sl", "sin_sl", "cos_fu", "sin_fu"):
+                a = _arr.array("f"); a.frombytes(getattr(self, nm))
+                setattr(self, nm, _arr.array("e", a).tobytes())
         # ★ CANN_LLM_TIMING=1 时，进程退出前把各阶段耗时打出来 ★
         #   （只统计不打印的话什么也看不到 ✗ —— 上次就是这么翻车的 ✓）
         if os.environ.get("CANN_LLM_TIMING"):
@@ -218,28 +229,29 @@ class Gemma4SegRunner:
     EMB_SCALE = 39.191835884530846
 
     def emb(self, i: int) -> bytes:
-        """裸表行 × embed_scale，并转成 fp32（权重存 fp16，图要 fp32 ✗）"""
+        """裸表行 × embed_scale。权重存 fp16 ✓；整图 fp16 时输出 fp16 ✓，否则转 fp32 ✓"""
         self._f_emb.seek(i * self.e_dim * 2)
         raw = self._f_emb.read(self.e_dim * 2)
-        return struct.pack("<%df" % self.e_dim,
-                           *[v * self.EMB_SCALE
-                             for v in struct.unpack("<%de" % self.e_dim, raw)])
+        vals = [v * self.EMB_SCALE for v in struct.unpack("<%de" % self.e_dim, raw)]
+        return struct.pack(("<%de" if self.f16 else "<%df") % self.e_dim, *vals)
+
 
     def pl_row_scaled(self, i: int) -> bytes:
         """token-identity：表行 × sqrt(ple_dim)（= HF get_per_layer_inputs ✓）"""
         self._f_pl.seek(i * self.pl_dim * 2)
         raw = self._f_pl.read(self.pl_dim * 2)
         sc = math.sqrt(self.PLE)
-        return struct.pack("<%df" % self.pl_dim,
-                           *[v * sc for v in struct.unpack("<%de" % self.pl_dim, raw)])
+        vals = [v * sc for v in struct.unpack("<%de" % self.pl_dim, raw)]
+        return struct.pack(("<%de" if self.f16 else "<%df") % self.pl_dim, *vals)
 
     @staticmethod
     def _causal_mask(seq: int) -> bytes:
-        neg = -1.0e9
+        neg = -65000.0 if getattr(self, "f16", False) else -1.0e9   # fp16 放不下 1e9 ✗
+        _fmt = "<%de" if getattr(self, "f16", False) else "<%df"
         out = []
         for i in range(seq):
             out.extend([0.0 if j <= i else neg for j in range(seq)])
-        return struct.pack("<%df" % (seq * seq), *out)
+        return struct.pack(_fmt % (seq * seq), *out)
 
     # ---------- 前向 ----------
     def _tstage(self, name: str, t0: float) -> float:
@@ -313,16 +325,17 @@ class Gemma4SegRunner:
         off = (n - 1) * self.e_dim * 4
         h_last = hidden[off:off + self.e_dim * 4]
         # ★ 最终 RMSNorm（Gemma4RMSNorm：用 pow 而非 rsqrt；eps=1e-6）★
-        hv = struct.unpack("<%df" % self.e_dim, h_last)
+        hv = (struct.unpack("<%de" % self.e_dim, h_last) if self.f16
+              else struct.unpack("<%df" % self.e_dim, h_last))
         ms2 = sum(v * v for v in hv) / self.e_dim + 1e-6
         sc = ms2 ** -0.5
-        h_last = struct.pack("<%df" % self.e_dim,
+        h_last = struct.pack(("<%de" if self.f16 else "<%df") % self.e_dim,
                              *[v * sc * w for v, w in zip(hv, self.norm_w)])
         _t = time.perf_counter()
         logits: List[float] = []
         for J in range(4):
-            logits.extend(_f32(self.ms.run(os.path.join(self.dir, "lm", "lm%d.ms" % J),
-                                           {"hidden": h_last})["logits"]))
+            _lg = self.ms.run(os.path.join(self.dir, "lm", "lm%d.ms" % J), {"hidden": h_last})["logits"]
+            logits.extend(self._f16(_lg) if self.f16 else _f32(_lg))
         self._tstage("lm", _t)
         return [math.tanh(v / self.LOGIT_CAP) * self.LOGIT_CAP for v in logits]
 
@@ -553,6 +566,10 @@ class Gemma4KvRunner(Gemma4ChatRunner):
         self._prefix = list(ids)
         return self.prefill(ids)
 
+    @staticmethod
+    def _f16(b: bytes) -> List[float]:
+        return list(struct.unpack("<%de" % (len(b) // 2), b))
+
     def _tail_logits(self, hidden: bytes, n: int) -> List[float]:
         off = (n - 1) * self.e_dim * 4
         hv = struct.unpack("<%df" % self.e_dim, hidden[off:off + self.e_dim * 4])
@@ -562,6 +579,6 @@ class Gemma4KvRunner(Gemma4ChatRunner):
                              *[v * sc * w for v, w in zip(hv, self.norm_w)])
         logits: List[float] = []
         for J in range(4):
-            logits.extend(_f32(self.ms.run(os.path.join(self.dir, "lm", "lm%d.ms" % J),
-                                           {"hidden": h_last})["logits"]))
+            _lg = self.ms.run(os.path.join(self.dir, "lm", "lm%d.ms" % J), {"hidden": h_last})["logits"]
+            logits.extend(self._f16(_lg) if self.f16 else _f32(_lg))
         return [math.tanh(v / self.LOGIT_CAP) * self.LOGIT_CAP for v in logits]
