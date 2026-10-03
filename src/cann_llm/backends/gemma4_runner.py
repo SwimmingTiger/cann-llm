@@ -125,7 +125,9 @@ class Gemma4SegRunner:
         # ★ 合并段布局：mseg0/seg.ms 存在 ⇒ 用 3 个大段（层 0-11 / 12-23 / 24-34）
         #   动机：瓶颈是"每 token 的图调用次数"（见 docs/gemma4-on-npu.md §5）
         #   9 段 + 1 图P + 4 lm = 14 次/token ⇒ 3 段后降到 8 次 ✓
-        if os.path.isdir(os.path.join(self.dir, "mseg0")):
+        # ★ 判定放宽：只要目录里存在任一 mseg0*（mseg0 / mseg0_s32 / mseg0_s72 / mseg0_s128）★
+        #   这样"只放某一档"的符号链接对比目录也能被正确识别 ✓
+        if any(n.startswith("mseg0") for n in os.listdir(self.dir)):
             self.MERGED = True
             # ★ 实测可行的合并切法：每段 ≤8 层（含 full 层的段更小）⇒ 每段 <2GB ✓
             #   13/14 与共享层被拆开也没关系 —— 含 13/14 的段会输出槽，后面的段消费它 ✓
