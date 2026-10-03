@@ -296,3 +296,41 @@
 ④ 合并更大的段（依赖 ① 先把体积压下来）✓
 ```
 
+
+### 8.1 ★把权重转 FP16：体积减半（已跑通 ✓）★
+
+**动机**（来自 §8 的实测）：时间大头是【加载 .ms，约 200 MB/s 的磁盘 I/O】✗ ⇒
+**把 .ms 体积减半，加载时间就差不多减半**；顺带也能突破 converter 的 2 GB 上限，
+让"更大的段"成为可能 ✓。
+
+工具：`scripts/model-conversion/onnx_weights_to_fp16.py`
+
+```
+用法：python onnx_weights_to_fp16.py <输入.onnx> <输出.onnx>
+      （读入 external data ✓，输出写成【单个 .data】✓）
+```
+
+**关键细节（第一次做错的地方 ✗）**：
+
+```
+★ 只转【消费者全是 MatMul/Gemm】的权重 ★ ✓
+✗ 错误做法：给所有大权重都插 Cast ⇒ 连 RMSNorm 的权重也被插上 ⇒
+   ReduceMean 变成混合精度 ⇒ OMG 直接拒收 ✗
+   （报错长这样：reduce_check_support.cc CheckElemSupportV0 … check reduce shape support fail ✗）
+✓ 正确做法：只动 MatMul/Gemm 的权重 —— 它们是体积的 ~99%，且不经过任何 reduce ✓
+   做法：先统计每个 initializer 被哪些 op_type 消费；ops <= {"MatMul","Gemm"} 才转 ✓
+```
+
+**实测结果（5 段 · S=128）**：
+
+| 段 | fp32 | **fp16** |
+|---|---|---|
+| 0-7 | 1188 MB | **595 MB** |
+| 8-15 | 1326 MB | **664 MB** |
+| 16-23 | 2065 MB | **1033 MB** |
+| 24-29 | 1581 MB | **791 MB** |
+| 30-34 | 1301 MB | **650 MB** |
+| 合计 | 7.46 GB | **3.74 GB** ✓ |
+
+部署位置：`~/work/llm/models/f16segs/mseg{st}_s128/` ✓
+对比目录：★`~/work/llm/models/gemma4_5seg_s128_f16/`★（软链 ✓，与 fp32 版逐项对照 ✓）
