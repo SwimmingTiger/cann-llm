@@ -79,8 +79,13 @@ class _Mslite:
             nm = L.OH_AI_TensorGetName(t).decode()
             n = L.OH_AI_TensorGetElementNum(t)
             d = feeds[nm]
-            if len(d) != n * 4:
-                raise ValueError("输入 %s 大小不符: %d vs %d" % (nm, len(d), n * 4))
+            # ★ 按张量真实 dtype 算字节数（整图 fp16 时是 2 字节/元素 ✗ 不能写死 4 ✓）
+            #   MindSpore Lite：kNumberTypeFloat16 = 42 · kNumberTypeFloat32 = 43 ✓
+            _dt = L.OH_AI_TensorGetDataType(t)
+            _esz = 2 if _dt == 42 else (1 if _dt in (32, 34) else 4)
+            if len(d) != n * _esz:
+                raise ValueError("输入 %s 大小不符: %d vs %d（dtype=%d, %d 字节/元素）"
+                                 % (nm, len(d), n * _esz, _dt, _esz))
             C.memmove(L.OH_AI_TensorGetMutableData(t), d, len(d))
         outs = _TA()
         if L.OH_AI_ModelPredict(m, ins, C.byref(outs), None, None) != 0:
@@ -174,10 +179,11 @@ class Gemma4SegRunner:
                         open(_df).read().strip().lower().startswith("fp16"))
         if self.f16:
             # 一次性把 io/*.bin 的 fp32 转成 fp16（省得每次 forward 重复转 ✓）
-            import array as _arr
+            # ★ 不能用 array("e")：array 模块不支持 fp16 这个 typecode ✗（只有 struct 支持 ✓）
             for nm in ("cos_sl", "sin_sl", "cos_fu", "sin_fu"):
-                a = _arr.array("f"); a.frombytes(getattr(self, nm))
-                setattr(self, nm, _arr.array("e", a).tobytes())
+                b = getattr(self, nm)
+                vals = struct.unpack("<%df" % (len(b) // 4), b)
+                setattr(self, nm, struct.pack("<%de" % len(vals), *vals))
         # ★ CANN_LLM_TIMING=1 时，进程退出前把各阶段耗时打出来 ★
         #   （只统计不打印的话什么也看不到 ✗ —— 上次就是这么翻车的 ✓）
         if os.environ.get("CANN_LLM_TIMING"):
@@ -244,8 +250,7 @@ class Gemma4SegRunner:
         vals = [v * sc for v in struct.unpack("<%de" % self.pl_dim, raw)]
         return struct.pack(("<%de" if self.f16 else "<%df") % self.pl_dim, *vals)
 
-    @staticmethod
-    def _causal_mask(seq: int) -> bytes:
+    def _causal_mask(self, seq: int) -> bytes:      # ★ 要读 self.f16 ⇒ 不能是 staticmethod ✗
         neg = -65000.0 if getattr(self, "f16", False) else -1.0e9   # fp16 放不下 1e9 ✗
         _fmt = "<%de" if getattr(self, "f16", False) else "<%df"
         out = []
