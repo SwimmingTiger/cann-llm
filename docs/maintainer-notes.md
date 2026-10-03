@@ -307,3 +307,112 @@ hilog -x | grep -aiE "MS_LITE|NNRt|CANN|AI_FMK|hiai"
 
 ★ 结论：**硬件与算子层都支持 int8；卡点在③模型编译入口（厂商栈），不在我们的代码** ✓
 ★ 教训：**`head` 截断 + 单一现象 ⇒ 不要下"读不出/不可行"这类全称结论** ✓
+
+---
+
+# ★在线构图 int8 为何失败：逆向到最深一层的完整证据★
+
+材料：设备上真实加载的
+`/vendor/lib64/passthrough/indirect/libai_fmk_graph_optimizer.so`（1.48 MB）、
+`libai_fmk_hcl_model_runtime_impl.so`、`libai_infra_log.so`、`libhiai.so`、
+`libhiai_adapter.so`（均在固件解包中取得同样副本）；
+工具：lldb（设备侧断点 + 读寄存器/栈字符串）、idalib（反编译）。
+
+## 1. 失败的精确位置（lldb 实测，进程停在断点处）
+
+```
+调用栈（自下而上）：
+  uint8_test`main
+   → OH_NNCompilation_Build + 888
+     → NNCompiler::Build → OnlineBuild → NormalBuild
+       → HIAIDevice::PrepareModel → BuildLiteGraph
+         → libhiai_adapter.so(+560,+1256) → libhiai.so
+           → HIAI_MR_ModelBuilder_Build → HIAI_HCL_ModelBuilder_BuildV2
+             → HCL_ModelBuilder_Build → HclModelBuilderImpl::BuildModel
+               → BuildForStandardModel → GeneralModelCompiler::Compile → BeforeCompile
+                 → ge::ModelOptimizer::Optimize → InferShapeOptimize
+                   → ★ge::IrInferShapeOptimizer::InferShape ⇒ 报错 ⇒ 失败★
+```
+
+```
+★ 最深一层：ge::IrInferShapeOptimizer::InferShape(ge::InferContext&, ge::ComputeGraph&)
+  库：libai_fmk_graph_optimizer.so  ·  偏移 +704  ·  行号 272
+★ 实际错误串（从 AI_Log_Print 的 x2 读出）：
+    "%s %s(%d)::"[op:%s type:%s] ★Infershape failed, %s★""
+    "%s %s(%d)::"[op:%s type:%s] Verify failed, %s""
+★ 两个 %s 实参（x6/x7 指向栈字符串）读出：★"Add:0"★
+  ⇒ 完整即：[op:Add type:0] Infershape failed, …
+★ 另有旁证：hiai::ModelTypeUtil::GetModelType 认的 magic = 1146047817 = 0x44504948 = "HIPD"
+  我们的 int8/uint8 图不匹配 ⇒ 判为 type=7（未知），函数本身仍返回 0（它不报错）
+```
+
+## 2. InferShape 的 dtype 规则：★逐算子硬编码，没有统一表★
+
+全库仅出现两个 GE dtype 名称字符串（`FLOAT`、`UINT8`），其余以数字硬编码。
+
+| 算子 | 允许 dtype | 出处 |
+|---|---|---|
+| ★**Add**★ | ★float 或 int32★ | 字符串 `"Data type of add OP must be float or int32."` |
+| FloorDiv / Range / StridedSlice | float 或 int32 | 同上系列 |
+| Greater / Maximum / Clip | float 或 int32_t | 同上系列 |
+| Sqrt / Permute | 仅 DT_FLOAT | `"The input fo sqrt only support DT_FLOAT"` |
+| Pack / Tile | float 或 int32 或 bool | `"Data type of Pack OP must be float or int32 or bool"` |
+| ScatterNd 类 | float / int32 / bool / ★DT_UINT8★ | `"valueDataType must be float or int32 or bool or DT_UINT8."` |
+| Slice 的 begin/size | 必须 DT_INT32 | `"not matched DT_INT32"` |
+| Shape 常量 | int32 或 int64 | — |
+| MaxPool argmax / Size | int32 或 int64 | — |
+| MatMul+α / LayerNorm ε | 必须 DT_FLOAT | — |
+
+⇒ **int8/uint8 在通用算子上几乎一律不支持；只有极少数算子显式允许 UINT8** ✓
+
+## 3. ★GE 期望的"量化算子形态"：四个硬要素★
+
+反编译 `SetDtypeAttr` / `SetScaleOffsetAndDtypeAttr`（`general_ir_quantize_saver.cpp`）得知：
+量化**不是**"把张量 dtype 设成 int8"，而是**给算子挂一组量化属性**：
+
+```c
+ge::AttrUtils::SetInt(opDesc, "dst_type", opParam->dtype);      // SetDtypeAttr
+SetScaleAndOffsetAttr(...);                                     // 先设 scale/offset
+ge::AttrUtils::SetInt(opDesc, "dtype", opParam->dtype);         // SetScaleOffsetAndDtypeAttr
+```
+
+**要素 ①：每输入一个量化类型**（属性名）
+`x_quant_type` · `x1_quant_type` · `x2_quant_type` · `w_quant_type` · `filter_quant_type` ·
+`quantType` · `has84QuantType`
+（校验：`param["quantType"] is not in valid range` · `Get quant type fail` ·
+ `Input quant index is illegal:%u` · `quant is oneside quant`）
+
+**要素 ②：每张量一对 scale/offset**
+`x_quant_scale` · `x1_quant_scale` · `scale_data_value`/`offset_data_value` ·
+`scale_weight_value`/`offset_weight_value` · `scale_from_blob` · `scale_weight_mode`
+（校验：`Get weight quant params fail, node:%s` · `Quantize scale is zero.`）
+
+**要素 ③：图内必须插入量化节点，且上游要有 fakequant/dynamicQuant 节点**
+`Quantize` / `Dequantize` / `AntiQuantize` / `Requantize` / `DynamicQuantize` ·
+`Creator_Quantize_Kernel` · `GetQuantizeOpName`
+属性：`fakequantNode` · `dynamicQuantNode` · `quantizeNode` · `dequantNode` ·
+`quantizeOpDesc` / `antiQuantizeOpDesc`
+（校验：`Insert antiquantize node after Data node fail.` ·
+ `param["fakequantNode"] must not be null.` · `param["dynamicQuantNode"] must not be null.`）
+⇒ **即 GE 期待的是 QAT 训练 / OMG 量化流程产出的图** ✓
+
+**要素 ④：必须带一个"量化配置 blob"**
+`Load quantize config fail.` · ★`Quant config buffer is empty.`★ ·
+`ParseOpQuantizeConfig` / `UpdateQuantizeConfig` / `Parse quantize config failed.`
+⇒ ★这正是 dopt 那条路产出的 `compress_D.json`（= compress_conf）★
+
+**版本化路径**：`SetQuantizeInfosV1` / `SetQuantizeInfosV2` ·
+`CheckQuantizeInfosV2` · `CheckNeedCompatibleQuantV2` · `DequantizeOldIR` · `QuantizeV2`/`DequantizeV2`
+**融合限制**：`Not support QuantConv+Bn.` · `Not support QuantConv+Scale.`
+
+## 4. 结论：两条 int8 路径在同一处断掉
+
+```
+★ 我们自己手搭（在线构图 + 张量量化参数）：
+    只有 int8/uint8 张量 + SetTensorQuantParams
+    ⇒ 缺 quant_type 属性 ✗ 缺 scale/offset 属性 ✗ 缺 Quant/Dequant 节点 ✗ 缺 quant config blob ✗
+    ⇒ GE 眼里就是"一堆 int8 张量的普通 Add" ⇒ Add 只认 float/int32 ⇒ InferShape 直接拒 ✓
+★ dopt 路径：★形态是对的★（compress_conf 就是要素④的 blob ✓）
+    但它必须经【扩展配置】送入 ⇒ 设备侧 hiai foundation 拒绝扩展配置 ✗
+⇒ ★两条路都断在"量化配置 blob 送不进去 / 形态凑不齐"★★
+```
