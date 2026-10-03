@@ -226,3 +226,45 @@ AI_NPUCL: CheckSupported: the op name [X:0] type [Y] is not supported
 1. 修 `AddOperation` 的 rc=2（对照官方文档示例逐字段核对参数/索引数组）
 2. 通了之后 ⇒ `GetAvailableOperations` 问 NPU 是否支持 int8 的 ADD/MATMUL
 3. ⇒ `OH_NNCompilation_Build` + `OH_NNExecutor_RunSync` ⇒ **int8 在 NPU 上跑通与否，即见分晓**
+
+### ★ 决定性实验结论（已做完）★
+
+```
+★ 问题：用在线构图 API（OH_NNModel_AddOperation）搭 int8 图，能否在 NPU 上编译？
+★ 答案：★明确失败 —— 而且【不是写法问题】✗★
+```
+
+| 实验 | 结果 |
+|---|---|
+| int8 MATMUL（补上 `SetTensorType` 后） | `AddOperation` ★rc=2 (INVALID_PARAMETER)★ ✗ |
+| int8 ADD | 同上 ✗ |
+| ★**逐字照抄官方文档的 fp32 ADD 示例**★（4 维 [1,2,2,3] · FLOAT32 · SetTensorType · INT8 激活参数） | ★**同样 rc=2**★ ✗ |
+
+```
+★★ 连官方示例都失败 ⇒ ★排除"我写错"★ ⇒
+   ★★ 结论：★在线逐算子构图这条路在这台设备上走不通★★ ✗
+   （设备的 NNRt 实现不认 OH_NNModel_AddOperation 这条入口 ✓）
+
+★★ 但设备【确实能跑 NPU 图】★ ⇒ 现役 fp32 段全部 Build 0 / Predict 0 ✓✓
+   ⇒ 可行入口是 ★OH_NNModel_BuildFromLiteGraph★（MS-Lite 内部用的就是它 ✓）
+```
+
+### ★★ 由此得到 int8 的正确判据（下一步）★★
+
+```
+★★ BuildFromLiteGraph（从 MS-Lite 图构出 OH_NNModel）
+   ⇒ 逐张量 OH_NNModel_SetTensorQuantParams
+   ⇒ OH_NNCompilation_Construct / SetDevice / ★Build★ ★★
+
+★ 关键：这条路【不需要扩展配置】✗ —— 正合本设备的处境 ✓（它恰好拒绝扩展配置 ✗）
+★ 而且 SetTensorQuantParams 已被证明在本设备上 rc=0 ✓✓（见上文）
+```
+
+### 新增文件
+
+| 文件 | 作用 |
+|---|---|
+| `int8_probe.c` | 最小 int8 图（MATMUL/ADD）+ `NN_QuantParam` + 编译 ⇒ 停在 `AddOperation` rc=2 |
+| `ctrl_probe.c` | ★对照★：逐字照抄官方 fp32 ADD 示例 ⇒ 同样 rc=2（证明不是写法问题 ✓） |
+| `avail_probe.c` | `GetAvailableOperations` 查算子支持 |
+| `inc/neural_network_runtime/` | 官方 NNRt 头文件副本（枚举/Signature 权威出处 ✓） |

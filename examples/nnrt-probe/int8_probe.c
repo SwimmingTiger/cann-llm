@@ -31,6 +31,8 @@ static const char *rcn(int rc) {
 #define CK(expr, what) do { int _r = (int)(expr); printf("    %-30s rc=%d(%s)\n", what, _r, rcn(_r)); \
                             if (_r != 0) goto done; } while (0)
 
+static uint32_t g_idx = 0;   /* 张量加入顺序 = 模型内的索引 ✓ */
+
 /* 建一个张量并加入模型；返回 0 表示成功 */
 static int add_tensor(OH_NNModel *m, const char *name, OH_NN_DataType dt,
                       const int32_t *shape, size_t rank) {
@@ -42,8 +44,11 @@ static int add_tensor(OH_NNModel *m, const char *name, OH_NN_DataType dt,
     OH_NNTensorDesc_SetFormat(d, OH_NN_FORMAT_NONE);
     int rc = (int)OH_NNModel_AddTensorToModel(m, d);
     OH_NNTensorDesc_Destroy(&d);
-    printf("    AddTensor %-18s rc=%d(%s)\n", name, rc, rcn(rc));
-    return rc;
+    /* ★官方示例：每加一个张量后都要 SetTensorType ✓（我原先漏了 ⇒ AddOperation rc=2 ✗）★ */
+    int rt = rc;
+    if (rc == 0) { rt = (int)OH_NNModel_SetTensorType(m, g_idx, OH_NN_TENSOR); g_idx++; }
+    printf("    AddTensor %-12s rc=%d · SetTensorType rc=%d(%s)\n", name, rc, rt, rcn(rt));
+    return rc ? rc : rt;
 }
 
 /* 给张量 index 挂量化参数 */
