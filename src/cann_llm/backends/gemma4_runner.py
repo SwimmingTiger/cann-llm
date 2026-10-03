@@ -55,6 +55,14 @@ class _Mslite:
 
     def run(self, ms: str, feeds: dict) -> dict:
         L = self.lib
+        # ★ 把"加载/构建"与"推理"分开计 ★ ——
+        #   否则无法判断首次调用的高耗时里有多少是加载 ✗
+        key = os.path.basename(os.path.dirname(ms))
+        t_load = getattr(self, "t_load", None)
+        if t_load is None:
+            t_load = self.t_load = {}
+            self.t_run = {}
+        _t0 = time.perf_counter()
         m = self._cache.get(ms)
         if m is None:
             ctx = L.OH_AI_ContextCreate()
@@ -63,6 +71,8 @@ class _Mslite:
             if L.OH_AI_ModelBuildFromFile(m, ms.encode(), _MINDIR, ctx) != 0:
                 raise RuntimeError("Build 失败: %s" % ms)
             self._cache[ms] = m
+            t_load[key] = t_load.get(key, 0.0) + (time.perf_counter() - _t0)
+        _t1 = time.perf_counter()
         ins = L.OH_AI_ModelGetInputs(m)
         for i in range(ins.handle_num):
             t = ins.handle_list[i]
@@ -81,6 +91,10 @@ class _Mslite:
             nm = L.OH_AI_TensorGetName(t).decode()
             res[nm] = C.string_at(L.OH_AI_TensorGetMutableData(t),
                                   L.OH_AI_TensorGetElementNum(t) * 4)
+        tr = getattr(self, "t_run", None)
+        if tr is None:
+            tr = self.t_run = {}
+        tr[key] = tr.get(key, 0.0) + (time.perf_counter() - _t1)
         return res
 
 
@@ -237,9 +251,27 @@ class Gemma4SegRunner:
         return t1
 
     def timing_report(self) -> str:
-        tot = sum(self._timing.values()) or 1.0
-        rows = sorted(self._timing.items(), key=lambda kv: -kv[1])
-        return "  ".join("%s=%.1fs(%.0f%%)" % (k, v, 100 * v / tot) for k, v in rows)
+        T = dict(self._timing)
+        # ★ 合并 _Mslite 的统计：加载/构建 与 推理 分开，并按图名归类 ✓
+        try:
+            t_load, t_run = self.ms.t_load, self.ms.t_run
+        except AttributeError:
+            t_load, t_run = {}, {}
+        tl, tr = sum(t_load.values()), sum(t_run.values())
+        def _is_seg(k):        # ★ 只有 seg<数字> 才算"每段"，segments(合计) 不算 ✓
+            return k.startswith("seg") and k[3:].isdigit()
+        main = sorted(((k, v) for k, v in T.items() if not _is_seg(k)),
+                      key=lambda kv: -kv[1])
+        # ★ 分母只算主阶段（否则 seg0/seg8… 会被重复计入 ⇒ 百分比减半 ✗）★
+        tot = sum(v for k, v in T.items() if not _is_seg(k)) or 1.0
+        head = "  ".join("%s=%.1fs(%.0f%%)" % (k, v, 100 * v / tot) for k, v in main)
+        segs = sorted(((k, v) for k, v in T.items() if _is_seg(k)),
+                      key=lambda kv: int(kv[0][3:]))
+        line2 = " ".join("%s=%.1fs" % (k, v) for k, v in segs)
+        line3 = ("★加载合计=%.1fs · 推理合计=%.1fs★" % (tl, tr) +
+                 "  逐图: " + " ".join("%s=%s" % (k, ("load %.1f/run %.1f" % (
+                     t_load.get(k, 0.0), t_run.get(k, 0.0)))) for k in sorted(set(t_load) | set(t_run))))
+        return head + ("\n[timing] 逐段: " + line2 if line2 else "") + "\n[timing] " + line3
 
     def reset_timing(self):
         self._timing = {}
@@ -269,7 +301,9 @@ class Gemma4SegRunner:
                     per_layer[self._pl_off(t) + (st + i) * self.PLE * 4:
                               self._pl_off(t) + (st + i + 1) * self.PLE * 4]
                     for t in range(S))
+            _ts = time.perf_counter()
             r = self.ms.run(os.path.join(self.dir, self._seg_dir(st, S), "seg.ms"), feeds)
+            self._tstage("seg%d" % st, _ts)          # ★ 每段单独计时 ✓
             # ★ 合并布局：含层 13/14 的段会输出 2 个共享槽（sk/sv/fk/fv）⇒ 传给后面的共享段 ✓
             if "sk_out" in r:
                 kv = {"sk": r["sk_out"], "sv": r["sv_out"],
