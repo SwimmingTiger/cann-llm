@@ -136,10 +136,9 @@ class Gemma4SegRunner:
             raise ValueError("上下文 %d 超过图的 %d（受图 P 张量上限约束）" % (n, self.SEQ))
         pad = list(ids) + [0] * (self.SEQ - n)
         # 真实 token 放在【最前面】，padding 在尾部；因果掩码保证真实 token 互不影响 ✓
-        ident = b"".join(self.pl_row_scaled(i) for i in pad).__class__  # 占位（见下）
+        # 表行已是 float32 小端 ⇒ 直接拼即可（不需要再解包重打一遍 ✗）
         ident = b"".join(self.pl_row_scaled(i) for i in pad)
-        ident = (struct.pack("<%df" % (self.SEQ * self.N_LAYERS * self.PLE),
-                             *struct.unpack("<%df" % (self.SEQ * self.pl_dim), ident)))
+        assert len(ident) == self.SEQ * self.pl_dim * 4
         per_layer = self.ms.run(os.path.join(self.dir, "graphP", "graphP.ms"),
                                 {"input_ids": struct.pack("<%di" % self.SEQ, *pad),
                                  "identity": ident})["per_layer"]
