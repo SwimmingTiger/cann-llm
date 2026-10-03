@@ -728,3 +728,48 @@ min_quant_weight_channel=16
 
 **下一步**：用 `WEIGHT_QUANT` 产 `.ms`，走 MS-Lite + NNRt 实测
 （预期可越过 §10 的 dtype 校验与 §9 的兼容性检查；能否过 `QuantizeOptimizer` 待验 ✓）
+
+## 13. ★★ WEIGHT_QUANT 实测：converter 直转 ONNX 的 `.ms` 缺 third-party 标记 ★★
+
+**做法**：用 `converter_lite --fmk=ONNX` + `quant_type=WEIGHT_QUANT` 量化一个 BERT 小模型
+（`tiny-test.onnx`：input_ids/attention_mask/token_type_ids → last_hidden_state）。
+
+```
+✓ 转换成功：CONVERT RESULT SUCCESS:0
+✓ 产出 226,656 字节（输入 ONNX 449,599 ⇒ 压到约一半 ⇒ 权重确实被量化 ✓）
+✗ 设备侧 Build -1，hilog：
+    E MS_LITE: [nnrt_delegate.cc:237] BuildOfflineModel# ★not third party model★
+```
+
+**排查**：给 cfg 补上 `[third_party_model]` 段（按官方示例格式，见
+`mindspore-lite/test/ut/test_data/third_party_model.cfg`：`input_names` / `input_dtypes` /
+`input_shapes` / `output_names` / `output_dtypes` / `output_shapes` / `extended_parameters`），
+填入该 BERT 的真实 I/O 后重转：
+
+```
+✓ CONVERT RESULT SUCCESS:0
+✗ 产出仍是 ★226,656 字节（与不写该段时完全相同）★
+✗ 设备侧仍报 ★not third party model★
+```
+
+**结论**：
+
+```
+★ `[third_party_model]` 段★只在 `--fmk=THIRDPARTY` 时生效★ ✗
+  · 对 `--fmk=ONNX` 直转，无论 cfg 怎么写都不会打上 third-party 标记
+    （两次 .ms 字节数完全相同即为证据）
+⇒ 要让 `.ms` 带 third-party 标记，★必须经过 OMG★：
+    ONNX → OMG → .omc → converter --fmk=THIRDPARTY → .ms → MS-Lite + NNRt ✓
+  （这正是本仓库 gemma4 流水线的既有路径 ✓）
+⇒ 而量化组合要在 OMG 那一层决定：
+  · OMG 的 `--compress_conf` 来自 dopt ⇒ ★只有 int8-8★（不在白名单 ✗）
+  · 或先离线把权重量化成 int8、再让 OMG 透传 ⇒ 需要自行实现 ✓
+```
+
+**顺带确认的工具位置（x570）**：
+`~/work/hmos/mslite-pkg/mindspore-lite-2.7.0-linux-x64/tools/converter/converter/converter_lite`
+`~/work/hmos/third_party_mindspore/mindspore-src/source/build/tools/converter/converter_lite/converter_lite`
+量化配置模板：`mindspore-lite/tools/converter/quantizer/config/` ✓
+
+**本机无 `onnx` 模块**，读 ONNX 的 I/O 可用手写 protobuf 扫描（`ModelProto.graph`(7) →
+`GraphProto.input`(11)/`output`(12) → `ValueInfoProto.name`(1)）✓
