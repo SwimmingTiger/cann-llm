@@ -1041,7 +1041,11 @@ allTensors: 3 个
 **环境**（可复现）：目标机上 `protoc` 与 python `protobuf` 均可用 ✓；
 但 `.omc` 不是单一 protobuf，故通用解码器不适用，需按容器格式解析 ✓
 
-## 20. ★★★★★ 结论：`--fmk=THIRDPARTY` + `WEIGHT_QUANT` 路径【没有产出 int8】★★★★★
+## 20. ★结论（已按 §21 限定范围）：`--fmk=THIRDPARTY` + `WEIGHT_QUANT` 路径没有产出 int8
+
+> ★范围限定（2026-10）：本节结论**只对 `--fmk=THIRDPARTY` 路径成立**。
+> 经 §21 解析原生 `.ms` 发现：★`--fmk=ONNX` + `WEIGHT_QUANT` 确实产出了 int8 权重★ ✓。
+> 不要据此推断"本设备无法做 int8" ✗。
 
 **结论**：该路径产出的 `.ms` 中，权重与计算均为 float16/float32，**不存在 int8 量化权重** ✗。
 
@@ -1099,3 +1103,53 @@ allTensors: 3 个
 **未完成的部分**：`.omc` 的容器目录尚未解开，
 因此"权重段自身的 dtype 与量化参数"尚未直接读出；
 但证据 ①②③ 已足以判定该 `.ms` 不含 int8 ✓
+
+## 21. ★★★★★ 重大更正：原生 `.ms`（`--fmk=ONNX` + `WEIGHT_QUANT`）里【确实有 int8 权重】★★★★★
+
+§20 的结论只对 `--fmk=THIRDPARTY` 成立。用官方 schema 解析**原生** `.ms` 后，
+发现另一条路径【确实产出了 int8 量化权重】✓。
+
+**解析 `wq_tiny.ms`（226,656 字节；`--fmk=ONNX` + `quant_type=WEIGHT_QUANT`）**：
+
+```
+version = MindSpore Lite 2.7.0     fmkType = 2 (ONNX)
+subGraph[0] name = subgraph_0_main_graph      tensors = 446   nodes = 255
+
+带量化参数的权重张量（★关键★）：
+ [12] embeddings.position_embeddings.weight    dataType=32  dims=[512,32]   data=★16384★
+      quant[{s=0.000333553 zp=29  numBits=★8★} ×32]
+ [15] embeddings.token_type_embeddings.weight  dataType=32  dims=[16,32]    data=★512★
+      quant[{s=0.000221831 zp=42  numBits=★8★} ×16]
+ [19] embeddings.word_embeddings.weight        dataType=32  dims=[1124,32]  data=★35968★
+      quant[{s=3.92157e-13 zp=★-128★ numBits=★8★} ×1124]
+ [27] onnx::MatMul_669                         dataType=32  dims=[32,32]    data=★1024★
+      quant[{s=0.000405379 zp=29  numBits=★8★} ×32]
+
+非量化张量（对照）：
+ [24] embeddings.LayerNorm.weight              dataType=★43 (Float16)★
+ [25] embeddings.LayerNorm.bias                dataType=★43 (Float16)★
+```
+
+**★ 判定 int8 的三条依据 ★**
+
+```
+① `quantParams` 非空 ⇒ 每个权重都有 scale / zeroPoint / ★numBits = 8★ ✓
+② `data` 字节数 = 【元素个数 × 1 字节】：
+     512×32 = 16384 ✓   16×32 = 512 ✓   1124×32 = 35968 ✓   32×32 = 1024 ✓
+     ⇒ ★每权重 1 字节 ⇒ int8 量化权重★ ✓
+③ 量化张量 dataType = 32（Int），非量化张量为 43（Float16）—— 两类明确区分 ✓
+   （`quantParams.dstDtype` = 32，即反量化回 Int 域由下游按 scale/zeroPoint 处理）
+```
+
+**⇒ 因此两条路径的准确结论**：
+
+| 路径 | 是否产出 int8 | third-party 标记 |
+|---|---|---|
+| `--fmk=THIRDPARTY` + `WEIGHT_QUANT` | ✗ 无（fp16 包装，见 §20） | ✓ 有 |
+| ★`--fmk=ONNX` + `WEIGHT_QUANT`★ | ★✓ 有真正的 int8 权重★ | ✗ 无 |
+
+**⇒ 之前 §20 的表述范围过宽，现更正为"仅 THIRDPARTY 路径无 int8"** ✓
+
+**⇒ 这也印证了另一条线索**：使用 `BuildOfflineModel`（third-party 专用通道）去加载原生 `.ms`
+本就不是它的加载方式（`nnrt_delegate.cc:237 "not third party model"` ✓）；
+原生 `.ms` 有它自己的加载路径 ✓
