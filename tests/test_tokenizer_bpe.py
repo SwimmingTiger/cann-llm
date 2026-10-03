@@ -32,8 +32,16 @@ def _find_tokenizer() -> str:
     p = os.environ.get("CANN_LLM_TEST_TOKENIZER")
     if p and os.path.isfile(p):
         return p
-    for cand in ("/storage/Users/currentUser/work/llm/models/qwen15b_e2e/tokenizer.json",
-                 "/storage/Users/currentUser/work/llm/models/qwen25_coder_7b_omc1024/tokenizer.json"):
+    # 候选路径由环境变量提供（QWEN_TOKENIZER 或 CANN_LLM_MODELS 下的若干目录），
+    # 找不到时本测试自动跳过 ✓
+    import glob as _glob, os as _os
+    _models = _os.environ.get("CANN_LLM_MODELS", "")
+    _cands = []
+    if _os.environ.get("QWEN_TOKENIZER"):
+        _cands.append(_os.environ["QWEN_TOKENIZER"])
+    if _models:
+        _cands += _glob.glob(_os.path.join(_models, "*", "tokenizer.json"))
+    for cand in _cands:
         if os.path.isfile(cand):
             return cand
     return ""
