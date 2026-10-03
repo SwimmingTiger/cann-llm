@@ -134,8 +134,7 @@ class Gemma4SegRunner:
             #   （否则长 prompt 会选 S=128、拿到 S=32 的图 ⇒ "输入 hidden 大小不符" ✗）
             #   若要支持长上下文，需要另建 mseg*_s128/ ✓
             self.SIZES = tuple(S for S in self.SIZES
-                               if os.path.exists(os.path.join(self.dir, "mseg%d_s%d" % (0, S), "seg.ms"))
-                               or S == 32)
+                               if os.path.exists(os.path.join(self.dir, self._seg_dir(0, S), "seg.ms")))
         else:
             self.MERGED = False
             self.SEG_STARTS = self.SEG_STARTS_ALL
@@ -177,7 +176,9 @@ class Gemma4SegRunner:
     def _seg_dir(self, st: int, S: int) -> str:
         """S=主尺寸用 seg{st}/，其它尺寸用 seg{st}_s{S}/ ✓"""
         if getattr(self, "MERGED", False):
-            return "mseg%d" % st                      # ★ 合并段目录（目前只有 S=32 一版）
+            # ★ 合并段也按尺寸分目录：S=32 用 mseg{st}/，S=128 用 mseg{st}_s128/ ✓
+            #   （聊天模板的 prompt 有 ~66 token ⇒ 必须走 S=128 ✓）
+            return ("mseg%d" % st) if S == 32 else ("mseg%d_s%d" % (st, S))
         name = ("seg%d" % st) if S == self.SEQ_BIG else ("seg%d_s%d" % (st, S))
         return name
 
