@@ -298,6 +298,7 @@ class NnrtBackend(EngineBackend):
                 id=self.model_id, backend=self.name, path=self.model_dir,
                 extra={"device": self._device, "family": "gemma4",
                        "segments": len(runner.SEG_STARTS), "seq": runner.SEQ})
+            return self._info          # ★ 必须 return：否则会继续落到下面 Qwen 的分支 ✗
 
         # ★ 分段 LLM：先判、先返回 —— 否则会在没有整模型 .ms 的目录上报错。
         if (os.path.isdir(self.model_dir)
