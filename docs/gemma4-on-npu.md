@@ -110,10 +110,10 @@
 
 ```
 导出脚本（x570，需 venv-g4 + DDK + mslite-dev 容器）：
-  scripts/model-conversion/gemma4_seg_build.py       分段实现（3 维）
-  scripts/model-conversion/gemma4_seg_export.py      段图导出（含 KV 模式化）
-  scripts/model-conversion/gemma4_prefill_kv_export.py  prefill+KV 图（decode 路线用）
-  scripts/model-conversion/gemma4_decode_export.py      decode 图（seq=1）
+  scripts/model-conversion/gemma4/gemma4_model.py      分段实现（3 维 + KV 共享）
+  scripts/model-conversion/gemma4/gemma4_export_seg.py 段图导出（= prefill，含 KV 共享槽）
+  scripts/model-conversion/gemma4/gemma4_export_seg.py 段图即 prefill ⇒ 已并入上一行
+  scripts/model-conversion/gemma4/gemma4_export_decode.py decode 图（seq=1 + KV）
   scripts/model-conversion/gemma4_batch.sh            9 段批量：导出 → OMG → converter_lite
 设备侧：
   src/cann_llm/backends/gemma4_runner.py   Gemma4SegRunner / ChatRunner / KvRunner

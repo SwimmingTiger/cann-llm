@@ -95,7 +95,7 @@ tail -f build.log             # 或者直接看日志
 
 `tmux` 不在的话用 `nohup … &` 也能扛断线，但没有"接回去看现场"的能力。
 
-> 本项目的 `scripts/model-conversion/build_model.py` 会打印进度，建议把它的输出
+> 本项目的 `scripts/model-conversion/qwen/build_model.py` 会打印进度，建议把它的输出
 > 重定向到日志文件，这样即使挂了会话也能事后查。
 
 ### DDK 工具从哪下载

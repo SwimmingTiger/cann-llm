@@ -729,7 +729,7 @@ frame #1: libmindspore_lite_ndk.so`OH_AI_ModelPredict + 1592   ← 就是那个 
 * 段与段的接口就是我们自己声明的 KV 张量（`past_key*` / `past_value*`）；
 * 顺序模型本来就是逐层算的 ⇒ 分段执行**没有额外计算开销**，只是多几次调用。
 
-> 切段的现成驱动见 [`scripts/model-conversion/seg_export.py`](../scripts/model-conversion/seg_export.py)
+> 切段的现成驱动见 [`scripts/model-conversion/qwen/seg_export.py`](../scripts/model-conversion/qwen/seg_export.py)
 > （用法与四个坑都写在文件头）。
 >
 > 厂商的导出器（`npu_tuned_export/`）**不支持"从第 k 层开始"**

@@ -3,7 +3,7 @@
 DDK=$HOME/ddk
 B=${MSLITE_BUILD:-/src/mindspore-src/source/output/tmp/mindspore-lite-2.7.0-linux-x64}  # 容器内路径，可用 MSLITE_BUILD 覆盖 ✓
 POC=$HOME/work/llm/ddk-llm/llm-poc
-TT=$HOME/work/hmos/third_party_mindspore/tiny-test
+TT=${TINY_TEST:-$HOME/tiny-test}
 OUTROOT=$HOME/g4segs; mkdir -p "$OUTROOT"
 export SOC_VERSION=kirinx90
 export LD_LIBRARY_PATH=$DDK/tools/tools_omg/master/lib64:$DDK/tools/platform/kirinx90/lib64
@@ -12,7 +12,7 @@ for ST in 0 4 8 12 16 20 24 28 32; do
   D=$POC/g4seg$ST
   echo "=== 段 START=$ST $(date +%H:%M:%S) ==="
   rm -rf "$D"
-  cd $HOME/work/llm/.tmp && START=$ST NO=4 ~/work/llm/ddk-llm/venv-g4/bin/python g4_export.py 2>&1 | grep -aE '导出|前向' | tail -2
+  cd "${WORKDIR:-$PWD}" && START=$ST NO=4 ${PYTHON:-python3} g4_export.py 2>&1 | grep -aE '导出|前向' | tail -2
   cd "$D" || { echo "  ✗ 无目录"; continue; }
   export TMPDIR="$D/tmp"; mkdir -p "$TMPDIR"
   SH=$(sed -n 1p omg.txt); TY=$(sed -n 2p omg.txt); OT=$(sed -n 3p omg.txt)
