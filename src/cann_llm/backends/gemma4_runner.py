@@ -126,8 +126,10 @@ class Gemma4SegRunner:
         #   9 段 + 1 图P + 4 lm = 14 次/token ⇒ 3 段后降到 8 次 ✓
         if os.path.isdir(os.path.join(self.dir, "mseg0")):
             self.MERGED = True
-            self.SEG_STARTS = (0, 12, 24)
-            self.SEG_NO = {0: 12, 12: 12, 24: 11}
+            # ★ 实测可行的合并切法：每段 ≤8 层（含 full 层的段更小）⇒ 每段 <2GB ✓
+            #   13/14 与共享层被拆开也没关系 —— 含 13/14 的段会输出槽，后面的段消费它 ✓
+            self.SEG_STARTS = (0, 8, 16, 24, 30)
+            self.SEG_NO = {0: 8, 8: 8, 16: 8, 24: 6, 30: 5}
         else:
             self.MERGED = False
             self.SEG_STARTS = self.SEG_STARTS_ALL
