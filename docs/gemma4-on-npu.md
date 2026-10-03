@@ -491,3 +491,107 @@ SIGSEGV · fault address = 0x0（空指针解引用 ✗）
 
 > 结论：遇到"某版本才崩"的段错误，先怀疑**自己的 ctypes/FFI 声明**，别急着怪版本或 ABI ✓ ——
 > 这次就是漏一个 `argtypes` 造成的 ✓。
+
+## 9. ★dtype 支持的逆向结论：fp16（存在但设备上不可用）/ fp8（不存在）/ int8（存在且很可能可用）★
+
+**方法**（都可复现 ✓）：
+* 材料：固件解包 `/media/hu60/SSD/work/hmos/firmware/unpack_result_010554/system` 里的**运行库** ✓
+  （`platformsdk/libmindspore-lite.so`、`libnnrt_proxy_*.z.so`、
+   `vendor/anco_spec/vendor/lib64/libai_npucore_*.so` ✓）
+  + DDK 的 `tools/platform/kirinx90/lib64/libai_npucore_*.so` ✓
+* 手段：`idalib`（IDA 9.3，`~/idaenv/bin/python`）+ `strings` 快筛 ✓
+* 注意：先把库**拷到可写目录**再开库 ✓（只读介质上 `open_database` 会失败 ✗）
+
+### 9.1 结论表
+
+| dtype | MS-Lite / OMG | **NNRt 映射** | **NPU kernel** | **设备实测** |
+|---|---|---|---|---|
+| fp32 | ✓ | ✓ `TypeId 31 → OH_NN_FLOAT32` | ✓ | ✓ 正常 |
+| **fp16** | ✓ | ★**✓ `TypeId 30 → OH_NN_FLOAT16`**★ | ✓（有 fp16 转换设施） | ★**✗ 崩**★ |
+| **int8** | ✓ | ★**✓ `TypeId 32 → OH_NN_INT8`**★ | ★**✓ 量化设施非常完整**★ | 未实测（**很可能可用**） |
+| **fp8** | ✗ | ✗ | ✗ | — |
+
+### 9.2 fp16：**映射存在，但设备上实际不可用** ✗
+
+**映射确实存在** ✓ —— 反编译 `mindspore::lite::CastToNNRtDataType`：
+
+```c
+__int64 mindspore::lite::CastToNNRtDataType(int a1) {
+  if ((unsigned int)(a1 - 30) > 0xE) return 0;   // 接受 TypeId 30..44
+  return dword_A63E0[a1 - 30];                   // 查表
+}
+// 表内容（dump 自 0xA63E0）：
+//   TypeId 30 ⇒ 1  ★OH_NN_FLOAT16★      TypeId 31 ⇒ 0  OH_NN_FLOAT32
+//   TypeId 32 ⇒ 2  ★OH_NN_INT8★          TypeId 33 ⇒ 3  OH_NN_INT32
+//   TypeId 34 ⇒ 4  OH_NN_UINT8           TypeId 35 ⇒ 5  OH_NN_INT64
+//   TypeId 37 ⇒ 6  OH_NN_BOOL            TypeId 39 ⇒ 8  OH_NN_FLOAT64
+//   TypeId 40 ⇒ 9  OH_NN_INT16           TypeId 44 ⇒ 12（另有含义）
+```
+
+NNRt 的 HDI 桥接层也**确实有** fp16 能力协商 ✓：
+
+```
+libnnrt_proxy_1.0.z.so / libnnrt_proxy_2.1.z.so：
+  ★IsFloat16PrecisionSupported★（NnrtDeviceProxy 的方法 ✓）
+  v2.1 还有 ★enableFloat16★ 字段（"read/write dataBlock.enableFloat16" ✓）
+```
+
+**但设备上跑不起来** ✗：
+
+```
+· 全 fp16 的最小图（单个 MatMul、4.6 MB）⇒ SIGSEGV ✗
+    栈：#1 Scheduler::FindBackendKernel → … → LiteSession::CompileGraph
+        （fault address = 0x0 ⇒ 空指针解引用）
+· 试开 `OH_AI_DeviceInfoSetEnableFP16(dev, 1)` ⇒ ★回读仍是 False★ ✗
+    ⇒ 这个开关对 NNRt 设备不生效（它主要给 CPU/GPU 后端用）
+· 大图那批（594 MB ~ 2.8 GB）⇒ 报 `Build -> -1` ✗（与小图的"直接崩"是两条路径）
+```
+
+⇒ ⇒ **修正后的结论**：**fp16 的通路在 MS-Lite 侧是通的（有映射、有协商接口）** ✓，
+**但在这台设备的 NNRt 上实际跑不起来** ✗ —— 卡在**更下层**（能力协商的结果 / 厂商插件），
+目前无法在我们的代码侧绕过 ✓。
+
+### 9.3 ★更正 §8.5 的机制结论★
+
+§8.5 我写的是"NPU 后端**没有** fp16 算子 kernel" ✗ —— **这是错的** ✗：
+那是从"最小 fp16 图崩溃"外推的，**没有去看映射表** ✗。映射表摆明 fp16 有映射 ✓。
+**现象是对的（fp16 跑不起来 ✓），机制是错的** ✗ —— 以本节为准 ✓。
+
+### 9.4 int8：**存在，且很可能可用** ✓（值得试）
+
+```
+✓ 映射存在：TypeId 32 ⇒ OH_NN_INT8 ✓（表里还有 UINT8 ✓）
+✓ NPU kernel 侧的量化设施非常完整 ✓（strings 统计）：
+     libai_npucore_elementary.so       1733 处量化相关
+     libai_npucore_ascendc.so          4373 处量化相关
+  具体符号举例：
+     TransFilterConvForInt8 · TransFixpipeUtilInt8 ·
+     TransTensorNDToFractalNZNInt8 · UpdateBias_WeightInt8_Gen ·
+     UpdateDeqBias_WeightInt8_Gen · PreProcessingMeanVar<npucl::tagFp16> ·
+     TransFilterConvToFp16 / TransFilterLBConvToFp16 / npucl::tagFp16 全套 ✓
+✓ 另一侧证据：OMG 也曾明确报错 "FC do not support UINT8 weight on this chip version" ✓
+     ⇒ 说明 int8 权重是**这条路径上的常规选项** ✓（只是 uint8 权重不支持 ✓）
+✗ 但 MS-Lite 的 `--weight_data_type` 只支持 FP16/FP32 ✗
+  ⇒ 真要上 int8，得走 ★dopt 量化（校准）★ 那条链路 ✓（见 §6：卡在校准数据格式 ✓）
+```
+
+### 9.5 fp8：**没有证据** ✗
+
+```
+· 映射表只有 TypeId 30..44 那 15 项，没有 fp8 ✓
+· 运行库/kernel 库里没有 fp8 / hif8 / e4m3 / e5m2 的痕迹 ✓
+  （只在 libai_npucore_ascendc.so 里见到一处 BF16 ✓）
+⇒ ★fp8 在这套栈上不存在★ ✓
+```
+
+### 9.6 fp16 的 kernel 为什么在 CPU 侧？
+
+```
+libmindspore-lite.so 里所有 fp16 kernel 的源码路径都是：
+  litert/kernel/★cpu★/fp16/*.cc（convolution_fp16.cc、fullconnection_fp16.cc、cast_fp16.cc …）
+⇒ ★MS-Lite 自带的 fp16 kernel 全在 CPU 后端★ ✓
+   ★NNRt 侧不是"逐算子 kernel"，而是★把整段子图交给 NNRt 跑（NNRtModel Kernel）★ ✓：
+     NNRTWrapper::GetInstance / LoadLibrary / IsSupportAIPP ·
+     CastToNNRtDataType / CastToNNRtFormat ·
+     字符串 "Schedule NNRt kernel failed:" · "Running NNRtModel Kernel..." ✓
+```
