@@ -566,3 +566,61 @@ CL 名为 `CPUCL` 时取不到 helper ⇒ 打印 `compatibleHelper CheckCompatib
 weight-only 正是这台设备白名单里的形态 ✓（"纯 int8 计算"不是）。
 
 **下一步**：按白名单构造 **FP16 激活 × INT8 权重** 的图/模型再试 ✓
+
+### 9.1 原始证据与可复现步骤（供复核）
+
+**目标库**：`/vendor/lib64/passthrough/indirect/libai_fmk_hcl_model_runtime_impl.so`
+（2 236 552 字节；设备上真实加载的路径可用 `/proc/<pid>/maps` 确认）
+
+**关键符号（`nm -D` / IDA 均可取）**：
+
+```
+hiai::GeneralCompiledModel::CheckCompatibility(std::vector<std::string>&)   @0x83764
+hiai::OpKernelStoreManager::GetCompatibleHelper(std::string const&)         @0x20d448
+hiai::IsCompatibleQuantType(ge::DataType, ge::DataType)                     @0xe7e5c
+ge::ModelCompatibilityCheck::CheckIRGraphCompatibility(...)                 @0x118c70
+ge::ModelCompatibilityCheck::GetIRGraphSupportResult(...)                   @0x1195c0
+hiai::IRTransformer::IsCompatible(...)                                      @0x101880
+```
+相关字符串：`"compatibleHelper CheckCompatibility failed by cl %s"`（0x2e565）·
+`"compatibleHelper" "null, return FAIL."`（0x3e6c8）· `"get npu cl compatibleHelper fail!"`（0x502f6）
+
+**白名单表原始字节**（表头 `unk_52D34`，120 字节；小端 int32 成对）：
+
+```
+06000000 02000000   → (6, 2)   … 见下方逐条列表
+00000000 02000000   01000000 02000000   04000000 02000000
+16000000 16000000   04000000 15000000   06000000 19000000
+06000000 1a000000   06000000 1b000000   02000000 1a000000
+02000000 19000000   02000000 1b000000   24000000 19000000
+24000000 1a000000   24000000 1b000000   24000000 1e000000
+```
+（注：上表首行 `06000000 02000000` 属相邻数据，实际 15 条自 `(0,2)` 起，见 §9 的列表）
+
+**IDA 复现步骤**：
+```python
+idapro.open_database(P, run_auto_analysis=True)
+ida_hexrays.decompile(0xE7E5C)          # IsCompatibleQuantType：静态表 + 线性查找
+ida_bytes.get_bytes(0x52D34, 0x78)      # 15 条 int32 配对
+```
+
+**配对枚举依据**：GE `ge::DataType` 序号
+`DT_FLOAT=0 · DT_FLOAT16=1 · DT_INT8=2 · DT_INT16=3 · DT_INT32=4 · DT_INT64=5 ·
+ DT_UINT8=6 · DT_UINT16=7 · DT_UINT32=8 · DT_UINT64=9 · DT_DOUBLE=10 · DT_BOOL=11 ·
+ DT_STRING=12 · DT_DUAL_SUB_INT8=13 · DT_DUAL_SUB_UINT8=14 · DT_COMPLEX64=15 ·
+ DT_COMPLEX128=16 · DT_QINT8=17 · DT_QINT16=18 · DT_QINT32=19 · DT_QUINT8=20 ·
+ DT_QUINT16=21 · DT_RESOURCE=22 · DT_STRING_REF=23 · DT_DUAL=24 · DT_VARIANT=25 ·
+ DT_INT4=26 · DT_UINT1=27 · DT_INT2=28 · DT_UINT2=29`
+（序号 36 未在上述常见枚举中，疑似 `DT_HIFLOAT8` 等新低精度类型 ✓）
+
+**判定语义**：`IsCompatibleQuantType(A,B)` = “(A,B) 是否在白名单中”，
+**成对**比较（顺序敏感），不在表中即返回 false ✓
+
+**旁证（同库其它相关符号）**：
+`hiai::V100CompiledModel::CheckCompatibility` · `RefreshCompatibilityStatus` ·
+`HIAI_HCL_BuiltModel_CheckCompatibility_Impl` · `hiai::EnumShapeCompiledModel::CheckCompatibility` ·
+`hiai::MultishapeCompiledModel::CheckCompatibility` ·
+`V100ModelConverter::OptimizeCpuClRomSubGraph`（CPUCL 子图优化）·
+`UpdateDataType4CPUCLSubGraph` ·
+`HIAI_HCL_BuiltModel_CheckCompatibility_Impl`（对外 C 接口）
+⇒ CPUCL = **CPU Compute Library**，实现库为 `libcpucl_itf.so` / `libcpucl_rom.so` ✓
