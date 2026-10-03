@@ -1424,3 +1424,48 @@ embeddings.*.weight  dt=★32(Int)★  dims=[…]  data=元素数×1  ★quant[{
 △ 计算内核名多为 *_half_* / *_fp16 ⇒ 计算以 fp16 为主，权重为 int8
   ⇒ 属 ★weight-only 量化（W8A16/W8A32）★ 形态，与 §9/§10 白名单一致
 ⇒ 待完成：推理（Predict）与输出核对
+
+## 27. ★★★ 两类模型的区分与设备选择：实测四组合矩阵（纠正 §22/§23 的说法）★★★
+
+**问题**：能否区分 third-party 与原生模型，并各用对应的加载方式？
+
+**判据（确定性 ✓）**：
+
+```
+third-party 模型：`.ms` 中【恰好 1 个节点，且该节点类型为 Custom】
+                  —— 即 NNRTDelegate::IsCustomModel() 的判据
+                  也等价于：fmkType = 6 (THIRDPARTY) / 存在 ThirdPartyModel 张量
+原生模型：        普通多节点图；fmkType = 2 (ONNX) 等
+```
+
+**实测四组合矩阵**（同一设备，逐个单独运行 ✓）：
+
+| 模型 | 设备前缀 | Build | Predict | NPU 侧模型名 |
+|---|---|---|---|---|
+| third-party `wq7_mm.ms` | `HIAI_F` | ★0★ | ★0★ | `default_ndk` |
+| third-party `wq7_mm.ms` | `NPU_` | ★0★ | ★0★ | `default_ge_default` |
+| 原生 `wq_static.ms` | `NPU_` | ★0★ | ★0★ | `default_test` |
+| 原生 `wq_static.ms` | `HIAI_F` | ✗ -1 | ✗ -2 | — |
+
+**⇒ 关键结论（与 §22/§23 的表述不同，需以此为准）**：
+
+```
+✗ "两类模型必须各用对应设备" —— 不准确
+✓ 实际情况：
+   · ★原生模型【只能】用 "NPU_"（在线）★；用 "HIAI_F" 必然失败（not third party model）
+   · ★third-party 模型【两种都能用】★：
+       "HIAI_F" ⇒ 走 BuildOfflineModel，NPU 侧模型名 default_ndk
+       "NPU_"   ⇒ 走 BuildKirinNPUModel，NPU 侧模型名 default_ge_default
+                  （InitNNCompilation 打印 "current device name prefix is not HIAI_F"，
+                    随即按在线方式构图）
+⇒ ★★ 因此最简通用的做法是：一律选 "NPU_"（在线通道）—— 对两类模型都成立 ★★
+   "HIAI_F" 只对 third-party 有效，是它能用的子集
+```
+
+**⇒ 实用分辨办法**（需要时可用）：
+
+```
+· 解析 `.ms`：节点数 == 1 且类型为 Custom ⇒ third-party
+· 或读 fmkType：6 = THIRDPARTY · 2 = ONNX（原生）
+· 或看 NPU 侧模型名：default_ndk（离线）· default_ge_default / default_test（在线）
+```
