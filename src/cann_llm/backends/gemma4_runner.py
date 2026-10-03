@@ -27,6 +27,11 @@ class _TA(C.Structure):
 
 class _Mslite:
     """最小 ctypes 封装（照已跑通的最小写法：按序号喂输入、不主动 destroy）"""
+    def __init__(self, lib_path: str = _NDK):
+        self.lib = C.CDLL(lib_path)
+        self._cache = {}          # ★ build 很贵：同一个 .ms 只建一次（不 destroy ⇒ 不会悬垂 ✓）
+        self._bind()              # ★ 必须调用：argtypes/restype 都在里面设置
+
     def _bind(self):
         L = self.lib
         for fn, rt, at in [
