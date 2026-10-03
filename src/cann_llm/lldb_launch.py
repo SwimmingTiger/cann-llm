@@ -117,7 +117,7 @@ def build_debug_argv(py: str, args: Sequence[str]
     gdbserver = find_gdbserver(env)
     lldb = (env.get("CANN_LLM_LLDB")
             or shutil.which("lldb")
-            or "/storage/Users/currentUser/.harmonybrew/bin/lldb")
+            or os.environ.get("LLDB", ""))   # 可用 LLDB 环境变量指定
 
     if gdbserver:
         port = int(env.get("CANN_LLM_LLDB_PORT") or DEFAULT_LLDB_PORT)

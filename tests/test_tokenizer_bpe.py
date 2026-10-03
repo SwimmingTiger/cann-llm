@@ -1,6 +1,6 @@
 """``tokenizer_bpe`` 的单元测试。
 
-参考值由 **transformers 官方分词器**（x570 上 `AutoTokenizer.from_pretrained`）生成，
+参考值由 **transformers 官方分词器**（开发环境里 `AutoTokenizer.from_pretrained`）生成，
 是权威答案；这里把它们钉住，防止改动正则或 BPE 循环时悄悄回归。
 
 需要一份真实的 ``tokenizer.json``：没有就整体跳过（设置 ``CANN_LLM_TEST_TOKENIZER``

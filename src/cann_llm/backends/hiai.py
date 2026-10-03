@@ -847,9 +847,9 @@ class HiaiBackend(EngineBackend):
 # ---------------------------------------------------------------------------
 # 参考资料
 #   调用序列的来源（可复核）：
-#     x570: ~/re/svc_call.txt  —— libhm_model_engine_service.z.so 里
+#     开发机上: <workdir>/re/svc_call.txt  —— libhm_model_engine_service.z.so 里
 #           AIMM::HIAI::HiaiSession::HiaiSessionRun 的反编译（hiai_session.cpp:1419-1434）
-#     x570: ~/re/svc_gen.txt   —— LLMEngineGenerateAsync / LLMEngineRun
+#     开发机上: <workdir>/re/svc_gen.txt   —— LLMEngineGenerateAsync / LLMEngineRun
 #                                 （:805-811 显示第 3 参 = std::string::c_str()）
 #  完整调查记录与已排除的假设见 docs/hiai-backend-handoff.md。
 # ---------------------------------------------------------------------------

@@ -1,9 +1,17 @@
-"""与 HF 的 Gemma tokenizer 对拍（x570 上有 tokenizers 库 ✓）"""
+import os
+"""与 HF 的 Gemma tokenizer 对拍（需装有 tokenizers 库的开发环境 ✓）
+
+路径经环境变量提供，缺省路径不存在时本文件自动跳过 ✓
+"""
 import sys, time
-sys.path.insert(0, "/home/hu60/work/llm/.tmp")
+sys.path.insert(0, os.environ.get("CANN_LLM_TMP", ""))
+if not os.path.isdir(os.environ.get("CANN_LLM_TMP", "")):
+    pytest.skip("未设置 CANN_LLM_TMP（对拍脚本目录），跳过", allow_module_level=True)
 from tok_gemma import GemmaTokenizer
 from transformers import AutoTokenizer
-M = "/home/hu60/work/llm/ddk-llm/models/gemma-4-E2B-it"
+M = os.environ.get("GEMMA_MODEL_DIR", "")
+if not M or not os.path.isdir(M):
+    pytest.skip("未设置 GEMMA_MODEL_DIR，跳过", allow_module_level=True)
 t0 = time.time(); mine = GemmaTokenizer(M); print("  我的加载 %.1fs" % (time.time()-t0), flush=True)
 hf = AutoTokenizer.from_pretrained(M)
 tests = ["Hello, world!", "The capital of France is", "1+1=", "你好，世界",
