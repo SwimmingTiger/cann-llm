@@ -94,7 +94,9 @@ class Gemma4SegRunner:
          weights/{manifest.json,embed_tokens.f16,embed_tokens_per_layer.f16}
          tokenizer.json · io/{cos,sin}_{sl,fu}.bin
     """
-    SEQ = 128
+    SEQ_BIG = 128                      # 主尺寸（段目录 seg{st}/）
+    SIZES = (32, 128)                  # ★ 可选尺寸：短上下文用小图，少算 padding ✓
+    SEQ = 128                          # 兼容旧引用（默认尺寸）
     SEG_STARTS = (0, 4, 8, 12, 16, 20, 24, 28, 32)
     N_LAYERS, PLE = 35, 256
     LOGIT_CAP = 30.0
@@ -117,7 +119,24 @@ class Gemma4SegRunner:
         self.sin_sl = open(os.path.join(iod, "sin_sl.bin"), "rb").read()
         self.cos_fu = open(os.path.join(iod, "cos_fu.bin"), "rb").read()
         self.sin_fu = open(os.path.join(iod, "sin_fu.bin"), "rb").read()
-        self._mask = self._causal_mask(self.SEQ)
+        # ★ 探测可用的段图尺寸：seg{st}/ 是 128，seg{st}_s{N}/ 是 N ✓
+        self.sizes = [S for S in sorted(self.SIZES)
+                      if os.path.exists(os.path.join(self.dir, self._seg_dir(0, S), "seg.ms"))]
+        if not self.sizes:
+            raise FileNotFoundError("找不到任何尺寸的段图（seg0/ 或 seg0_s32/）")
+        self._masks = {S: self._causal_mask(S) for S in self.sizes}
+        self._mask = self._masks[self.sizes[-1]]      # 兼容旧引用
+
+    def _seg_dir(self, st: int, S: int) -> str:
+        """S=主尺寸用 seg{st}/，其它尺寸用 seg{st}_s{S}/ ✓"""
+        name = ("seg%d" % st) if S == self.SEQ_BIG else ("seg%d_s%d" % (st, S))
+        return name
+
+    def _pick_seq(self, n: int) -> int:
+        for S in self.sizes:
+            if n <= S:
+                return S
+        raise ValueError("上下文 %d 超过最大图 %d" % (n, self.sizes[-1]))
 
     # ---------- 主机侧 mmap 查表 ----------
     # ★ embed_tokens 是 Gemma4TextScaledWordEmbedding ★
@@ -152,9 +171,9 @@ class Gemma4SegRunner:
     # ---------- 前向 ----------
     def forward(self, ids: List[int]) -> List[float]:
         n = len(ids)
-        if n > self.SEQ:
-            raise ValueError("上下文 %d 超过图的 %d" % (n, self.SEQ))
-        pad = list(ids) + [0] * (self.SEQ - n)
+        S = self._pick_seq(n)                       # ★ 选最小的够用尺寸 ✓
+        mask = self._masks[S]
+        pad = list(ids) + [0] * (S - n)
         # 图 P 按 S=1 导 ⇒ 逐 token 跑再拼（有缓存，每次只剩一次 Predict）✓
         per_layer = b"".join(
             self.ms.run(os.path.join(self.dir, "graphP", "graphP.ms"),
@@ -165,19 +184,19 @@ class Gemma4SegRunner:
         kv = {}
         for st in self.SEG_STARTS:
             no = 4 if st < 32 else 3
-            feeds = {"hidden": hidden, "mask3": self._mask,
-                     "cos_sl": self.cos_sl[:self.SEQ * 256 * 4],
-                     "sin_sl": self.sin_sl[:self.SEQ * 256 * 4],
-                     "cos_fu": self.cos_fu[:self.SEQ * 512 * 4],
-                     "sin_fu": self.sin_fu[:self.SEQ * 512 * 4]}
+            feeds = {"hidden": hidden, "mask3": mask,
+                     "cos_sl": self.cos_sl[:S * 256 * 4],
+                     "sin_sl": self.sin_sl[:S * 256 * 4],
+                     "cos_fu": self.cos_fu[:S * 512 * 4],
+                     "sin_fu": self.sin_fu[:S * 512 * 4]}
             if st >= 16:
                 feeds.update(kv)
             for i in range(no):
                 feeds["per_layer_%d" % i] = b"".join(
                     per_layer[(t * self.N_LAYERS + st + i) * self.PLE * 4:
                               (t * self.N_LAYERS + st + i + 1) * self.PLE * 4]
-                    for t in range(self.SEQ))
-            r = self.ms.run(os.path.join(self.dir, "seg%d" % st, "seg.ms"), feeds)
+                    for t in range(S))
+            r = self.ms.run(os.path.join(self.dir, self._seg_dir(st, S), "seg.ms"), feeds)
             hidden = r["hidden_out"]
             if "sk_out" in r:
                 kv = {"sk": r["sk_out"], "sv": r["sv_out"],
@@ -186,8 +205,8 @@ class Gemma4SegRunner:
         h_last = hidden[off:off + self.e_dim * 4]
         # ★ 最终 RMSNorm（Gemma4RMSNorm：用 pow 而非 rsqrt；eps=1e-6）★
         hv = struct.unpack("<%df" % self.e_dim, h_last)
-        ms = sum(v * v for v in hv) / self.e_dim + 1e-6
-        sc = ms ** -0.5
+        ms2 = sum(v * v for v in hv) / self.e_dim + 1e-6
+        sc = ms2 ** -0.5
         h_last = struct.pack("<%df" % self.e_dim,
                              *[v * sc * w for v, w in zip(hv, self.norm_w)])
         logits: List[float] = []
