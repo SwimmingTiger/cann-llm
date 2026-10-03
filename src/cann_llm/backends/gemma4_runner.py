@@ -127,7 +127,10 @@ class Gemma4SegRunner:
             raise FileNotFoundError("找不到任何尺寸的段图（seg0/ 或 seg0_s32/）")
         self._masks = {S: self._causal_mask(S) for S in self.sizes}
         self._mask = self._masks[self.sizes[-1]]      # 兼容旧引用
-        self.dims_all = [int(tm.layers[i].self_attn.head_dim) for i in range(len(tm.layers))]
+        # ★ runner 不加载 torch 模型（只跑 .ms）⇒ 不能读 tm.layers ✗
+        #   按实测规律：full_attention 层在 4/9/14/19/24/29/34（即 i % 5 == 4），head_dim=512；
+        #   其余是 sliding_attention，head_dim=256 ✓
+        self.dims_all = [512 if (i % 5 == 4) else 256 for i in range(35)]
 
     def _pl_off(self, t: int) -> int:
         """第 t 个 token 在分块 per_layer buffer 里的【字节】偏移 ✓"""
