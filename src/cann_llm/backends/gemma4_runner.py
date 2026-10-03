@@ -117,8 +117,11 @@ class Gemma4SegRunner:
 
     # ---------- 主机侧 mmap 查表 ----------
     def emb(self, i: int) -> bytes:
+        """★ 权重存的是 fp16，而图要 fp32 ⇒ 这里必须转换（否则大小差一倍 ✗）"""
         self._f_emb.seek(i * self.e_dim * 2)
-        return self._f_emb.read(self.e_dim * 2)
+        raw = self._f_emb.read(self.e_dim * 2)
+        return struct.pack("<%df" % self.e_dim,
+                           *struct.unpack("<%de" % self.e_dim, raw))
 
     def pl_row_scaled(self, i: int) -> bytes:
         """token-identity：表行 × sqrt(ple_dim)（= HF get_per_layer_inputs ✓）"""
