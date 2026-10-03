@@ -1295,7 +1295,7 @@ HIAI_LMEngine_ModelInfo_SetModelPath(mi, omcPath.c_str());     // ← 后 modelP
   `SetPrefixPrompt` / `GenerateAsync` / `GetAllGeneration`，采样与停止序列
   仍按请求 `Context_Set*` 下发 —— **只有建 Executor 这一处换了入口**。
 
-## 三、实测（设备上单进程逐个跑，probe 见 `~/work/llm/.tmp/probe_official.py`）
+## 三、实测（设备上单进程逐个跑，probe 见 `scripts/probe_official.py`（本地临时脚本，未随仓库分发））
 
 | 模型 | `Init_Use_Option` | 端到端生成 |
 |---|---|---|

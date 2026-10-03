@@ -109,7 +109,7 @@
 ## 7. 复现入口
 
 ```
-导出脚本（x570，需 venv-g4 + DDK + mslite-dev 容器）：
+导出脚本（在转换机上跑，需厂商 DDK 与 MindSpore Lite 转换工具链）：
   scripts/model-conversion/gemma4/gemma4_model.py      分段实现（3 维 + KV 共享）
   scripts/model-conversion/gemma4/gemma4_export_seg.py 段图导出（= prefill，含 KV 共享槽）
   scripts/model-conversion/gemma4/gemma4_export_seg.py 段图即 prefill ⇒ 已并入上一行

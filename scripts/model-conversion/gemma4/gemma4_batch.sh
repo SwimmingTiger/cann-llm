@@ -12,7 +12,7 @@ for ST in 0 4 8 12 16 20 24 28 32; do
   D=$POC/g4seg$ST
   echo "=== 段 START=$ST $(date +%H:%M:%S) ==="
   rm -rf "$D"
-  cd "${WORKDIR:-$PWD}" && START=$ST NO=4 ${PYTHON:-python3} g4_export.py 2>&1 | grep -aE '导出|前向' | tail -2
+  cd "${WORKDIR:-$PWD}" && START=$ST NO=4 ${PYTHON:-python3} gemma4_export_seg.py 2>&1 | grep -aE '导出|前向' | tail -2
   cd "$D" || { echo "  ✗ 无目录"; continue; }
   export TMPDIR="$D/tmp"; mkdir -p "$TMPDIR"
   SH=$(sed -n 1p omg.txt); TY=$(sed -n 2p omg.txt); OT=$(sed -n 3p omg.txt)
