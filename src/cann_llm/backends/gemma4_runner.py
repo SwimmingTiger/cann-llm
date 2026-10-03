@@ -116,12 +116,18 @@ class Gemma4SegRunner:
         self._mask = self._causal_mask(self.SEQ)
 
     # ---------- 主机侧 mmap 查表 ----------
+    # ★ embed_tokens 是 Gemma4TextScaledWordEmbedding ★
+    # 它 forward 时会乘 embed_scale = sqrt(hidden_size)（实测 39.191835884530846 ✓）
+    # 曾经漏掉这个缩放 ⇒ 段的输入小了 39 倍 ⇒ 输出全是乱码 ✗
+    EMB_SCALE = 39.191835884530846
+
     def emb(self, i: int) -> bytes:
-        """★ 权重存的是 fp16，而图要 fp32 ⇒ 这里必须转换（否则大小差一倍 ✗）"""
+        """裸表行 × embed_scale，并转成 fp32（权重存 fp16，图要 fp32 ✗）"""
         self._f_emb.seek(i * self.e_dim * 2)
         raw = self._f_emb.read(self.e_dim * 2)
         return struct.pack("<%df" % self.e_dim,
-                           *struct.unpack("<%de" % self.e_dim, raw))
+                           *[v * self.EMB_SCALE
+                             for v in struct.unpack("<%de" % self.e_dim, raw)])
 
     def pl_row_scaled(self, i: int) -> bytes:
         """token-identity：表行 × sqrt(ple_dim)（= HF get_per_layer_inputs ✓）"""
