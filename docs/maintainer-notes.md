@@ -1326,3 +1326,101 @@ return 0;
 **⇒ 下一步**：
 定位 `/embeddings/Gather` 这个节点在 LiteGraph 里的实际输入张量
 （哪个是 x_input、其 dims 为何为空），以及 axis 的实际取值 ✓
+
+## 25. ★★★ 在线通道失败根因：模型输入为【动态形状】⇒ Shape 派生张量 dims 为空 ★★★
+
+用官方 schema 解析原生 `.ms` 的**节点级**信息（`MetaGraph::nodes()` +
+`CNode::inputIndex()/outputIndex()/quantType()`），得到确切数据：
+
+```
+节点 [1] /embeddings/Gather              value_type=69  quantType=7
+   输入[0] idx=0  /embeddings/Shape        dt=34(Int16)  ★dims=[]★   data=0
+   输入[1] idx=3  /embeddings/Constant     dt=34(Int16)  dims=[]     data=4
+   输入[2] idx=4  /embeddings/Gather_axis  dt=34(Int16)  dims=[1]    data=4
+   输出[0] idx=2  /embeddings/Gather       dt=34(Int16)  dims=[]     data=0
+
+节点 [4] /embeddings/position_embeddings/Gather   （★同类但正常的 Gather★）
+   输入[0] idx=12 embeddings.position_embeddings.weight  dt=★32(Int)★ dims=[512,32] data=16384 ★quant★
+   输入[1] idx=6  /embeddings/Slice           dt=34  dims=[]
+   输入[2] idx=13 …Gather_axis                dt=34  dims=[1]
+   输出[0] idx=11 /embeddings/position_embeddings/Gather  dt=43(Float16) dims=[]
+
+节点 [5] token_type_embeddings/Gather  ⇒ 输入[0] = …weight dt=32 ★quant★ ✓
+节点 [6] word_embeddings/Gather        ⇒ 输入[0] = …weight dt=32 ★quant★ ✓
+```
+
+**⇒ 结论**：
+
+```
+✗ 失败【不是】dtype 问题（相关张量都是 Int16(34)/Int(32)，均在适配层接受范围内 ✓）
+✗ 失败【不是】int8 权重问题（带 ★quant★ 的兄弟 Gather 节点本身结构正常 ✓）
+✓ 失败在 ★节点 [1] 的 x_input 是 `/embeddings/Shape`★，而它的 ★dims 为空★ ✗
+  ⇒ 适配层 `MindIR_Tensor_GetDims(x_input)` 返回空 ⇒ 立即报 "gather op x_input invalid." ✓
+✓ 而 Shape 张量没有静态 dims 的根因：★模型输入 `input_ids` 的 dims = [-1,-1]（动态形状）★
+```
+
+**⇒ 修法：把输入固定成静态 shape** ✓
+
+```
+converter_lite --fmk=ONNX --modelFile=<onnx> --outputFile=<out> \
+  --configFile=<WEIGHT_QUANT cfg> \
+  --inputShape="input_ids:1,128;attention_mask:1,128;token_type_ids:1,128"
+```
+（另：`quantType=7` 出现在所有 Gather 节点上，含义待查，但不影响上述判定）
+
+## 26. ★★★★★ 成功：静态形状 + 在线通道 ⇒ Build 0，模型在 NPU 上加载成功 ★★★★★
+
+**修法（两步，都已验证）**：
+
+```
+① 转换时固定输入形状（否则 hiai 适配层 Gather 校验失败，见 §25）：
+   converter_lite --fmk=ONNX --modelFile=<onnx> --outputFile=<out> \
+     --configFile=<WEIGHT_QUANT cfg> \
+     --inputShape="input_ids:1,128;attention_mask:1,128;token_type_ids:1,128"
+   产出 181,144 字节（动态形状版是 226,656 —— 静态更小，图也更紧凑：219 张量/130 节点 对 446/255）
+
+② 加载时必须让 device_id 指向 NPU（否则落到 offline 分支，见 §22/§23）：
+   OH_AI_GetAllNNRTDeviceDescs → 选 name 以 "NPU_" 开头的设备 →
+   OH_AI_GetDeviceIdFromNNRTDeviceDesc → OH_AI_DeviceInfoSetDeviceId →
+   OH_AI_ContextAddDeviceInfo → OH_AI_ModelBuildFromFile(model, path, 0, ctx)
+```
+
+**实测结果**：
+
+```
+★ OH_AI_ModelBuildFromFile → 0（成功）★
+
+hilog（NPU 侧）：
+  W AI_NPUCL: npu_graph_executor_om.cc Init(115)::"load model succ: modelName=default_test modelId=53"
+  W AI_NPUCL: npu_graph_executor_service_init.cc GraphExecutorInit(129)
+      ::"load model finish, pid: 22659, client id: 65536, server id: 838"
+  E AI_NPUCL: npu_graph_executor_om.cc EnableIfuPrelod(1752)::"smDesc is null, kernelInfo.stubName = <内核名>"
+     ⇒ 报出的 NPU 内核（部分）：
+        executor_batchmatmul_cube_cutm
+        executor_batchmatmul_cube_two_tensor_cutk_perf
+        executor_real_div_scalar_half_nd
+        executor_add_ch_broadcast_half_nd
+        executor_softmax_nd_w_tiling0_fp16
+        executor_permute_0213_single_col_loop_twobyte
+        executor_layernorm_last_dim_nd
+        executor_gelu_half_nd
+        executor_add_eltwise_half_nd
+```
+
+**模型结构复核**（官方 schema）：
+
+```
+input_ids            dt=34(Int16)  dims=★[1,128]★   （静态 ✓）
+embeddings.*.weight  dt=★32(Int)★  dims=[…]  data=元素数×1  ★quant[{scale, zp, bits=8}]★ ✓
+/embeddings/*/Gather 输出 dt=43(Float16) dims=★[1,128,32]★ （静态 ✓）
+```
+
+**⇒ 结论**：
+
+```
+✓ Build 成功（rc=0）
+✓ 模型在 NPU 上加载成功（npu_graph_executor: load model succ）
+✓ 图内含 ★真 int8 量化权重★（dt=Int + numBits=8 + 每权重 1 字节）
+△ 计算内核名多为 *_half_* / *_fp16 ⇒ 计算以 fp16 为主，权重为 int8
+  ⇒ 属 ★weight-only 量化（W8A16/W8A32）★ 形态，与 §9/§10 白名单一致
+⇒ 待完成：推理（Predict）与输出核对
