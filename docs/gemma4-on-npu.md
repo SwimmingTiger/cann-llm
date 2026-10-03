@@ -412,3 +412,52 @@
    第三种（v1）能跑但推理慢 2.4 倍 ⇒ 净损失 ✗
 ⇒ ★FP16 在这块设备上到此为止★ ✓（是否支持要看以后换设备/换系统版本 ✓）
 ```
+
+### 8.5 ★fp16 崩溃的确切位置（lldb 实测）★
+
+用 lldb 调全 fp16 的最小图（单 MatMul，4.6 MB），拿到**完整符号化栈**：
+
+```
+SIGSEGV · fault address = 0x0（空指针解引用 ✗）
+
+#1  libmindspore-lite.so`Scheduler::FindBackendKernel(...)      ★崩在这里★
+#2  Scheduler::ScheduleNodeToKernel(...) + 172
+#3  Scheduler::ScheduleSubGraphToKernels(...)
+#4  Scheduler::ScheduleMainSubGraphToKernels() + 116
+#5  Scheduler::ScheduleGraphToKernels(...)
+#6  Scheduler::Schedule(...)
+#7  LiteSession::CompileGraph(...) + 1200
+#8  LiteSession::LoadModelAndCompileByPath(...)
+#9  ModelImpl::Build(...)
+#10 Model::Build(...)
+#11 OH_AI_ModelBuildFromFile + 1160        ← 我们 ctypes 直接调的那个 API
+```
+
+**机制**：`Scheduler` 在**建图阶段**为每个算子挑 NPU 后端 kernel ✓
+⇒ fp16 图里没有对应的 kernel 项（NPU 后端没注册 fp16 的 MatMul ✓）
+⇒ 拿到空表项后**直接解引用** ⇒ SIGSEGV ✗
+
+```
+★ 这是 ★MindSpore Lite 的缺陷★ ✓：本该"报错说 fp16 不支持"，
+  却变成了段错误 ✗（大图那批还能报 Build -1 ✓，小图直接崩 ⇒ 两条路径不一致 ✓）
+★ 结论不变但现在是【机制级】的：★这块设备的 NPU 后端没有 fp16 kernel★ ✓
+   ⇒ 与我们的代码无关 ✓，也不是"图太大/结构问题" ✓
+```
+
+### 8.6 ★附带修好的一件真事：python 3.14 的"兼容性问题"★
+
+排查 fp16 崩溃时，先在 python-3.14 下遇到 `CDLL` 就段错误 ✗ —— 一度误以为是 ABI 问题 ✗。
+**逐层定位**（每一层都有实测对照 ✓）：
+
+```
+· 绕过 CDLL 直接 _ctypes.dlopen ⇒ 3.14 崩 ✗ / 3.12 正常 ✓
+· 换个库（libc.so）⇒ 3.14 也能加载 ✓ ⇒ 不是 _ctypes 通用坏 ✗
+· 查该库的 DT_NEEDED ⇒ libmindspore-lite.so / libmindspore-lite-train.so /
+    libhilog.so / libsec_shared.z.so ★都不在 /system/lib64/ndk★ ✓
+    而在 ★/system/lib64/platformsdk★ ✓
+· LD_LIBRARY_PATH 只给 ndk ⇒ 段错误 ✗；给 ndk:platformsdk ⇒ ★立刻正常 ✓★
+⇒ ★根因：搜索路径缺 platformsdk 时，musl 的 dlopen 在"依赖解析失败"的
+   分支上段错误★ ✗（一个很隐蔽的 loader 行为 ✓）
+⇒ 已修：launcher / launcher_server 统一补 ENGINE_LIB_DIRS =
+    (/system/lib64/ndk, /system/lib64/platformsdk) ✓
+```
