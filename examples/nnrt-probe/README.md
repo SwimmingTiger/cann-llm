@@ -293,3 +293,47 @@ AI_NPUCL: CheckSupported: the op name [X:0] type [Y] is not supported
 ⇒ ⇒ ★★ 所以 int8 在本设备上的答案是：★明确失败★，
       失败点精确到 ★NPU 编译 int8 图★ 这一步 ✓★★
 ```
+
+### 补充实验：UINT8 激活（按官方文档的 A8W8 惯例）+ 官方各页面结论
+
+**用户的观察**（来自华为官方 `cannkit-variable-data_type` 页 ✓）：那里出现的**全是 `UINT8`**，
+且 `--input_type` 说明写「支持 FP32、FP16、INT32、**UINT8** 等」；
+而达芬奇/昇腾的量化惯例是 **A8W8 = 激活 UINT8 + 权重 INT8** ✓。
+
+⇒ 于是把探针的**激活张量改成 `OH_NN_UINT8`**（参数张量保持 INT8）重试：
+
+| 变体 | `AddOperation` | ★`Build`★ |
+|---|---|---|
+| INT8 全部张量 | SUCCESS | ★FAILED★ ✗ |
+| UINT8 激活 + INT8 参数 | SUCCESS | ★FAILED★ ✗ |
+| **对照：FLOAT32（基线 add_test）** | SUCCESS | ★**SUCCESS**★ ✓ |
+
+⇒ ★**signedness 不是原因**：I8 / U8 都在 `Build` 失败 ✗★
+
+`OH_NNModel_GetAvailableOperations` 返回 SUCCESS 但**算子数 = 0** ✗
+（用法待查，未作为判据 ✓）
+
+### ★★ 端侧 CANN Kit 官方文档的实际覆盖范围（已逐条目点入）★★
+
+```
+「模型转换」下只有三个条目：
+  ① cannkit-offline-model-conversion（离线模型转换）
+  ② cannkit-aipp（AIPP 图像预处理）
+  ③ cannkit-variable-data_type（可变 data_type）★唯一有实质内容的一页★
+⇒ ★【没有量化 / INT8 章节】✗★
+⇒ 而 ③ 讲的是【模型 I/O 的数据类型】（FP16 / UINT8 / INT8 皆可 ✓），
+  ★不是权重量化、也不是 INT8 计算精度 ✗★
+★ 对照：服务端/Atlas（昇腾）侧的 INT8 量化资料【非常充分】✓
+  ⇒ ★同是达芬奇架构，但工具链只开放给昇腾侧 ✗★
+```
+
+### ★★ int8 的最终结论 ★★
+
+```
+✓ 硬件（达芬奇架构 NPU）：★支持 INT8★
+✗ 端侧软件栈（CANN Kit / hiai foundation，本机 KirinX90_v2_0）：
+    · ★不提供量化途径★ —— 官方文档无量化章节 ✓
+    · dopt 的量化配置被设备拒绝（"hiai foundation not support extension config" ✗）
+    · 在线构图 int8 / uint8 图 ⇒ `Build` 一律 FAILED ✗（fp32 对照 SUCCESS ✓）
+⇒ ★★ int8 在本设备上【明确不可行】，原因在厂商的端侧软件栈 ★★ ✓
+```
