@@ -268,3 +268,28 @@ AI_NPUCL: CheckSupported: the op name [X:0] type [Y] is not supported
 | `ctrl_probe.c` | ★对照★：逐字照抄官方 fp32 ADD 示例 ⇒ 同样 rc=2（证明不是写法问题 ✓） |
 | `avail_probe.c` | `GetAvailableOperations` 查算子支持 |
 | `inc/neural_network_runtime/` | 官方 NNRt 头文件副本（枚举/Signature 权威出处 ✓） |
+
+### ★★ 最终定论（决定性实验，对照完美）★★
+
+**做法**：以本目录**已跑通的 `add_test.c`** 为基线 ✓，只改两处 ——
+① 三个张量的 dtype `OH_NN_FLOAT32` → `OH_NN_INT8`；
+② 给这三个张量挂 `NN_QuantParam`（逐张量量化参数 ✓）。
+
+| 步骤 | FLOAT32 基线（add_test） | ★INT8（int8_test）★ |
+|---|---|---|
+| `SetTensorQuantParams` ×3 | — | ★SUCCESS★ ✓ |
+| `AddOperation(ADD)` | SUCCESS ✓ | ★**SUCCESS**★ ✓ |
+| `SpecifyInputsAndOutputs` / `Finish` / `SetDevice` | SUCCESS ✓ | SUCCESS ✓ |
+| ★**`OH_NNCompilation_Build`**★ | ★SUCCESS★ ✓ | ★**FAILED**★ ✗ |
+
+```
+★★ 结论：★★
+  ✓ ★在线构图 + 逐张量量化参数：★构图与算子校验【全部通过】★★ ✓
+     （也证明了此前 AddOperation rc=2 是【我的源码写法错】✗，不是路不通 ✓
+       —— 关键在参数张量要用算子专属 type：OH_NN_ADD_ACTIVATIONTYPE ✓，
+          官方文档示例里没有这句，跑通的 add_test.c 里有 ✓）
+  ✗ ★但 NPU 【编译不了 int8 图】：`OH_NNCompilation_Build` ⇒ FAILED★★ ✗
+  ★ 对照：同一份代码、只把 dtype 换回 FLOAT32 ⇒ ★全链路 SUCCESS★★ ✓✓
+⇒ ⇒ ★★ 所以 int8 在本设备上的答案是：★明确失败★，
+      失败点精确到 ★NPU 编译 int8 图★ 这一步 ✓★★
+```

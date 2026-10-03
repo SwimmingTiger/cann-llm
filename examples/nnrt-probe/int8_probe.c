@@ -35,7 +35,7 @@ static uint32_t g_idx = 0;   /* 张量加入顺序 = 模型内的索引 ✓ */
 
 /* 建一个张量并加入模型；返回 0 表示成功 */
 static int add_tensor(OH_NNModel *m, const char *name, OH_NN_DataType dt,
-                      const int32_t *shape, size_t rank) {
+                      const int32_t *shape, size_t rank, OH_NN_TensorType ttype) {
     NN_TensorDesc *d = OH_NNTensorDesc_Create();
     if (!d) return -1;
     OH_NNTensorDesc_SetName(d, name);
@@ -46,7 +46,7 @@ static int add_tensor(OH_NNModel *m, const char *name, OH_NN_DataType dt,
     OH_NNTensorDesc_Destroy(&d);
     /* ★官方示例：每加一个张量后都要 SetTensorType ✓（我原先漏了 ⇒ AddOperation rc=2 ✗）★ */
     int rt = rc;
-    if (rc == 0) { rt = (int)OH_NNModel_SetTensorType(m, g_idx, OH_NN_TENSOR); g_idx++; }
+    if (rc == 0) { rt = (int)OH_NNModel_SetTensorType(m, g_idx, ttype); g_idx++; }   /* ★用真实 type ✓ */
     printf("    AddTensor %-12s rc=%d · SetTensorType rc=%d(%s)\n", name, rc, rt, rcn(rt));
     return rc ? rc : rt;
 }
@@ -82,11 +82,11 @@ int main(void) {
     OH_NNModel *model = OH_NNModel_Construct();
     printf("\n=== 1) 构图（int8 MATMUL: x[1,4] @ w[4,4] -> y[1,4]）===\n");
     const int32_t s_x[2] = {1, 4}, s_w[2] = {4, 4}, s_y[2] = {1, 4}, s_p[1] = {1};
-    if (add_tensor(model, "x",   OH_NN_INT8,  s_x, 2)) goto done;   /* 0: 输入 */
-    if (add_tensor(model, "w",   OH_NN_INT8,  s_w, 2)) goto done;   /* 1: 权重(常量) */
-    if (add_tensor(model, "transX", OH_NN_INT32, s_p, 1)) goto done;/* 2: 参数 */
-    if (add_tensor(model, "transY", OH_NN_INT32, s_p, 1)) goto done;/* 3: 参数 */
-    if (add_tensor(model, "y",   OH_NN_INT8,  s_y, 2)) goto done;   /* 4: 输出 */
+    if (add_tensor(model, "x",   OH_NN_INT8,  s_x, 2, OH_NN_TENSOR)) goto done;   /* 0: 输入 */
+    if (add_tensor(model, "w",   OH_NN_INT8,  s_w, 2, OH_NN_TENSOR)) goto done;   /* 1: 权重(常量) */
+    if (add_tensor(model, "transX", OH_NN_INT32, s_p, 1, OH_NN_MATMUL_TRANSPOSE_A)) goto done;/* 2: 参数 */
+    if (add_tensor(model, "transY", OH_NN_INT32, s_p, 1, OH_NN_MATMUL_TRANSPOSE_B)) goto done;/* 3: 参数 */
+    if (add_tensor(model, "y",   OH_NN_INT8,  s_y, 2, OH_NN_TENSOR)) goto done;   /* 4: 输出 */
 
     printf("\n=== 2) ★挂量化参数（不走扩展配置）★ ===\n");
     set_quant(model, 1, 0.05, 0, 8);      /* 权重 */
