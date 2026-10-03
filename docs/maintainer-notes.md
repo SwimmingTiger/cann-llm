@@ -469,3 +469,51 @@ E NNRt_HiAIAdapter(via MindIROpConvertFactory): CreateOpConvert: Not supported T
 
 ⇒ **每层都"差一点点"：硬件有、算子实现有、NNRt 接口有；
    但 GE 通用算子不收 int8，且 hiai 适配层没有量化算子转换器** ✓
+
+## 8. ★重要修正：`hiai foundation not support extension config` 是 warning，不是致命点★
+
+**起因**：用户追问"那不用 extension config 呢"。
+排查发现：`AddExtensionConfig` 只被 `scripts/model-conversion/int8/probe_quant.py`（一个探针）调用；
+正式的 `.ms` 是 OMG 直接产出的，**量化配置已烘焙在模型里** ✓。
+
+**做法**：`probe_quant.py <int8_dopt.ms> - QuantConfigData 60`
+（第二个参数 `-` ⇒ 不传 compress_conf ✓，即只用模型里烘焙的配置）
+
+**结果**：Build 仍失败，但失败链**完全不同**，且**深得多**：
+
+```
+W/E CANN: hiai foundation not support extension config.        ← ★仍出现，但只是 warning★
+         （这次是 MS-Lite 的 NNRt delegate 自己传的 extensions，并非探针）
+E AI_FMK: general_compiled_model.cpp operator()(797)
+         ::★"compatibleHelper CheckCompatibility failed by cl CPUCL"★   ← ★真正的致命点★
+E AI_INFRA: general_model_recompiler.cpp Recompile(178)
+         ::★"HcsCompiledModelPreLoadProcess(options, generalCompiledModel) == ge::SUCCESS" "false"★
+E AI_FMK: hcl_model_builder_impl.cpp BuildForHcsModel(121)::"modelRecompiler Recompile failed!"
+E AI_FMK: hcl_model_builder_impl.cpp BuildModel(570)::"BuildModelByHcl failed"
+E AI_INFRA: hcl_model_builder.cpp StaticShapeBuildModel(112)::"ret == SUCCESS" "false"
+E CANN: build failed → NNRt: OH_NNCompilation_Build failed
+E MS_LITE: [nnrt_delegate.cc:772] InitNNCompilation# Build NNCompilation failed, ret: 1
+E MS_LITE: [lite_session.cc:616] CompileGraph# Schedule kernels failed: -1
+```
+
+**修正的两点**：
+
+```
+✗ 旧判断："hiai foundation not support extension config" 是 int8 失败的根因
+✓ 新事实：它只是 warning 级；编译【继续往下走了】——致命点是
+         ★"compatibleHelper CheckCompatibility failed by cl CPUCL"★
+✗ 旧判断：烘焙配置的 .ms 在 NNRt 层就被拒
+✓ 新事实：它一路走到了 ★HCL 的模型重建（Recompile / BuildForHcsModel）★★，
+         比"在线构图 int8"（卡在 hiai 适配层）深得多
+```
+
+**其它观察**：`CANN: nn proxy 2.1` · `AI_NPUCL: CreateProcess call rtProcessCreate` ·
+`MS_LITE: "cpu's architecture is unknown."` · `CheckNPUPrefix: device_name: HIAI_F…`
+
+**另外，离线模型文件那条路（`OH_NNCompilation_ConstructWithOfflineModelFile`）确认不可用**：
+hilog 原话 `[NNBackend] CreateCompiler failed, ★only support build NN model and NN model cache★`
+⇒ 该后端只支持"在线构图"与"模型缓存"，**不支持离线模型文件** ✓
+（这解释了此前 README 中"NNRt 接受文件但编译失败"的现象 ✓）
+
+**下一步**：查 `CheckCompatibility by cl CPUCL` 为何失败 ——
+这个检查针对的是模型的**算子/精度兼容性**，是 int8 通路最后一个已知关卡 ✓
