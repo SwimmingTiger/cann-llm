@@ -97,7 +97,7 @@ class Gemma4SegRunner:
     SEQ_BIG = 128                      # 主尺寸（段目录 seg{st}/）
     SIZES = (32, 128)                  # ★ 可选尺寸：短上下文用小图，少算 padding ✓
     SEQ = 128                          # 兼容旧引用（默认尺寸）
-    SEG_STARTS = (0, 4, 8, 12, 16, 20, 24, 28, 32)
+    SEG_STARTS_ALL = (0, 4, 8, 12, 16, 20, 24, 28, 32)   # 未合并时的 9 段
     N_LAYERS, PLE = 35, 256
     LOGIT_CAP = 30.0
     PLSEQ = 24                         # 图P 的块大小（其输出受 1MB 上限约束 ⇒ S≤28）
@@ -121,6 +121,17 @@ class Gemma4SegRunner:
         self.cos_fu = open(os.path.join(iod, "cos_fu.bin"), "rb").read()
         self.sin_fu = open(os.path.join(iod, "sin_fu.bin"), "rb").read()
         # ★ 探测可用的段图尺寸：seg{st}/ 是 128，seg{st}_s{N}/ 是 N ✓
+        # ★ 合并段布局：mseg0/seg.ms 存在 ⇒ 用 3 个大段（层 0-11 / 12-23 / 24-34）
+        #   动机：瓶颈是"每 token 的图调用次数"（见 docs/gemma4-on-npu.md §5）
+        #   9 段 + 1 图P + 4 lm = 14 次/token ⇒ 3 段后降到 8 次 ✓
+        if os.path.isdir(os.path.join(self.dir, "mseg0")):
+            self.MERGED = True
+            self.SEG_STARTS = (0, 12, 24)
+            self.SEG_NO = {0: 12, 12: 12, 24: 11}
+        else:
+            self.MERGED = False
+            self.SEG_STARTS = self.SEG_STARTS_ALL
+            self.SEG_NO = {st: (4 if st < 32 else 3) for st in self.SEG_STARTS}
         self.sizes = [S for S in sorted(self.SIZES)
                       if os.path.exists(os.path.join(self.dir, self._seg_dir(0, S), "seg.ms"))]
         if not self.sizes:
@@ -157,6 +168,8 @@ class Gemma4SegRunner:
 
     def _seg_dir(self, st: int, S: int) -> str:
         """S=主尺寸用 seg{st}/，其它尺寸用 seg{st}_s{S}/ ✓"""
+        if getattr(self, "MERGED", False):
+            return "mseg%d" % st                      # ★ 合并段目录（目前只有 S=32 一版）
         name = ("seg%d" % st) if S == self.SEQ_BIG else ("seg%d_s%d" % (st, S))
         return name
 
@@ -207,7 +220,7 @@ class Gemma4SegRunner:
         hidden = b"".join(self.emb(i) for i in pad)
         kv = {}
         for st in self.SEG_STARTS:
-            no = 4 if st < 32 else 3
+            no = self.SEG_NO[st]
             feeds = {"hidden": hidden, "mask3": mask,
                      "cos_sl": self.cos_sl[:S * 256 * 4],
                      "sin_sl": self.sin_sl[:S * 256 * 4],
@@ -353,7 +366,7 @@ class Gemma4KvRunner(Gemma4ChatRunner):
         self.cache = {}
         self.slots = {}
         for st in self.SEG_STARTS:
-            no = 4 if st < 32 else 3
+            no = self.SEG_NO[st]
             for i in range(no):
                 gi = st + i
                 A = self.tm.layers[gi].self_attn
@@ -391,7 +404,7 @@ class Gemma4KvRunner(Gemma4ChatRunner):
         self._new_cache()
         sl = fu = None
         for st in self.SEG_STARTS:
-            no = 4 if st < 32 else 3
+            no = self.SEG_NO[st]
             feeds = {"hidden": hidden, "mask3": mask,
                      "cos_sl": self.cos_sl[:S * 256 * 4], "sin_sl": self.sin_sl[:S * 256 * 4],
                      "cos_fu": self.cos_fu[:S * 512 * 4], "sin_fu": self.sin_fu[:S * 512 * 4]}
@@ -428,7 +441,7 @@ class Gemma4KvRunner(Gemma4ChatRunner):
         mask = self._mask(pos)
         sl = fu = None
         for st in S:
-            no = 4 if st < 32 else 3
+            no = self.SEG_NO[st]
             feeds = {"hidden": hidden, "kv_mask": mask,
                      "cos_sl": self.cos_sl[pos * 256 * 4:(pos + 1) * 256 * 4],
                      "sin_sl": self.sin_sl[pos * 256 * 4:(pos + 1) * 256 * 4],
