@@ -286,6 +286,19 @@ class NnrtBackend(EngineBackend):
         模型目录里若有 ``seg*`` 子目录，则进入**分段 LLM** 模式：
         外层只建分段 runner（不加载整模型的 ``.ms``，因为整模型上不了 NPU）。
         """
+        # ★ Gemma 4 分段包：目录里有 graphP/ 与 lm/ 子目录（分段之外的两块图）✓
+        if (os.path.isdir(self.model_dir)
+                and os.path.isdir(os.path.join(self.model_dir, "graphP"))
+                and os.path.isdir(os.path.join(self.model_dir, "lm"))):
+            from .gemma4_runner import Gemma4ChatRunner
+            runner = Gemma4ChatRunner(self.model_dir)
+            runner.load()
+            self._llm = runner
+            self._info = ModelInfo(
+                id=self.model_id, backend=self.name, path=self.model_dir,
+                extra={"device": self._device, "family": "gemma4",
+                       "segments": len(runner.SEG_STARTS), "seq": runner.SEQ})
+
         # ★ 分段 LLM：先判、先返回 —— 否则会在没有整模型 .ms 的目录上报错。
         if (os.path.isdir(self.model_dir)
                 and os.path.isfile(os.path.join(self.model_dir, "tokenizer.json"))

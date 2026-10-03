@@ -198,3 +198,85 @@ class Gemma4SegRunner:
             yield nxt
             if nxt in eos_ids:
                 return
+
+
+# --------------------------------------------------------------------------
+# 接入 cann-llm 的适配层：与 SegmentedLlmRunner 同名同签名 ⇒ NnrtBackend 无需区分
+# --------------------------------------------------------------------------
+class Gemma4ChatRunner(Gemma4SegRunner):
+    """在 Gemma4SegRunner 上补 load/stream/generate（接口对齐 nnrt_seg.SegmentedLlmRunner）。
+
+    对话模板（来自 chat_template.jinja 与 added_tokens 实测）：
+        <bos><|turn>user\\n{prompt}<turn|>\\n<|turn>model\\n
+    停止符：eos_token_id = [1, 106, 50]，其中 106 就是 <turn|> ✓
+    """
+    TURN_OPEN, TURN_CLOSE, BOS = 105, 106, 2
+    STOP_IDS = (1, 106, 50)
+
+    def __init__(self, model_dir: str):
+        super().__init__(model_dir)
+        from ..tokenizer_gemma import GemmaTokenizer
+        self.tok = GemmaTokenizer(os.path.join(model_dir, "tokenizer.json"))
+
+    def load(self) -> None:
+        """图在 forward 里按需 build（每个 .ms 一次），这里只做一次热身校验。"""
+        assert self.tok is not None
+
+    # 拼对话 prompt（不进 chat 模板时可用 .raw = True 走纯文本续写）
+    def _prompt_ids(self, prompt: str, raw: bool) -> List[int]:
+        if raw:
+            return self.tok.encode(prompt, add_bos=True)
+        ids = [self.BOS, self.TURN_OPEN]
+        ids += self.tok.encode("user\n", add_bos=False)
+        ids += self.tok.encode(prompt, add_bos=False)
+        ids += [self.TURN_CLOSE]
+        ids += self.tok.encode("\n", add_bos=False)
+        ids += [self.TURN_OPEN]
+        ids += self.tok.encode("model\n", add_bos=False)
+        return ids
+
+    def stream(self, prompt: str, max_new: int = 32, stop_ids=(), params=None,
+               raw: bool = False):
+        """逐 token 产出【新增文本】（累积解码、只吐后缀 —— 与 Qwen 版同一套做法 ✓）"""
+        import random as _random
+        from ..sampling import sample_token
+        ids = self._prompt_ids(prompt, raw)
+        if not ids:
+            return
+        stop = set(stop_ids) or set(self.STOP_IDS)
+        rng = _random.Random(getattr(params, "seed", None)) if params is not None else None
+        out: List[int] = []
+        prev = ""
+        for _ in range(max(1, max_new)):
+            logits = self.forward(ids)                 # ★ 每步重跑全上下文（prefill-only ✓）
+            hist = ids + out
+            nxt = (sample_token(logits, params, hist, rng) if params is not None
+                   else max(range(len(logits)), key=logits.__getitem__))
+            out.append(nxt)
+            cur = self.tok.decode(out)
+            if len(cur) > len(prev):
+                yield cur[len(prev):], nxt, None
+                prev = cur
+            if nxt in stop:
+                return
+            stops = tuple(getattr(params, "stop", ()) or ()) if params is not None else ()
+            if stops and any(x in prev for x in stops):
+                return
+
+    def generate(self, prompt: str, max_new: int = 32, stop_ids=(), raw: bool = False):
+        import time
+        ids = self._prompt_ids(prompt, raw)
+        t0 = time.time()
+        out: List[int] = []
+        prev = ""
+        stop = set(stop_ids) or set(self.STOP_IDS)
+        for _ in range(max(1, max_new)):
+            logits = self.forward(ids)
+            nxt = max(range(len(logits)), key=logits.__getitem__)
+            out.append(nxt)
+            if nxt in stop:
+                break
+            prev = self.tok.decode(out)
+        return (self.tok.decode(out), out,
+                {"total_ms": (time.time() - t0) * 1000.0,
+                 "prompt_tokens": len(ids), "completion_tokens": len(out)})
