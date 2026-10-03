@@ -127,6 +127,7 @@ class Gemma4SegRunner:
             raise FileNotFoundError("找不到任何尺寸的段图（seg0/ 或 seg0_s32/）")
         self._masks = {S: self._causal_mask(S) for S in self.sizes}
         self._mask = self._masks[self.sizes[-1]]      # 兼容旧引用
+        self.dims_all = [int(tm.layers[i].self_attn.head_dim) for i in range(len(tm.layers))]
 
     def _pl_off(self, t: int) -> int:
         """第 t 个 token 在分块 per_layer buffer 里的【字节】偏移 ✓"""
@@ -310,3 +311,146 @@ class Gemma4ChatRunner(Gemma4SegRunner):
         return (self.tok.decode(out), out,
                 {"total_ms": (time.time() - t0) * 1000.0,
                  "prompt_tokens": len(ids), "completion_tokens": len(out)})
+
+
+# --------------------------------------------------------------------------
+# ★ decode（KV 缓存）路径 ★
+#   为什么要它：prefill-only 的图每生成一个 token 都要重跑整个上下文
+#   （实测 60~100 秒 / 8 token）。有了 KV 缓存后，每步只算 1 个 token。
+#
+#   两套图配合：
+#     pre{st}.ms —— seq=S，一次算完 prompt，★并把各层 K/V 暴露出来★（否则 prefill 无从建缓存）
+#     dec{st}.ms —— seq=1，带 KV 入出，每步只算新 token
+#   KV 细节（主机侧维护，图内不做 scatter ✗ NPU 不友好）：
+#     · 层 0~14 各有自己的 K/V 缓存 [1,KVMAX+1,D]，主机把解码出的新 K/V 写到第 pos 个位置
+#     · 层 13(sliding)/14(full) 的 K/V 同时就是 2 个共享槽 ⇒ 段 16+ 直接读
+#     · decode 图会把"新 K/V"接在缓存尾部（第 KVMAX 个位置）⇒ kv_mask 在那里也要放行 ✓
+# --------------------------------------------------------------------------
+class Gemma4KvRunner(Gemma4ChatRunner):
+    KVMAX = 128
+
+    def _pre_dir(self, st: int, S: int) -> str:
+        return ("pre%d" % st) if S == self.SEQ_BIG else ("pre%d_s%d" % (st, S))
+
+    def _dec_dir(self, st: int) -> str:
+        return "dec%d" % st
+
+    # ---- KV 缓存（fp32 裸字节，按层）----
+    def _new_cache(self):
+        self.cache = {}
+        self.slots = {}
+        for st in self.SEG_STARTS:
+            no = 4 if st < 32 else 3
+            for i in range(no):
+                gi = st + i
+                A = self.tm.layers[gi].self_attn
+                if getattr(A, "is_kv_shared_layer", False):
+                    continue
+                D = self.dims_all[gi]
+                self.cache[gi] = [bytearray((self.KVMAX + 1) * D * 4),
+                                  bytearray((self.KVMAX + 1) * D * 4)]
+
+    def _put(self, gi: int, which: int, pos: int, blob: bytes):
+        D = self.dims_all[gi]
+        off = pos * D * 4
+        self.cache[gi][which][off:off + D * 4] = blob
+
+    def _get(self, gi: int, which: int) -> bytes:
+        return bytes(self.cache[gi][which])
+
+    def _mask(self, pos: int) -> bytes:
+        """0..pos-1 与尾部 KVMAX 放行；其余屏蔽（decode 图把新 K/V 接在尾部 ✓）"""
+        neg = -1.0e9
+        row = [0.0 if (j < pos or j == self.KVMAX) else neg for j in range(self.KVMAX + 1)]
+        return struct.pack("<%df" % (self.KVMAX + 1), *row)
+
+    # ---- prefill：一次算完 prompt，并把 KV 建起来 ----
+    def prefill(self, ids: List[int]) -> List[float]:
+        n = len(ids)
+        S = self._pick_seq(n)
+        mask = self._masks[S]
+        pad = list(ids) + [0] * (S - n)
+        per_layer = b"".join(
+            self.ms.run(os.path.join(self.dir, "graphP", "graphP.ms"),
+                        {"input_ids": struct.pack("<i", i),
+                         "identity": self.pl_row_scaled(i)})["per_layer"] for i in pad)
+        hidden = b"".join(self.emb(i) for i in pad)
+        self._new_cache()
+        sl = fu = None
+        for st in self.SEG_STARTS:
+            no = 4 if st < 32 else 3
+            feeds = {"hidden": hidden, "mask3": mask,
+                     "cos_sl": self.cos_sl[:S * 256 * 4], "sin_sl": self.sin_sl[:S * 256 * 4],
+                     "cos_fu": self.cos_fu[:S * 512 * 4], "sin_fu": self.sin_fu[:S * 512 * 4]}
+            for i in range(no):
+                feeds["per_layer_%d" % i] = b"".join(
+                    per_layer[self._pl_off(t) + (st + i) * self.PLE * 4:
+                              self._pl_off(t) + (st + i + 1) * self.PLE * 4] for t in range(S))
+            if st >= 16:
+                feeds.update({"slot_sl_k": sl[0], "slot_sl_v": sl[1],
+                              "slot_fu_k": fu[0], "slot_fu_v": fu[1]})
+            r = self.ms.run(os.path.join(self.dir, self._pre_dir(st, S), "pre.ms"), feeds)
+            hidden = r["hidden_out"]
+            for i in range(no):
+                gi = st + i
+                if gi in self.cache:                       # ★ 非共享层：把整段 K/V 写进缓存
+                    D = self.dims_all[gi]
+                    k = r["k_%d_out" % i][:n * D * 4]
+                    v = r["v_%d_out" % i][:n * D * 4]
+                    self.cache[gi][0][:n * D * 4] = k
+                    self.cache[gi][1][:n * D * 4] = v
+                    if gi == 13: sl = (k, v)               # ★ 层 13 的 KV 就是 sliding 槽
+                    if gi == 14: fu = (k, v)               # ★ 层 14 的 KV 就是 full 槽
+        self.pos = n
+        return self._tail_logits(hidden, n)
+
+    # ---- decode：只算 1 个 token ----
+    def decode_one(self, tok: int) -> List[float]:
+        pos = self.pos
+        S = self.SEG_STARTS
+        pl = self.ms.run(os.path.join(self.dir, "graphP", "graphP.ms"),
+                         {"input_ids": struct.pack("<i", tok),
+                          "identity": self.pl_row_scaled(tok)})["per_layer"]
+        hidden = self.emb(tok)
+        mask = self._mask(pos)
+        sl = fu = None
+        for st in S:
+            no = 4 if st < 32 else 3
+            feeds = {"hidden": hidden, "kv_mask": mask,
+                     "cos_sl": self.cos_sl[pos * 256 * 4:(pos + 1) * 256 * 4],
+                     "sin_sl": self.sin_sl[pos * 256 * 4:(pos + 1) * 256 * 4],
+                     "cos_fu": self.cos_fu[pos * 512 * 4:(pos + 1) * 512 * 4],
+                     "sin_fu": self.sin_fu[pos * 512 * 4:(pos + 1) * 512 * 4]}
+            for i in range(no):
+                gi = st + i
+                feeds["per_layer_%d" % i] = pl[(gi) * self.PLE * 4:(gi + 1) * self.PLE * 4]
+                if gi in self.cache:
+                    feeds["k_%d" % i] = self._get(gi, 0)
+                    feeds["v_%d" % i] = self._get(gi, 1)
+            if st >= 16:
+                feeds.update({"slot_sl_k": sl[0], "slot_sl_v": sl[1],
+                              "slot_fu_k": fu[0], "slot_fu_v": fu[1]})
+            r = self.ms.run(os.path.join(self.dir, self._dec_dir(st), "dec.ms"), feeds)
+            hidden = r["hidden_out"]
+            for i in range(no):
+                gi = st + i
+                if gi in self.cache:
+                    self._put(gi, 0, pos, r["k_%d_out" % i])
+                    self._put(gi, 1, pos, r["v_%d_out" % i])
+                    if gi == 13: sl = (self._get(gi, 0), self._get(gi, 1))
+                    if gi == 14: fu = (self._get(gi, 0), self._get(gi, 1))
+        self.pos = pos + 1
+        return self._tail_logits(hidden, 1)
+
+    def _tail_logits(self, hidden: bytes, n: int) -> List[float]:
+        off = (n - 1) * self.e_dim * 4
+        hv = struct.unpack("<%df" % self.e_dim, hidden[off:off + self.e_dim * 4])
+        ms2 = sum(v * v for v in hv) / self.e_dim + 1e-6
+        sc = ms2 ** -0.5
+        h_last = struct.pack("<%df" % self.e_dim,
+                             *[v * sc * w for v, w in zip(hv, self.norm_w)])
+        logits: List[float] = []
+        for J in range(4):
+            logits.extend(_f32(self.ms.run(os.path.join(self.dir, "lm", "lm%d.ms" % J),
+                                           {"hidden": h_last})["logits"]))
+        return [math.tanh(v / self.LOGIT_CAP) * self.LOGIT_CAP for v in logits]
