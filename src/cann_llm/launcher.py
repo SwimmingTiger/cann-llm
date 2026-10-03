@@ -106,6 +106,32 @@ def pick_engine_lib(backend: str) -> "tuple[str, str, str]":
     return var, os.environ.get(var) or default, kind
 
 
+def detect_backend(model_dir: Optional[str]) -> Optional[str]:
+    """★ 按模型目录的内容判断该用哪个后端（用户没显式给 -b 时）★
+
+    判据来自各后端真正需要的东西，不是猜：
+      · nnrt —— 本仓库自装配的布局：有段图目录（seg*/mseg*/dec*/pre*）
+                且带 weights/ 或 graphP/；它只吃这些，不吃 api_config.json
+      · hiai —— 官方打包布局：有 api_config.json
+      · cann —— 官方 OMC 包解压：有 executor.json / context.json
+    都不像就返回 None，由调用方回落到默认值 ✓
+    """
+    if not model_dir:
+        return None
+    try:
+        names = set(os.listdir(model_dir))
+    except OSError:
+        return None
+    if any(n.startswith(("seg", "mseg", "dec", "pre")) for n in names) and (
+            "weights" in names or "graphP" in names):
+        return "nnrt"
+    if "api_config.json" in names:
+        return "hiai"
+    if "executor.json" in names or "context.json" in names:
+        return "cann"
+    return None
+
+
 def find_model_dir(root: str, given: Optional[str]) -> Optional[str]:
     """模型目录：显式给的优先；否则在 ``models/*/`` 里找一个含 executor.json 的。"""
     if given:
@@ -140,7 +166,8 @@ _TAKES_VALUE = {"-d", "--model-dir", "-b", "--backend"}
 def split_known(argv: "List[str]") -> "tuple[Optional[str], str, List[str]]":
     """把 ``-d`` / ``-b`` 摘出来（引擎库与预检要用），其余**原样保留**给下游。"""
     model_dir: Optional[str] = None
-    backend = os.environ.get("CANN_LLM_BACKEND") or "hiai"
+    # ★ 不写死默认后端：None = 交给 detect_backend() 按模型目录判断 ✓
+    backend = os.environ.get("CANN_LLM_BACKEND")
     rest: List[str] = []
     i = 0
     while i < len(argv):
@@ -168,6 +195,16 @@ def split_known(argv: "List[str]") -> "tuple[Optional[str], str, List[str]]":
 
 def run_chat(root: str, argv: "List[str]") -> int:
     model_dir, backend, rest = split_known(argv)
+    # ★ 没显式给 -b（也没设 CANN_LLM_BACKEND）时，按模型目录自动判断后端 ★
+    #   否则会拿默认的 hiai 去校验 nnrt 的模型目录 ⇒ 报"缺少 api_config.json" ✗
+    if backend is None:
+        backend = detect_backend(find_model_dir(root, model_dir)) or "hiai"
+    # ★ 把判定结果【显式】变成 -b 传下去 ★ ——
+    #   子进程的 ModelConfig.backend 默认是 "cann"，而且它不读 CANN_LLM_BACKEND ✗，
+    #   所以只导出环境变量是不够的（实测仍然走错后端 ✗）。
+    #   用户自己给了 -b/--backend 时不覆盖 ✓
+    if not any(a in ("-b", "--backend") or a.startswith("--backend=") for a in rest):
+        rest = ["-b", backend] + rest
     # ★ cann 后端只读 executor.json / context.json；官方 OMC 包解压出来没有这两个，
     #   这里就地导入（只补缺的，幂等）—— 让"解压即用"对 cann 也成立。
     if model_dir:
@@ -210,6 +247,10 @@ def run_chat(root: str, argv: "List[str]") -> int:
     env["PYTHONPATH"] = os.path.join(root, "src") + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env[var] = lib
+    # ★ 把【判定出的后端名】也传下去 ★ ——
+    #   真正创建后端的是子进程（chat CLI / server），它读 CANN_LLM_BACKEND；
+    #   不传的话子进程会用自己的默认值 hiai ✗ ⇒ 于是刚才"判定成 nnrt 却仍走 hiai" ✗
+    env["CANN_LLM_BACKEND"] = backend
     # ★ execve 会把整个进程换掉，**Python 的 stdout 缓冲区不会自动 flush**。
     #   终端里是行缓冲所以看着没问题；一旦重定向到文件或接管道（块缓冲），
     #   上面那些 ✓/› 提示就会【全部丢失】。必须手动刷。

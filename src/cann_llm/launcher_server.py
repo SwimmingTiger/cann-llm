@@ -215,7 +215,7 @@ _USAGE = """用法: scripts/start_server.sh [选项]
 
   -d, --model-dir DIR   模型目录（含 omc / SubGraph_0.weight / embedding / tokenizer / json）
   -c, --config FILE     TOML 配置文件
-  -b, --backend NAME    后端：hiai | cann（默认 hiai）
+  -b, --backend NAME    后端：nnrt | hiai | cann（★省略时按模型目录自动判断★）
       --host HOST       监听地址（默认 127.0.0.1；0.0.0.0 表示允许局域网访问）
       --port PORT       监听端口（默认 8000）
   -k, --api-key KEY     API key（设了就要求鉴权）
@@ -244,7 +244,8 @@ def parse_args(argv: "List[str]") -> "Dict[str, object]":
     o: "Dict[str, object]" = {
         "model_dir": env.get("CANN_LLM_MODEL_DIR") or None,
         "config": env.get("CANN_LLM_CONFIG") or "",
-        "backend": env.get("CANN_LLM_BACKEND") or "hiai",
+        # ★ 不写死 hiai：None = 稍后按模型目录自动判断 ✓
+        "backend": env.get("CANN_LLM_BACKEND"),
         "host": env.get("CANN_LLM_HOST") or "127.0.0.1",
         "port": int(env.get("CANN_LLM_PORT") or 8000),
         "api_key": env.get("CANN_LLM_API_KEY") or "",
@@ -309,7 +310,13 @@ def run_server(root: str, argv: "List[str]") -> int:
     if action == "stop":
         return do_stop(root)
 
-    backend = str(o["backend"])
+    # ★ 与 run_chat 一致：没显式指定后端就按模型目录自动判断 ✓
+    #   （否则会拿 hiai 的规则去校验 nnrt 的模型目录 ⇒ 报缺少 api_config.json ✗）
+    backend = str(o["backend"]) if o.get("backend") else ""
+    if not backend:
+        from .launcher import detect_backend, find_model_dir
+        _d = str(o["model_dir"]) if o.get("model_dir") else None
+        backend = detect_backend(find_model_dir(root, _d)) or "hiai"
     # 同 run_chat：cann 缺结构化配置时就地导入（幂等，只补缺的）
     if o.get("model_dir"):
         from .omcimport import ensure_model_dir
