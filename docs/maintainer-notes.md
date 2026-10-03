@@ -1469,3 +1469,65 @@ third-party 模型：`.ms` 中【恰好 1 个节点，且该节点类型为 Cust
 · 或读 fmkType：6 = THIRDPARTY · 2 = ONNX（原生）
 · 或看 NPU 侧模型名：default_ndk（离线）· default_ge_default / default_test（在线）
 ```
+
+## 28. ★★★★★ gemma4 段模型以 int8 权重在 NPU 上跑通 ★★★★★
+
+**输入**：`g4seg0/seg.onnx`（552 MB，fp32；I/O 已是静态形状：
+`hidden[1,4,1536]`、`mask3[1,4,4]`、`cos_sl[4,256]`、`sin_sl[4,256]`、`per_layer_0..3[1,4,256]` ⇒ `hidden_out[1,4,1536]`）
+
+**配置**（两段都要 ✓，缺 `[third_party_model]` 会报 `Parse third party param failed`）：
+
+```ini
+[common_quant_param]
+quant_type=WEIGHT_QUANT
+bit_num=8
+min_quant_weight_size=0
+min_quant_weight_channel=1
+
+[third_party_model]              ; 与 c.cfg 相同的 I/O 描述
+input_names=hidden;mask3;cos_sl;sin_sl;per_layer_0;per_layer_1;per_layer_2;per_layer_3
+input_dtypes=float32;float32;float32;float32;float32;float32;float32;float32
+input_shapes=1,4,1536;1,4,4;4,256;4,256;1,4,256;1,4,256;1,4,256;1,4,256
+output_names=hidden_out
+output_dtypes=float32
+output_shapes=1,4,1536
+```
+
+**转换**（`--fmk=ONNX` + 上述配置）：
+
+```
+CONVERT RESULT SUCCESS:0     产出 147,128,016 字节（147 MB）
+对照：同一段的 THIRDPARTY/fp16 版 .ms 为 579,566,040 字节（579 MB）⇒ 缩小 ★3.9×★
+```
+
+**官方 schema 验证（int8 验收 ✓）**：
+
+```
+fmkType = 2 (ONNX)   655 个张量 / 394 个节点
+★ 37 个张量带 quantParams（numBits = 8）★
+
+权重形态（每权重 1 字节 ⇒ 真 int8）：
+  onnx::MatMul_870   dt=32(Int)  dims=[1536,256]   data=393216  = 1536×256×1  quant[bits=8]
+  onnx::MatMul_852   dt=32(Int)  dims=[1536,2048]  data=3145728 = 1536×2048×1 quant[bits=8]
+  onnx::MatMul_859   dt=32(Int)  dims=[1536,256]   data=393216  quant[bits=8]
+  onnx::MatMul_858   dt=32(Int)  dims=[256,256]    data=361     ★compress=SPARSE★ quant[bits=8]
+⇒ 另发现部分权重带 ★SPARSE 稀疏压缩★（压缩类型见 §18 的 7 种取值）
+```
+
+**设备实测（一次一个推理进程 ✓）**：
+
+```
+OH_AI_ModelBuildFromFile → ★0★
+ 输入数 = 8：24576 + 64 + 4096×6 字节（与模型 I/O 完全对应 ✓）
+OH_AI_ModelPredict       → ★0★
+ 输出 1 个：24576 字节（1×4×1536×4，fp32 ✓）
+```
+
+**⇒ 结论**：
+
+```
+✓ gemma4 段模型以 int8 权重（weight-only）在 NPU 上 Build 0 · Predict 0
+✓ 权重量化确实发生（每权重 1 字节 + numBits=8，共 37 个量化张量）
+✓ 使用 §27 的结论：一律选 "NPU_"（在线通道）
+✓ 关键前提：输入形状必须是静态的（该段 ONNX 本身就是静态 ✓）
+```
