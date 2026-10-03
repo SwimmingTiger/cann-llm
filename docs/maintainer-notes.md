@@ -773,3 +773,50 @@ min_quant_weight_channel=16
 
 **本机无 `onnx` 模块**，读 ONNX 的 I/O 可用手写 protobuf 扫描（`ModelProto.graph`(7) →
 `GraphProto.input`(11)/`output`(12) → `ValueInfoProto.name`(1)）✓
+
+## 14. ★★ 走通 OMG 那一步；`--fmk=THIRDPARTY` 需要容器内的 converter ★★
+
+**目标**：产出【带 third-party 标记】且【weight-only int8】的 `.ms`。
+
+**① 手写最小 ONNX（无需 onnx 模块）** ✓
+
+本机无 `onnx`/`torch`/`numpy`，改用直接写 protobuf 字节：
+
+```
+ModelProto{ ir_version(1)=8 · graph(7) · opset_import(8) }
+GraphProto{ node(1)=MatMul · initializer(5)=w[4,4] float32 · input(11)=x · output(12)=y }
+OperatorSetIdProto{ version(2)=13 }     ← ★易错点：version 是字段 2★
+```
+⇒ 产出 175 字节的 `mm.onnx`（`y[1,4] = MatMul(x[1,4], w[4,4])`）✓
+（第一次写成 `field 1 = 13` ⇒ OMG 报
+ `onnx_parser.cpp:579 "unsupported opset version 0, need to be in [7, 19)"` ✓）
+
+**② OMG 成功** ✓
+
+```
+DDK=$HOME/ddk
+LD_LIBRARY_PATH=$DDK/tools/tools_omg/master/lib64:$DDK/tools/platform/kirinx90/lib64
+$DDK/tools/tools_omg/omg --model mm.onnx --framework 5 --output mm \
+  --input_shape "x:1,4" --out_nodes "y:0" --platform=kirinx90 --target=omc
+⇒ "OMG generate offline model success." ✓  产出 mm.omc = 19,145 字节 ✓
+```
+
+**③ `converter_lite --fmk=THIRDPARTY` 卡在工具版本** ✗
+
+| converter | 结果 |
+|---|---|
+| `~/work/hmos/mslite-pkg/…/tools/converter/converter/converter_lite` | `Flags Init failed. Ret: -600`（help 里 `--fmk` 取值无 THIRDPARTY） |
+| `~/work/hmos/third_party_mindspore/…/build/tools/converter/converter_lite/converter_lite` | 接受该取值，但内部按 **MSLITE** 处理 ⇒ `converter.cc:1185 "When fmk is set to MSLITE, only support micronization."` ⇒ `Fail to support` |
+
+**根因**：`scripts/model-conversion/gemma4/gemma4_batch.sh` 第 4 行
+
+```
+B=${MSLITE_BUILD:-/src/mindspore-src/source/output/tmp/mindspore-lite-2.7.0-linux-x64}
+                      ^^^ ★容器内路径★（注释原文：容器内路径，可用 MSLITE_BUILD 覆盖）
+```
+⇒ ★经 OMG 的 `--fmk=THIRDPARTY` 转换必须在【CANN 容器】里做★
+（x570 上这两个 converter 都不是那一版 ✓）
+
+**⇒ 下一步**：在 CANN 容器内（或找到等价版本）跑
+`converter_lite --fmk=THIRDPARTY --modelFile=mm.omc --outputFile=wq7_mm --configFile=mm.cfg`
+（cfg 用 `quant_type=WEIGHT_QUANT` + `[third_party_model]` 段 ✓）
