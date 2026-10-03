@@ -43,7 +43,12 @@ class _Mslite:
             ("OH_AI_ModelGetInputs", _TA, [C.c_void_p]),
             ("OH_AI_ModelGetOutputs", _TA, [C.c_void_p]),
             ("OH_AI_TensorGetMutableData", C.c_void_p, [C.c_void_p]),
-            ("OH_AI_TensorGetElementNum", C.c_size_t, [C.c_void_p]),
+            # ★ 必须声明全：漏了声明的函数，ctypes 会把指针参数当 32 位 int 传 ✗
+            #   ⇒ 64 位下指针被截断 ⇒ NPU 解引用坏指针 ⇒ SIGSEGV ✗
+            #   （实测：3.14 下必崩 ✓、3.12 下因地址布局侥幸没崩 ✓ —— 就是"兼容性问题"的真身 ✓）
+            ("OH_AI_TensorGetElementNum", C.c_int64, [C.c_void_p]),   # int64，不是 size_t ✓
+            ("OH_AI_TensorGetDataType", C.c_int, [C.c_void_p]),       # ★原来漏了 ✗
+            ("OH_AI_TensorGetDataSize", C.c_size_t, [C.c_void_p]),
             ("OH_AI_TensorGetName", C.c_char_p, [C.c_void_p]),
             ("OH_AI_ModelPredict", C.c_int, [C.c_void_p, _TA, C.POINTER(_TA), C.c_void_p, C.c_void_p]),
         ]:

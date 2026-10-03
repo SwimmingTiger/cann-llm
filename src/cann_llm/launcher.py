@@ -262,7 +262,8 @@ def run_chat(root: str, argv: "List[str]") -> int:
             info("改单轮上限：--max-tokens <n>   例：scripts/start_chat.sh -d … --max-tokens 512")
 
     env = dict(os.environ)
-    ensure_engine_lib_path(env)          # ★ 补全引擎库依赖路径（缺了会段错误 ✗）★
+    ensure_engine_lib_path(env)
+    import sys as _s; print("  DEBUG-ENVPATH:", env.get("LD_LIBRARY_PATH"), file=_s.stderr)          # ★ 补全引擎库依赖路径（缺了会段错误 ✗）★
     env["PYTHONPATH"] = os.path.join(root, "src") + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env[var] = lib
