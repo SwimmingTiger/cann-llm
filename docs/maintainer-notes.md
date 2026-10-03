@@ -936,3 +936,59 @@ LiteModel::ConstructModel 命中，参数：
 · CheckQuantAllInit 未命中，可能只是该分支未走到，不能据此断言"模型无量化信息"
 · 因此本条【只记录事实与方法】，不对"该 .ms 是否为 int8"下结论
 ```
+
+## 18. ★★★★★ 用官方 schema 解析 `.ms`：它是【薄包装】，真模型在 `ThirdPartyModel` blob 里 ★★★★★
+
+**方法**：直接用 MS-Lite 源码里的官方 schema 编译一个解析器
+（`mindspore-lite/schema/model.fbs` + `model_generated.h` + `flatbuffers` 头）：
+
+```
+root_type ★MetaGraph★ · file_identifier ★"MSL2"★（与模型头字节 4d 53 4c 32 一致 ✓）
+MetaGraph: name · version · fmkType · inputIndex · outputIndex · mempoolSize ·
+           nodes · ★allTensors()★ · ★subGraph()★ · obfuscate · encrypt · obfMetaData · decryptTable
+SubGraph: name · inputIndices · outputIndices · nodeIndices · tensorIndices   ← 只有索引
+Tensor:   nodeType · ★dataType★ · dims · format · offset · ★data★ · ★quantParams★ ·
+          quantClusters · name · enableHuffmanCode · ★weightQuantCompressType★ · externalData
+QuantParam: scale · zeroPoint · min · max · narrowRange · ★numBits★ · ★inited★ · varCorr · meanCorr · ★dstDtype★
+WeightQuantCompressType: ★NONE=0 · INDEXING=1 · SPARSE=2 · FSE=3 · BITPACKING=4 · FSE_INT=5 · FSE_INFER=6★
+```
+
+**解析 `wq7_mm.ms`（19,712 字节）结果**：
+
+```
+version = MindSpore Lite 2.7.0     fmkType = 6 (THIRDPARTY)
+subGraph[0] name = ★subgraph_0_third_party★   tensors = 3   nodes = 1
+
+allTensors: 3 个
+ [0] y                 dataType = 43 (Float16)  dims = [1,4]       data = 0      compress = NONE  quant = (none)
+ [1] x                 dataType = 43 (Float16)  dims = [1,4]       data = 0      compress = NONE  quant = (none)
+ [2] ★ThirdPartyModel★ dataType = 37 (UInt)     dims = [★19145★]   data = ★19145★ compress = NONE  quant = (none)
+```
+
+**★ 关键结论 ★**
+
+```
+★ `ThirdPartyModel` 张量是一个【不透明的字节 blob】，长度 ★19145★
+  —— 与 `mm.omc` 的字节数【完全一致】✓
+⇒ ★该 `.ms` 只是把 `.omc` 原样包了一层★ ✗
+  · MS-Lite 自身【不解析】其中的内容，整体作为 data 交给下游（NNRt → hiai）
+  · x / y 是 float16，只是对外接口签名
+  · `.ms` 层的 quantParams 为空、compress=NONE —— 因为这一层本来就没有量化信息
+⇒ ★量化信息与权重都在【`ThirdPartyModel` 那个 blob（即 .omc）里】★
+```
+
+**⇒ 修正此前的提问层次**：
+
+```
+✗ "`.ms` 里是不是 int8" —— 问错了层（.ms 只是壳）
+✓ 正确的问题：「`.omc` 里的权重是什么类型、量化参数是什么」
+   —— 需要解析 .omc 才能回答
+```
+
+**顺带记录（避免再次误判）**：
+
+```
+· WeightQuantCompressType 有 7 种取值 ⇒ 权重可能是位打包/稀疏/熵编码存储，
+  ★因此"在模型里搜原始浮点权重的字节"这种判据【本身就是无效的】★
+· 本节只记录解析工具与解析结果，不对 int8 是否生效下结论
+```
