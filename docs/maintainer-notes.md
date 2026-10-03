@@ -992,3 +992,46 @@ allTensors: 3 个
   ★因此"在模型里搜原始浮点权重的字节"这种判据【本身就是无效的】★
 · 本节只记录解析工具与解析结果，不对 int8 是否生效下结论
 ```
+
+## 19. 解析 `.omc`：容器格式 + 内嵌 protobuf 片段
+
+`.ms` 里的 `ThirdPartyModel` blob 就是 `.omc`（字节数一致 ✓），因此真正要看的是 `.omc`。
+
+**格式探测**：
+
+```
+头 8 字节：49 4d 4f 44 00 01 00 00  = "★IMOD★" + 版本/长度字段
+整体不是单个 protobuf（protoc --decode_raw 报 "Failed to parse input"；
+自写扫描器在偏移 0..200 均无法完整解析到文件尾）
+⇒ ★它是容器 + 内嵌的 protobuf 片段★
+```
+
+**内嵌片段的 protobuf 结构（可读属性名 + 紧邻的取值字段）**：
+
+```
+形如： 0a <len> "<属性名>"  12 02 <字段号> <值>
+例：   0a 09 "src_dtype"     12 02 18 00        ⇒ src_dtype = 0
+```
+
+**在 `mm.omc` 中读到的 dtype 属性**：
+
+| 偏移 | 属性 | 值 | 解释 |
+|---|---|---|---|
+| 0x326 | `src_dtype` | 0 | DT_FLOAT |
+| 0xb64 | `src_dtype` | 1 | DT_FLOAT16（上下文 `SubGraph_0:0`） |
+| 0x34e | `dst_dtype` | 1 | DT_FLOAT16 |
+| 0xbdf | `dst_dtype` | 0 | DT_FLOAT |
+
+**⇒ 即该图里的 `Cast` 节点是 FLOAT ⇄ FLOAT16 转换；在这些属性中未见 int8** ✓
+
+**记录边界**（避免再次越界）：
+
+```
+· 读到的是 ★Cast 节点的属性★，不是 ★权重张量本身的数据类型★ ✗
+· `graphop_weight_offset` 显示权重另有存放位置（需进一步解析容器目录）
+· `.omc` 是容器 ⇒ 要完整读出权重类型/量化参数，需要先解出它的目录结构
+⇒ 本节只记录格式探测结果与已读到的属性值
+```
+
+**环境**（可复现）：目标机上 `protoc` 与 python `protobuf` 均可用 ✓；
+但 `.omc` 不是单一 protobuf，故通用解码器不适用，需按容器格式解析 ✓
