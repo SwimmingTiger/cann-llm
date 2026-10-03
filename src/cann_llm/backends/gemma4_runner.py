@@ -27,8 +27,7 @@ class _TA(C.Structure):
 
 class _Mslite:
     """最小 ctypes 封装（照已跑通的最小写法：按序号喂输入、不主动 destroy）"""
-    def __init__(self, lib_path: str = _NDK):
-        self.lib = C.CDLL(lib_path)
+    def _bind(self):
         L = self.lib
         for fn, rt, at in [
             ("OH_AI_ModelCreate", C.c_void_p, []),
@@ -49,13 +48,23 @@ class _Mslite:
             if at:
                 f.argtypes = at
 
+
+class _Unused:
+    def __init__(self, lib_path: str = _NDK):
+        self.lib = C.CDLL(lib_path)
+        self._cache = {}          # ★ build 很贵：同一个 .ms 只建一次（不 destroy ⇒ 不会悬垂 ✓）
+
     def run(self, ms: str, feeds: dict) -> dict:
         L = self.lib
-        ctx = L.OH_AI_ContextCreate()
-        L.OH_AI_ContextAddDeviceInfo(ctx, L.OH_AI_DeviceInfoCreate(_DEV_NNRT))
-        m = L.OH_AI_ModelCreate()
-        if L.OH_AI_ModelBuildFromFile(m, ms.encode(), _MINDIR, ctx) != 0:
-            raise RuntimeError("Build 失败: %s" % ms)
+        if ms in self._cache:
+            m = self._cache[ms]
+        else:
+            ctx = L.OH_AI_ContextCreate()
+            L.OH_AI_ContextAddDeviceInfo(ctx, L.OH_AI_DeviceInfoCreate(_DEV_NNRT))
+            m = L.OH_AI_ModelCreate()
+            if L.OH_AI_ModelBuildFromFile(m, ms.encode(), _MINDIR, ctx) != 0:
+                raise RuntimeError("Build 失败: %s" % ms)
+            self._cache[ms] = m          # ★ 保留 ctx/Model（故意不销毁 —— 销毁会 core dump）
         ins = L.OH_AI_ModelGetInputs(m)
         for i in range(ins.handle_num):
             t = ins.handle_list[i]
@@ -137,11 +146,15 @@ class Gemma4SegRunner:
         pad = list(ids) + [0] * (self.SEQ - n)
         # 真实 token 放在【最前面】，padding 在尾部；因果掩码保证真实 token 互不影响 ✓
         # 表行已是 float32 小端 ⇒ 直接拼即可（不需要再解包重打一遍 ✗）
-        ident = b"".join(self.pl_row_scaled(i) for i in pad)
-        assert len(ident) == self.SEQ * self.pl_dim * 4
-        per_layer = self.ms.run(os.path.join(self.dir, "graphP", "graphP.ms"),
-                                {"input_ids": struct.pack("<%di" % self.SEQ, *pad),
-                                 "identity": ident})["per_layer"]
+        # ★ 图P 是按 S=1 导的（[1,S,35,256] 的输出决定了 S 不能大）⇒ 逐 token 跑再拼 ✓
+        #   有了模型缓存，每次只剩一次 Predict ✓
+        pl_parts = []
+        for i in pad:
+            r = self.ms.run(os.path.join(self.dir, "graphP", "graphP.ms"),
+                            {"input_ids": struct.pack("<i", i),
+                             "identity": self.pl_row_scaled(i)})
+            pl_parts.append(r["per_layer"])
+        per_layer = b"".join(pl_parts)
         hidden = b"".join(self.emb(i) for i in pad)
         kv = {}
         for st in self.SEG_STARTS:
