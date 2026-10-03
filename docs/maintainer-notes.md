@@ -1531,3 +1531,68 @@ OH_AI_ModelPredict       → ★0★
 ✓ 使用 §27 的结论：一律选 "NPU_"（在线通道）
 ✓ 关键前提：输入形状必须是静态的（该段 ONNX 本身就是静态 ✓）
 ```
+
+## 29. ★★★★★ gemma4 全部 9 段以 int8 权重在 NPU 上跑通（goal 验收完成）★★★★★
+
+**配方（对每个段相同）**：
+
+```
+① 用现成的段 ONNX（`g4segN/seg.onnx`，I/O 已是静态形状）
+② 配置两段都要：
+     [common_quant_param]  quant_type=WEIGHT_QUANT · bit_num=8
+                           min_quant_weight_size=0 · min_quant_weight_channel=1
+     [third_party_model]   该段的 I/O 描述（取自导出的 c.cfg）
+   —— 缺 [third_party_model] 会报 Parse third party param failed
+③ converter_lite --fmk=ONNX --modelFile=seg.onnx --outputFile=<out> --configFile=<cfg>
+④ 加载：device 选 "NPU_"（在线通道，见 §27）⇒ OH_AI_ModelBuildFromFile(..., 0, ctx)
+```
+
+**转换结果（9/9 成功）**：
+
+| 段 | ONNX | int8 `.ms` | 缩小 |
+|---|---|---|---|
+| seg0 | 552 MB | ★140 MB★ | 3.9× |
+| seg4 | 580 MB | ★147 MB★ | 3.9× |
+| seg8 | 580 MB | ★147 MB★ | 3.9× |
+| seg12 | 685 MB | ★173 MB★ | 4.0× |
+| seg16 | 997 MB | ★252 MB★ | 4.0× |
+| seg20 | 972 MB | ★246 MB★ | 4.0× |
+| seg24 | 997 MB | ★252 MB★ | 4.0× |
+| seg28 | 997 MB | ★252 MB★ | 4.0× |
+| seg32 | 754 MB | ★191 MB★ | 3.9× |
+
+**官方 schema 验收（每段都含真 int8 权重 ✓）**：
+
+| 段 | 张量 | 节点 | 量化张量 | 例：权重张量（dataType=32 Int，每权重 1 字节） |
+|---|---|---|---|---|
+| seg0 | 655 | 394 | ★37★ | [1536,256] data=393216 = 1536×256×1 |
+| seg4 | 659 | 396 | ★38★ | [1536,512] data=786432 = 1536×512×1 |
+| seg8 | 660 | 396 | ★38★ | [1536,256] data=393216 |
+| seg12 | 627 | 377 | ★36★ | [1536,256] data=393216 |
+| seg16 | 534 | 320 | ★30★ | [1536,2048] data=3145728 |
+| seg20 | 526 | 318 | ★29★ | [1536,2048] data=3145728 |
+| seg24 | 534 | 320 | ★30★ | [1536,4096] data=6291456 = 1536×4096×1 |
+| seg28 | 534 | 320 | ★30★ | [1536,2048] data=3145728 |
+| seg32 | 405 | 241 | ★23★ | [1536,2048] data=3145728 |
+
+（另有 SPARSE 稀疏压缩张量，每段 1~2 个）
+
+**设备实测（逐个单独运行，一次一个推理进程 ✓）**：
+
+```
+9/9 全部：OH_AI_ModelBuildFromFile → 0 且 OH_AI_ModelPredict → 0
+seg0 详情：输入 8 个（24576 + 64 + 4096×6 字节，与模型 I/O 一致）
+           输出 1 个 24576 字节（1×4×1536×4 fp32）
+NPU 侧 hilog：npu_graph_executor_om.cc "load model succ: modelName=… modelId=…"
+              GraphExecutorInit "load model finish, pid, client id: 65536, server id: 838"
+```
+
+**⇒ 结论**：
+
+```
+✓ gemma4 全部 9 段均以 int8 权重（weight-only）在设备上 Build 0 · Predict 0
+✓ 每段都经官方 schema 确认含真 int8 量化权重（dataType=Int + numBits=8 + 每权重 1 字节）
+✓ 加载一律走 "NPU_"（在线通道），不需要为模型类型切换设备
+△ 已知待办：hilog 有 88 次 "… is not supported in npucl"（BatchMatMul/ReduceMean 等），
+  说明相当一部分算子未落在 NPU 上，需另行核实其实际执行者
+```
