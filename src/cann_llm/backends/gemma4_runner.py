@@ -100,6 +100,7 @@ class Gemma4SegRunner:
     SEG_STARTS = (0, 4, 8, 12, 16, 20, 24, 28, 32)
     N_LAYERS, PLE = 35, 256
     LOGIT_CAP = 30.0
+    PLSEQ = 24                         # 图P 的块大小（其输出受 1MB 上限约束 ⇒ S≤28）
 
     def __init__(self, model_dir: str):
         self.dir = model_dir
@@ -126,6 +127,29 @@ class Gemma4SegRunner:
             raise FileNotFoundError("找不到任何尺寸的段图（seg0/ 或 seg0_s32/）")
         self._masks = {S: self._causal_mask(S) for S in self.sizes}
         self._mask = self._masks[self.sizes[-1]]      # 兼容旧引用
+
+    def _pl_off(self, t: int) -> int:
+        """第 t 个 token 在分块 per_layer buffer 里的【字节】偏移 ✓"""
+        ci, li = divmod(t, self.PLSEQ)
+        return (ci * self.PLSEQ + li) * self.N_LAYERS * self.PLE * 4
+
+    def _per_layer_chunked(self, pad, S: int) -> bytes:
+        """★ 用图P(S=24) 分块算 per_layer ★ —— 把逐 token 的 S 次 Predict 降到 ceil(S/24) 次
+        （图P 是按 S=24 导的；不够 24 的尾块补零再喂 ✓）"""
+        p24 = os.path.join(self.dir, "graphP", "graphP24.ms")
+        if not os.path.exists(p24):
+            return b"".join(
+                self.ms.run(os.path.join(self.dir, "graphP", "graphP.ms"),
+                            {"input_ids": struct.pack("<i", i),
+                             "identity": self.pl_row_scaled(i)})["per_layer"] for i in pad)
+        parts = []
+        for off in range(0, S, self.PLSEQ):
+            chunk = list(pad[off:off + self.PLSEQ])
+            chunk += [0] * (self.PLSEQ - len(chunk))
+            parts.append(self.ms.run(p24,
+                         {"input_ids": struct.pack("<%di" % self.PLSEQ, *chunk),
+                          "identity": b"".join(self.pl_row_scaled(i) for i in chunk)})["per_layer"])
+        return b"".join(parts)
 
     def _seg_dir(self, st: int, S: int) -> str:
         """S=主尺寸用 seg{st}/，其它尺寸用 seg{st}_s{S}/ ✓"""
@@ -175,11 +199,7 @@ class Gemma4SegRunner:
         mask = self._masks[S]
         pad = list(ids) + [0] * (S - n)
         # 图 P 按 S=1 导 ⇒ 逐 token 跑再拼（有缓存，每次只剩一次 Predict）✓
-        per_layer = b"".join(
-            self.ms.run(os.path.join(self.dir, "graphP", "graphP.ms"),
-                        {"input_ids": struct.pack("<i", i),
-                         "identity": self.pl_row_scaled(i)})["per_layer"]
-            for i in pad)
+        per_layer = self._per_layer_chunked(pad, S)
         hidden = b"".join(self.emb(i) for i in pad)
         kv = {}
         for st in self.SEG_STARTS:
@@ -193,8 +213,8 @@ class Gemma4SegRunner:
                 feeds.update(kv)
             for i in range(no):
                 feeds["per_layer_%d" % i] = b"".join(
-                    per_layer[(t * self.N_LAYERS + st + i) * self.PLE * 4:
-                              (t * self.N_LAYERS + st + i + 1) * self.PLE * 4]
+                    per_layer[self._pl_off(t) + (st + i) * self.PLE * 4:
+                              self._pl_off(t) + (st + i + 1) * self.PLE * 4]
                     for t in range(S))
             r = self.ms.run(os.path.join(self.dir, self._seg_dir(st, S), "seg.ms"), feeds)
             hidden = r["hidden_out"]
