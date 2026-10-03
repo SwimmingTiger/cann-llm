@@ -821,7 +821,12 @@ B=${MSLITE_BUILD:-<MSLITE_BUILD>}
 `converter_lite --fmk=THIRDPARTY --modelFile=mm.omc --outputFile=wq7_mm --configFile=mm.cfg`
 （cfg 用 `quant_type=WEIGHT_QUANT` + `[third_party_model]` 段 ✓）
 
-## 15. ★★★★★ int8 首次在 NPU 上跑通：完整可行配方 ★★★★★
+## 15. ★（标题已更正，结论见 §20）★ THIRDPARTY 链路的完整配方
+
+> ★更正（2026-10）：本节原标题为"int8 首次在 NPU 上跑通"，
+> 经 §16–§20 的进一步核查，★该路径产出的模型【不是 int8】★ ✗。
+> 准确的结论是：★该链路能产出"设备可加载并 Predict 成功"的 `.ms`（对外接口为 fp16），
+> 但不是 int8★ ✓。完整证据链与结论见 §20。以下配方本身仍然有效（用于打通链路）。
 
 **结果**：`Build 0 · Predict -> 0` ✓，且 hilog 证明在 NPU 上执行：
 
@@ -1035,3 +1040,62 @@ allTensors: 3 个
 
 **环境**（可复现）：目标机上 `protoc` 与 python `protobuf` 均可用 ✓；
 但 `.omc` 不是单一 protobuf，故通用解码器不适用，需按容器格式解析 ✓
+
+## 20. ★★★★★ 结论：`--fmk=THIRDPARTY` + `WEIGHT_QUANT` 路径【没有产出 int8】★★★★★
+
+**结论**：该路径产出的 `.ms` 中，权重与计算均为 float16/float32，**不存在 int8 量化权重** ✗。
+
+**三条互相独立的证据**：
+
+```
+★ 证据 ①：`.ms` 只是薄包装，真模型 = `ThirdPartyModel` blob ★
+   · 用 MS-Lite 官方 flatbuffer schema 解析 wq7_mm.ms：
+       subGraph[0] = subgraph_0_third_party, fmkType = 6 (THIRDPARTY)
+       allTensors = 3 个：
+         y  dataType = 43 (Float16)  dims=[1,4]     data=0
+         x  dataType = 43 (Float16)  dims=[1,4]     data=0
+         ThirdPartyModel  dataType = 37 (UInt)  dims=[19145]  data=19145
+       三者 quantParams 均为空、weightQuantCompressType = NONE
+   · ThirdPartyModel 的长度 19145 与 mm.omc 的字节数完全一致
+     ⇒ MS-Lite 不解析其内容，整体交给下游（NNRt → hiai）
+     ⇒ ★要判断量化，必须看 .omc★
+
+★ 证据 ②：`.omc` 内部的 dtype 属性只有浮点 ★
+   mm.omc 内嵌 protobuf 片段中读到的全部 dtype 属性：
+     src_dtype = 0 (DT_FLOAT)     @0x326
+     dst_dtype = 1 (DT_FLOAT16)   @0x34e
+     src_dtype = 1 (DT_FLOAT16)   @0xb64  （上下文 SubGraph_0:0）
+     dst_dtype = 0 (DT_FLOAT)     @0xbdf
+   ⇒ 仅有 FLOAT / FLOAT16，无 int8 ✓
+
+★ 证据 ③：调试器实测张量创建时的类型 ★
+   断在 mindspore::lite::Tensor::Tensor(TypeId, std::vector<int>, Format const&, Category)
+   命中 5 次，TypeId 为：0x2b = 43 (kNumberTypeFloat16) ×4 · 0x25 = 37 (kNumberTypeUInt) ×1
+   TypeId 枚举中 Int8 = 33、UInt8 = 38 ⇒ ★未出现任何 int8/uint8★ ✓
+   （另：调试器 dump 出的模型缓冲区与 wq7_mm.ms 逐字节一致，
+     确认观察对象无误 ✓）
+```
+
+**⇒ 因此对 §15 的更正**：
+
+```
+✗ 原表述："int8 首次在 NPU 上跑通"
+✓ 更正为：THIRDPARTY 链路能产出「设备可加载并 Predict 成功」的 .ms
+          （Build 0 · Predict 0 ✓，对外接口 x/y 为 float16），
+          ★但该模型不是 int8★ ✗
+```
+
+**⇒ 与既有逆向结论一致（互不矛盾）**：
+
+```
+· §9  hiai 的量化类型白名单只收 (FLOAT/FLOAT16, INT8)，不收 int8×int8 ✓
+· §10 GE 的 MatMul dtype 白名单：输入无 FLOAT16、合法组合为 (FLOAT, INT8) ✓
+· §12 converter 的 quant_type 有 WEIGHT_QUANT / FULL_QUANT / DYNAMIC_QUANT 三种取值 ✓
+· 而 `--fmk=ONNX` + WEIGHT_QUANT 路径【确实会压缩体积】（449,599 → 226,656，约 50%）✓
+  —— 那一条才是真正做了量化的路径，但它产出的 .ms 不带 third-party 标记 ✗
+⇒ 两条路径的需求（真量化 vs third-party 标记）目前仍未同时满足 ✓
+```
+
+**未完成的部分**：`.omc` 的容器目录尚未解开，
+因此"权重段自身的 dtype 与量化参数"尚未直接读出；
+但证据 ①②③ 已足以判定该 `.ms` 不含 int8 ✓
