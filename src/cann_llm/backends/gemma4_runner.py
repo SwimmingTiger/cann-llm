@@ -49,47 +49,6 @@ class _Mslite:
                 f.argtypes = at
 
 
-class _Unused:
-    def __init__(self, lib_path: str = _NDK):
-        self.lib = C.CDLL(lib_path)
-        self._cache = {}          # ★ build 很贵：同一个 .ms 只建一次（不 destroy ⇒ 不会悬垂 ✓）
-
-    def run(self, ms: str, feeds: dict) -> dict:
-        L = self.lib
-        if ms in self._cache:
-            m = self._cache[ms]
-        else:
-            ctx = L.OH_AI_ContextCreate()
-            L.OH_AI_ContextAddDeviceInfo(ctx, L.OH_AI_DeviceInfoCreate(_DEV_NNRT))
-            m = L.OH_AI_ModelCreate()
-            if L.OH_AI_ModelBuildFromFile(m, ms.encode(), _MINDIR, ctx) != 0:
-                raise RuntimeError("Build 失败: %s" % ms)
-            self._cache[ms] = m          # ★ 保留 ctx/Model（故意不销毁 —— 销毁会 core dump）
-        ins = L.OH_AI_ModelGetInputs(m)
-        for i in range(ins.handle_num):
-            t = ins.handle_list[i]
-            nm = L.OH_AI_TensorGetName(t).decode()
-            n = L.OH_AI_TensorGetElementNum(t)
-            d = feeds[nm]
-            if len(d) != n * 4:
-                raise ValueError("输入 %s 大小不符: %d vs %d" % (nm, len(d), n * 4))
-            C.memmove(L.OH_AI_TensorGetMutableData(t), d, len(d))
-        outs = _TA()
-        if L.OH_AI_ModelPredict(m, ins, C.byref(outs), None, None) != 0:
-            raise RuntimeError("Predict 失败: %s" % ms)
-        res = {}
-        for i in range(outs.handle_num):
-            t = outs.handle_list[i]
-            nm = L.OH_AI_TensorGetName(t).decode()
-            res[nm] = C.string_at(L.OH_AI_TensorGetMutableData(t),
-                                  L.OH_AI_TensorGetElementNum(t) * 4)
-        return res
-
-
-def _f32(b: bytes) -> List[float]:
-    return list(struct.unpack("<%df" % (len(b) // 4), b))
-
-
 class Gemma4SegRunner:
     """model_dir 布局（本会话产出的目录）：
          graphP/graphP.ms · seg{0,4,...,32}/seg.ms · lm/lm{0..3}.ms
