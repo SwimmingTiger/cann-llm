@@ -1,7 +1,7 @@
 #!/bin/bash
 # 9 段（4×8 + 3）整条流水线：ONNX → OMG → converter_lite
 DDK=$HOME/ddk
-B=${MSLITE_BUILD:-/src/mindspore-src/source/output/tmp/mindspore-lite-2.7.0-linux-x64}  # 容器内路径，可用 MSLITE_BUILD 覆盖 ✓
+B=${MSLITE_BUILD:-<MSLITE_BUILD>}  # 容器内路径，可用 MSLITE_BUILD 覆盖 ✓
 POC=$HOME/work/llm/ddk-llm/llm-poc
 TT=${TINY_TEST:-$HOME/tiny-test}
 OUTROOT=$HOME/g4segs; mkdir -p "$OUTROOT"
@@ -27,7 +27,7 @@ for ST in 0 4 8 12 16 20 24 28 32; do
   cp q/*.omc "$T/" 2>/dev/null; W=$(dirname $(ls q/*.omc|head -1)); [ -f "$W/SubGraph_0.weight" ] && cp "$W/SubGraph_0.weight" "$T/"
   cp c.cfg "$T/"
   chmod -R a+rX "$T"
-  docker exec mslite-dev bash -c "
+  在厂商转换环境中执行 "
     export LD_LIBRARY_PATH=$B/tools/converter/lib:$B/runtime/lib:$B/runtime/third_party/glog
     cd /src/tiny-test/g4seg$ST; rm -f seg.ms; OMC=\$(ls *.omc|head -1)
     $B/tools/converter/converter/converter_lite --fmk=THIRDPARTY --modelFile=\$OMC --outputFile=seg --configFile=c.cfg 2>&1 | tail -1

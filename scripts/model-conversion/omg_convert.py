@@ -177,7 +177,7 @@ def main() -> int:
     ]
     if args.compress_conf:
         cmd += ["--compress_conf", os.path.abspath(args.compress_conf)]
-    # 参数顺序对齐 x570 上当年能跑的那条命令（quant/to_omc_rebuilt.sh）：
+    # 参数顺序对齐 开发机 上当年能跑的那条命令（quant/to_omc_rebuilt.sh）：
     #     … --output_type=… --weight_data_type FP16 --save_weights_as_external_data=true --platform=… --target=omc
     # ⚠ 实测：把 --weight_data_type 放到末尾【产物大小不变】（仍 5.8 G），
     #   所以顺序【不是】那个加载失败的原因 —— 这里只是保持与历史命令一致，别读成修复。

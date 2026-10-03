@@ -100,12 +100,12 @@ mindspore-src/source/mindspore-lite/test/ut/test_data/third_party_model.cfg   �
 git clone --depth 1 https://gitcode.com/openharmony/third_party_mindspore.git
 cd third_party_mindspore
 
-# ② 起一个常驻构建容器（只装一次工具链，之后都用 docker exec）
-docker run -d --name mslite-dev \
-    -v "$PWD":/src -w /src/mindspore-src/source \
+# ② 起一个常驻构建容器（只装一次工具链，之后都用 厂商转换环境 exec）
+厂商转换环境 run -d --name 厂商转换环境 \
+    -v "$PWD":<MSLITE_SRC> -w <MSLITE_SRC> \
     debian:12 bash -c 'tail -f /dev/null'
 
-docker exec mslite-dev bash -c '
+在厂商转换环境中执行 '
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
         build-essential cmake python3 python3-dev python3-numpy python3-yaml \
@@ -120,14 +120,14 @@ docker exec mslite-dev bash -c '
 
 ```bash
 # ③ 把 -Werror 换成 -Wno-error
-docker exec mslite-dev bash -c '
-    F=/src/mindspore-src/source/mindspore-lite/cmake/compile_link_option.cmake
+在厂商转换环境中执行 '
+    F=<MSLITE_SRC>/mindspore-lite/cmake/compile_link_option.cmake
     cp -n $F ${F}.bak && sed -i "s/ -Werror/ -Wno-error/g" $F'
 
 # ④ 配置 + 编译（不用官方 build.sh：它每次会删掉 build/ 重下依赖）
-docker exec mslite-dev bash -lc '
+厂商转换环境 exec 厂商转换环境 bash -lc '
     set -e
-    S=/src/mindspore-src/source
+    S=<MSLITE_SRC>
     mkdir -p $S/build && cd $S/build
     cmake -DCMAKE_BUILD_TYPE=Release -DVERSION_STR=2.7.0 -DENABLE_ASAN=off \
           -DCMAKE_INSTALL_PREFIX=$S/output/tmp -DPLATFORM_X86_64=on \
@@ -467,7 +467,7 @@ E ScatterNdUpdateVerify: "The dim value should be same,
 
 ## 9. ★ 完整走通：真实 LLM 在 NPU 上跑起来（Qwen2.5-0.5B 实测）
 
-这一节是**已跑通的完整配方**，每一步都在 x570 + MateBook Pro 上实测过。
+这一节是**已跑通的完整配方**，每一步都在 开发机 + MateBook Pro 上实测过。
 
 ```
 HF 权重 → dopt 三阶段量化 → 厂商导出器(NPU 亲和) → OMG → .omc

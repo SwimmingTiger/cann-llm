@@ -17,7 +17,7 @@
 | **`Init_Use_Option` 对入参敏感** | 错误取值会**段错误** → 实验必须**一变体一进程** |
 | 编译器 | `/data/service/hnp/bin/aarch64-unknown-linux-ohos-clang`（编 C++ 要加 `-x c++`）|
 | 设备上的 Python | `/data/service/hnp/python.org/python_3.12/bin/python3.12`（musl，与引擎兼容）|
-| IDA | x570 `ssh hu60@192.168.31.96`，`~/re/`（`libhiai_llm_engine.so` + `ida_decomp.py`）|
+| IDA | 开发机 `ssh <user>@<host>`，`~/re/`（`libhiai_llm_engine.so` + `ida_decomp.py`）|
 
 ## 已解决的两大块
 
@@ -83,7 +83,7 @@ v3 = *((_QWORD *)a2 + 5);           // opt+40 → 当作 modelInfo 结构体
 ## 下一步（按优先级）
 
 1. **反编译 `SetTokenizer`(0xfc118) 与 `InitOption_Create`(0xfa468)** —— 找**谁写 `opt+0`**
-   （后台任务 `bash-220` 正在跑，结果在 x570 `~/re/tokopt.txt`）
+   （后台任务 `bash-220` 正在跑，结果在 开发机 `~/re/tokopt.txt`）
 2. 若仍无线索 → 反编译 **`sub_1129B4`**（`opt+0 != 0` 时走的那条路）—— 看它需要什么，
    就知道了 `opt+0` 的语义，也能反推该由谁设
 3. `modelInfo` 的**真实布局**：从 `Init_Use_Option` 里 `v3+40` 的用法反推
@@ -99,7 +99,7 @@ v3 = *((_QWORD *)a2 + 5);           // opt+40 → 当作 modelInfo 结构体
 | ~~`cann-llm/src/cann_llm/backends/hiai_tokenizer.py`~~ | 纯 Python Qwen 分词器 —— **已删除**（全导出 API 重构后不需要自己分词）|
 | ~~`cann-llm/src/cann_llm/backends/hiai_shim.c`~~ | C++ 辅助库 —— **已删除**（证明无用）|
 | `probe2.py` / `test_infer.py` / `test_shim.py` | 单变体探针（一变体一进程）|
-| x570 `~/re/*.txt` | 各函数反编译结果 |
+| 开发机 `~/re/*.txt` | 各函数反编译结果 |
 
 ## 引擎符号地址备忘
 
@@ -147,7 +147,7 @@ if ( v2 ) return sub_1129B4();    // ★ 永远走这里
 ### 当前唯一卡点
 
 `Executor_Init_Use_Option` → `sub_1129B4` 返回失败 ✗。
-**下一步 = 读 `sub_1129B4` 的反编译**（x570 `~/re/sub1129.txt`，脚本 `~/re/run6.sh`），
+**下一步 = 读 `sub_1129B4` 的反编译**（开发机 `~/re/sub1129.txt`，脚本 `~/re/run6.sh`），
 看它校验哪些字段的什么组合 ✓。
 
 ### 已实测的 `InitOption` 字段写入位置（供参考）
@@ -341,7 +341,7 @@ Executor_GenerateAsync(exec, ctx, prompt)          // 0xfdbec：仅做参数校�
 ### 下一步（唯一）
 
 反编译 **`sub_153B98`**(0x153B98) —— 它是 prefill/decode 的实现，**失败断言就在里面**。
-（x570 `~/re/sub153.txt`，脚本 `~/re/run10.sh`）
+（开发机 `~/re/sub153.txt`，脚本 `~/re/run10.sh`）
 
 ---
 
@@ -390,7 +390,7 @@ Executor_GenerateAsync                                  0xfdbec
 字符串 `InputExecutorCheck` @0x40238 被 4 个函数引用：
 `sub_176AC8`(0x176ac8)、`sub_26F948`、`sub_27D188`、`sub_154DE0`(0x154de0)；
 调用点断言字符串 @0x7ef5b 被 `sub_151888` / `sub_15326C` / `sub_153B98` 引用。
-完整反编译在 x570 `~/re/inexec.txt`（2494 行）。
+完整反编译在 开发机 `~/re/inexec.txt`（2494 行）。
 
 **下一步**：用 vtable 定位真正的 `InputExecutorCheck`（它是 `pipelineExecutor` 类的虚方法，
 槽位 `vtable+464`），或在上述候选中按"是否读取 ctx 的输入字段"逐个排除；
@@ -442,7 +442,7 @@ batchSize(pe+2568)=1   resourceFreed(pe+3698)=0   modelExecutor_(pe+2944)非空
 ### 下一步（新方向）
 
 反编译 **`sub_153B98`** 的**线程函数**及其调用：`sub_15933C` / `sub_158D00` / `sub_158458` / `sub_156C64`
-（`sub_153B98` 本体反编译已在 x570 `~/re/sub153.txt`）—— 失败在 `Generate` **之前**。
+（`sub_153B98` 本体反编译已在 开发机 `~/re/sub153.txt`）—— 失败在 `Generate` **之前**。
 
 ---
 
@@ -720,7 +720,7 @@ Executor_*: Create / Deinit / Destroy / GenerateAsync / Init_Use_Option / SetInf
 InitOption_*: Create / Destroy / SetInferType / SetModel / SetTokenizer
 ```
 
-**反编译实锤的调用序列**（`svc_call.txt` / `svc_gen.txt`，均在 x570 `~/re/`）：
+**反编译实锤的调用序列**（`svc_call.txt` / `svc_gen.txt`，均在 开发机 `~/re/`）：
 
 ```c
 // HiaiSessionRun（hiai_session.cpp:1419-1434）

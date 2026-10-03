@@ -340,7 +340,7 @@ AI_NPUCL: CheckSupported: the op name [X:0] type [Y] is not supported
 
 ### ★★ 补：硬件层面的权威依据（来自本机 `asc-devkit`）★★
 
-`~/work/hmos/asc-devkit`（Ascend C 开发套件，320 MB）里的官方文档给出：
+`<asc-devkit 目录>`（Ascend C 开发套件，320 MB）里的官方文档给出：
 
 ```
 ★ Kirin X90 处理器系列【支持的类型】含 ★int8_t / uint8_t / half / float★★ ✓

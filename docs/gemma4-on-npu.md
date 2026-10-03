@@ -510,7 +510,7 @@ SIGSEGV · fault address = 0x0（空指针解引用 ✗）
 ## 9. ★dtype 支持的逆向结论：fp16（存在，且★逐图★可用）/ fp8（不存在）/ int8（存在且很可能可用）★
 
 **方法**（都可复现 ✓）：
-* 材料：固件解包 `/media/hu60/SSD/work/hmos/firmware/unpack_result_010554/system` 里的**运行库** ✓
+* 材料：固件解包 `<firmware>/system` 里的**运行库** ✓
   （`platformsdk/libmindspore-lite.so`、`libnnrt_proxy_*.z.so`、
    `vendor/anco_spec/vendor/lib64/libai_npucore_*.so` ✓）
   + DDK 的 `tools/platform/kirinx90/lib64/libai_npucore_*.so` ✓

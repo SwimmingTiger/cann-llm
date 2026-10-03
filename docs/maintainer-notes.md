@@ -218,7 +218,7 @@ hilog -x | grep -aiE "MS_LITE|NNRt|CANN|AI_FMK|hiai"
 
 材料：固件解包里的 `system/lib64/platformsdk/libneural_network_runtime_ext.so`（0.1 MB）
 + `system/lib64/libhiai_*.z.so`（proxy）+ `libhiai_llm_engine.so`，
-用 idalib（`~/rev/nnrt_ext.so`）反编译 ✓。
+用 idalib（`<workdir>/nnrt_ext.so`）反编译 ✓。
 
 ## 1. `HIAIDevice`（麒麟 NPU 后端）的真实接口
 
@@ -766,9 +766,9 @@ min_quant_weight_channel=16
   · 或先离线把权重量化成 int8、再让 OMG 透传 ⇒ 需要自行实现 ✓
 ```
 
-**顺带确认的工具位置（x570）**：
-`~/work/hmos/mslite-pkg/mindspore-lite-2.7.0-linux-x64/tools/converter/converter/converter_lite`
-`~/work/hmos/third_party_mindspore/mindspore-src/source/build/tools/converter/converter_lite/converter_lite`
+**顺带确认的工具位置（开发机）**：
+`<MSLITE_BUILD>/tools/converter/converter/converter_lite`
+`<MSLITE_SRC_BUILD>/tools/converter/converter_lite/converter_lite`
 量化配置模板：`mindspore-lite/tools/converter/quantizer/config/` ✓
 
 **本机无 `onnx` 模块**，读 ONNX 的 I/O 可用手写 protobuf 扫描（`ModelProto.graph`(7) →
@@ -805,17 +805,17 @@ $DDK/tools/tools_omg/omg --model mm.onnx --framework 5 --output mm \
 
 | converter | 结果 |
 |---|---|
-| `~/work/hmos/mslite-pkg/…/tools/converter/converter/converter_lite` | `Flags Init failed. Ret: -600`（help 里 `--fmk` 取值无 THIRDPARTY） |
-| `~/work/hmos/third_party_mindspore/…/build/tools/converter/converter_lite/converter_lite` | 接受该取值，但内部按 **MSLITE** 处理 ⇒ `converter.cc:1185 "When fmk is set to MSLITE, only support micronization."` ⇒ `Fail to support` |
+| `<MSLITE_BUILD>/tools/converter/converter/converter_lite`（打包版） | `Flags Init failed. Ret: -600`（help 里 `--fmk` 取值无 THIRDPARTY） |
+| `<MSLITE_SRC_BUILD>/tools/converter/converter_lite/converter_lite`（源码构建版） | 接受该取值，但内部按 **MSLITE** 处理 ⇒ `converter.cc:1185 "When fmk is set to MSLITE, only support micronization."` ⇒ `Fail to support` |
 
 **根因**：`scripts/model-conversion/gemma4/gemma4_batch.sh` 第 4 行
 
 ```
-B=${MSLITE_BUILD:-/src/mindspore-src/source/output/tmp/mindspore-lite-2.7.0-linux-x64}
+B=${MSLITE_BUILD:-<MSLITE_BUILD>}
                       ^^^ ★容器内路径★（注释原文：容器内路径，可用 MSLITE_BUILD 覆盖）
 ```
 ⇒ ★经 OMG 的 `--fmk=THIRDPARTY` 转换必须在【CANN 容器】里做★
-（x570 上这两个 converter 都不是那一版 ✓）
+（开发机 上这两个 converter 都不是那一版 ✓）
 
 **⇒ 下一步**：在 CANN 容器内（或找到等价版本）跑
 `converter_lite --fmk=THIRDPARTY --modelFile=mm.omc --outputFile=wq7_mm --configFile=mm.cfg`
@@ -850,13 +850,13 @@ LD_LIBRARY_PATH=$DDK/tools/tools_omg/master/lib64:$DDK/tools/platform/kirinx90/l
   --input_shape "x:1,4" --out_nodes "y:0" --platform=kirinx90 --target=omc
 #   ⇒ "OMG generate offline model success."  mm.omc
 
-# ③ ★在 mslite-dev 容器内★ converter（--fmk=THIRDPARTY 只有容器内那版支持）
+# ③ ★在 厂商转换环境 容器内★ converter（--fmk=THIRDPARTY 只有容器内那版支持）
 #    mm.cfg: [common_quant_param] quant_type=WEIGHT_QUANT / bit_num=8 / ...
 #            [third_party_model]  input_names/input_dtypes/input_shapes/
 #                                 output_names/output_dtypes/output_shapes
-docker cp mm.omc mslite-dev:/tmp/ && docker cp mm.cfg mslite-dev:/tmp/
-docker exec mslite-dev bash -c '
-  B=/src/mindspore-src/source/output/tmp/mindspore-lite-2.7.0-linux-x64
+copy mm.omc 厂商转换环境:/tmp/ && copy mm.cfg 厂商转换环境:/tmp/
+在厂商转换环境中执行 '
+  B=<MSLITE_BUILD>
   cd /tmp && $B/tools/converter/converter/converter_lite --fmk=THIRDPARTY \
     --modelFile=mm.omc --outputFile=wq7_mm --configFile=mm.cfg'
 #   ⇒ CONVERT RESULT SUCCESS:0   wq7_mm.ms（比 .omc 略大，量化信息已写入）
@@ -872,7 +872,7 @@ python3.14 scripts/model-conversion/int8/probe_quant.py wq7_mm.ms - QuantConfigD
 |---|---|---|
 | ★量化组合 = WEIGHT_QUANT★（激活浮点 × 权重 int8） | GE/hiai 白名单只收 `(FLOAT/FP16, INT8)` | `VerifyMatMulInputsDataType … fail` / `Infershape failed` |
 | ★必须带 third-party 标记★ | MS-Lite 的 NNRt delegate 只处理 third-party 模型 | `nnrt_delegate.cc:237 "not third party model"` |
-| ★`--fmk=THIRDPARTY` 需容器内 converter★ | x570 上两版都不支持该取值 | `Flags Init failed Ret:-600` / `only support micronization` |
+| ★`--fmk=THIRDPARTY` 需容器内 converter★ | 开发机 上两版都不支持该取值 | `Flags Init failed Ret:-600` / `only support micronization` |
 
 **不需要扩展配置** ✓：量化信息随模型一起下发（`AddExtensionConfig` 那条路设备端不支持 ✗，
 但那不是必经之路 ✓）

@@ -5,7 +5,7 @@
 
 [model]
 # 模型目录（需含 omc / SubGraph_0.weight / embedding / tokenizer / json）
-model_dir = "/storage/Users/currentUser/work/llm/models/rebuilt"
+model_dir = "<你的模型目录>/rebuilt"
 model_id  = "qwen2.5-1.5b"
 backend   = "cann"
 chat_template = "chatml"

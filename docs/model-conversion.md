@@ -127,7 +127,7 @@ kirinx90-plugin-next-6.1.1.0.zip  0657efdddd2267949e83af2a382603b523d30b258d72e0
 解压与安装插件：
 
 ```bash
-mkdir -p ~/ddk && cd ~/ddk
+mkdir -p <DDK> && cd <DDK>
 unzip -q DDK-tools-next-6.1.1.0.zip
 unzip -q kirinx90-plugin-next-6.1.1.0.zip
 
