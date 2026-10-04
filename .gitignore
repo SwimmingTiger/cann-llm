@@ -35,3 +35,9 @@ log/
 
 # examples 下的编译产物
 examples/*/bin/
+
+# 二进制产物目录
+/bin/
+/lib/
+/python3/
+
