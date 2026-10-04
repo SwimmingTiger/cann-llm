@@ -2036,3 +2036,131 @@ src/securecutil.h       —— 错误处理器宏（release 下为空）
 ⇒ 只能分段（§32.4：每段 .ms ≤ ≈520 MiB，工程上 ≤300 MB ✓）。
 真正"可修"的点在**调用方**：适配层拿整块 4.26 GB 当 `destMax`，而每次只拷 4 字节 ✗
 —— 若它按"本次可用窗口"声明就不会撞上限（但那是专有实现，我们改不了 ✓）。
+
+---
+
+## 33. ★★★★★ "有没有办法绕过 2 GB" —— 第一道能绕（已实测），第二道在同一规则上且 securec 是静态链入，第三道还有 protobuf 的 2 GB ★★★★★
+
+§32 得出"每段 .ms ≲ 500 MB"的天花板。本节回答"能不能绕"：**能绕第一道，但绕不过后两道**。
+
+### 33.1 第一道确实能绕：`LD_PRELOAD` 插桩 `memcpy_s`（实测通过 ✓）
+
+**可行性依据**：`libhiai_adapter.so` 对 `memcpy_s` 是**动态导入**
+（`llvm-nm -D` 显示 `U memcpy_s`；§32.1 反汇编里也是 `bl … ; symbol stub for: memcpy_s`）
+⇒ 预加载对象在全局符号作用域里排在前面，可以顶掉它 ✓
+
+**工具**：本机就有 aarch64-ohos 交叉工具链（`clang 21` + `aarch64-linux-ohos` sysroot）✓
+
+**插桩 so 的核心**（完整版在临时目录，不入库）：
+
+```c
+int memcpy_s(void *dest, size_t destMax, const void *src, size_t count)
+{
+    if (dest == NULL || src == NULL) return 22;   /* EINVAL */
+    if (count > destMax)             return 34;   /* ERANGE */
+    /* ★只去掉这一条：destMax <= SECUREC_MEM_MAX_LEN★，不再因 >2GB 拒绝 */
+    if (count) (void)memmove(dest, src, count);
+    return 0;
+}
+```
+
+编译与运行：
+
+```sh
+clang --target=aarch64-linux-ohos --sysroot=<ohos-sysroot> -shared -fPIC -O2 -o libwqfix.so wqfix.c
+export LD_LIBRARY_PATH=/system/lib64/ndk:/system/lib64/platformsdk
+LD_PRELOAD=<libuname.so>:<libwqfix.so> python3.14 <加载脚本> <model.ms> 60
+```
+
+**实测结果（决定性）**：
+
+| 样本 | 超 2 GB 的 `memcpy_s` 调用 | 结果 |
+|---|---|---|
+| L0-23（1107 MB，staging 4.26 GB） | ★688 次全部放行★（首条正是 `destMax=4575971444 count=4`） | 权重真的拷进去了（`count` 最大 75,497,472） |
+| L12-23（672 MB，staging ≈2.59 GB） | ★154 次全部放行★ | 同上 |
+| 小模型 g4s0（147 MB） | 无 | ★Build 0 · Predict 0★（插桩无副作用 ✓） |
+
+⇒ 第一道（§32 的 `Set Data Fail.`）**确实被绕过了** ✓ —— 但它不是唯一的坎 ✗
+
+**两个实现要点**（下次复现别踩）：
+· 故意【不】复刻 securec 的 reset 语义（失败时 `memset(dest, 0, destMax)`）——
+  那恰恰是拿到一个垃圾 `destMax` 时最危险的动作 ✓
+· 要用 `memmove` 而不是 `memcpy`（原函数有重叠检查，我们直接给出更安全的行为）✓
+
+### 33.2 第二道绕不过：`libhiai_ir.so` 里【静态链入】的 securec
+
+**真实报错**（用插桩接管 `OH_LOG_Print` 才拿到；还要先剥掉 hilog 的
+`%{public}` / `%{private}` 隐私标记，否则标准 `vsnprintf` 解析不了、消息是空的 ✗）：
+
+```
+[F] AI_INFRA: model.cpp BuildWeightMergedModelBuffer(206)::
+    "memcpy_s(reinterpret_cast<void*>(basePtr + offset), totalBufferSize - offset,
+              weightBuffer.GetData(), weightBuffer.GetSize()) == EOK"   "false, return false."
+[F] AI_INFRA: model.cpp SaveFullModel(248)::"ret"  "false, return FAIL."
+[F] NNRt_HiAIAdapter: BuildImpl from lite graph failed, failed to serialize IR model.
+[F] NNRt_HiAIAdapter: Build from lite graph failed.
+```
+
+**为什么插桩拦不到它**（结构性证据，不是猜）：
+
+```
+libhiai_ir.so       动态符号表里【没有】memcpy_s（llvm-nm -D 无输出）
+                    DT_NEEDED = libhilog_ndk.z.so / libc++_shared.so / libc.so
+                    ★也不依赖 libsec_shared★ ⇒ securec 被【静态链进去】了 ✗
+libhiai_adapter.so  动态符号表里【有】U memcpy_s ⇒ 所以能被 33.1 顶掉 ✓
+```
+
+⇒ `LD_PRELOAD` 对静态链接的 `memcpy_s` **无效** ✗
+⇒ 而且它在**同一条规则**上：`destMax = totalBufferSize - offset`，
+   即 IR 的"合并权重缓冲"一旦 > 2 GB 就返回 ERANGE ✓
+
+**对照实验（两个超限样本 + 一个未超限样本）**：
+
+| 段 | `.ms` | staging 缓冲 | 第一道 | 第二道（IR 合并权重缓冲） |
+|---|---|---|---|---|
+| L0-11 | 435 MB | ≈1.68 GB | 本来就过 ✓ | ★Build 0 · Predict 0★ ✓ |
+| L12-23 | 672 MB | ≈2.59 GB | 插桩放行 ✓ | ✗ `BuildWeightMergedModelBuffer` 断言失败 |
+| L0-23 | 1107 MB | 4.26 GB | 插桩放行 ✓（688 次） | ✗ 同上 |
+
+### 33.3 第三道（即使第二道也绕过）：protobuf 的 2 GB 硬限制
+
+`libhiai_ir.so` 里就带着 **protobuf 自己的报错串**：
+
+```
+ exceeded maximum protobuf size of 2GB:
+```
+
+并且它导出的是 protobuf 风格的序列化入口：
+
+```
+ge::GraphSerializer::SerializeTo / UnSerialize
+ge::NodeSerializer::SerializeTo / SaveSubGraphs / SaveEdge
+SerializeModelToModelDef / SerializeModelDefToBuffer / SerializeGraphDefToBuffer
+```
+
+⇒ IR（`ModelDef` / `GraphDef`，权重内联）最终要经 protobuf 序列化，
+   而 protobuf 的序列化长度是 **int32 设计**，> INT_MAX 时 protobuf 自己就拒绝 ✓
+⇒ 这是**库的设计限制**，任何符号插桩都解决不了 ✗
+（★此条为强推断，未实测★：要实测就得先绕过 33.2 那道，代价大且大概率只是把
+ 失败点往后挪到 protobuf 这一层。）
+
+### 33.4 结论
+
+```
+✓ 第一道：能绕（LD_PRELOAD 插桩 memcpy_s，实测 688/154 次放行）
+✗ 第二道：绕不过 —— libhiai_ir.so 的 securec 是静态链入的，符号插桩够不着（有结构性证据）
+✗ 第三道：原理上绕不过 —— protobuf 的 2 GB 是 int32 设计限制
+⇒ 唯一的"理论绕过"是运行时改内存（mprotect + 打补丁 / 调试器改返回码），
+  既不可交付、也很可能继续撞第三道 ✗
+★ 结论不变：分段是唯一实际路线；有效天花板 = 每段权重/IR 缓冲 ≤ 2 GB
+  ⇒ 每段 .ms ≲ 500 MB（≈4× 关系），工程上 ≤300 MB（≈≤7 层）✓
+```
+
+**顺带记录两条可复用技巧**：
+
+```
+· 想抓适配层自己的日志：插桩 OH_LOG_Print（默认 hilog 缓冲里看不到它），
+  并且必须先剥掉 %{public}/%{private} 标记，否则消息是空的 ✗
+· 想证明"某库的 securec 是静态还是动态"：看它的动态符号表有没有 memcpy_s
+  （U=动态导入⇒可插桩 / 没有⇒静态链入⇒插不进去）✓ 这比读源码还快 ✓
+```
