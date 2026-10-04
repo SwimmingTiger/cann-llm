@@ -41,6 +41,13 @@ class _Mslite:
             # ★ fp16 开关：fp32 图 + NPU 内部用 fp16 ⇒ 建图（加载）快约 3 倍 ✓
             #   注意语义：不是"要一张 fp16 的图"✗，而是允许 NPU 内部用 fp16 ✓
             ("OH_AI_DeviceInfoSetEnableFP16", None, [C.c_void_p, C.c_bool]),
+            # ★NNRt 设备 id 必须显式设置★（见 _npu_device_id 的说明）
+            ("OH_AI_GetAllNNRTDeviceDescs", C.c_void_p, [C.POINTER(C.c_size_t)]),
+            ("OH_AI_GetElementOfNNRTDeviceDescs", C.c_void_p, [C.c_void_p, C.c_size_t]),
+            ("OH_AI_GetNameFromNNRTDeviceDesc", C.c_char_p, [C.c_void_p]),
+            ("OH_AI_GetDeviceIdFromNNRTDeviceDesc", C.c_size_t, [C.c_void_p]),
+            ("OH_AI_DeviceInfoSetDeviceId", None, [C.c_void_p, C.c_size_t]),
+            ("OH_AI_DestroyAllNNRTDeviceDescs", None, [C.POINTER(C.c_void_p)]),
             ("OH_AI_ContextAddDeviceInfo", None, [C.c_void_p, C.c_void_p]),
             ("OH_AI_ModelBuildFromFile", C.c_int, [C.c_void_p, C.c_char_p, C.c_int, C.c_void_p]),
             ("OH_AI_ModelGetInputs", _TA, [C.c_void_p]),
@@ -64,6 +71,84 @@ class _Mslite:
             if at:
                 f.argtypes = at
 
+    def _npu_device_id(self):
+        """★枚举 NNRt 设备，取 NPU_* 的 device id★（只做一次；**按模型按需使用**）
+
+        ★实测（2026-10-04）两条互斥的事实★：
+          · int8（`--fmk=ONNX + WEIGHT_QUANT`）段图：**不设 device id 就 Build -1** ✗，
+            设了才 rc=0 ✓
+          · fp16 图（graphP/5 段那批）：**设了 device id 反而 Predict 失败** ✗
+            （不设才正常 ✓）
+        ⇒ 不能全局二选一 ✗ ⇒ 见 :meth:`_build`：**先按默认建，失败再用 id 重试** ✓
+        返回 None 表示没枚举到（那就只剩默认一条路 ✓）。
+        """
+        did = getattr(self, "_dev_id", "unset")
+        if did != "unset":
+            return did
+        self._dev_id = None
+        try:
+            num = C.c_size_t(0)
+            descs = self.lib.OH_AI_GetAllNNRTDeviceDescs(C.byref(num))
+            for i in range(num.value):
+                d = self.lib.OH_AI_GetElementOfNNRTDeviceDescs(descs, i)
+                nm = self.lib.OH_AI_GetNameFromNNRTDeviceDesc(d)
+                if nm and nm.startswith(b"NPU_"):
+                    self._dev_id = self.lib.OH_AI_GetDeviceIdFromNNRTDeviceDesc(d)
+                    print("    [nnrt] 选中设备 %s id=%s"
+                          % (nm.decode(), self._dev_id), flush=True)
+                    break
+            self.lib.OH_AI_DestroyAllNNRTDeviceDescs(C.byref(C.c_void_p(descs)))
+        except Exception as e:                      # noqa: BLE001
+            print("    [nnrt] 枚举设备失败（忽略）：%s" % e, flush=True)
+        return self._dev_id
+
+    def _build(self, ms: str):
+        """建模型：★先按"默认 device"建，失败再拿显式 device id 重试★
+
+        ★实测（2026-10-04）两条互斥的事实★（同一个进程、同一份 ctypes 代码）：
+          · int8（`--fmk=ONNX + WEIGHT_QUANT`）段图：**不设 device id 就 Build -1** ✗，
+            显式设了才 rc=0 ✓
+          · fp16 图（graphP、5 段那批）：**设了 device id 反而 Predict 失败** ✗，
+            不设才正常 ✓
+        ⇒ 不能全局二选一 ✗ ⇒ 只能"按模型试" ✓：先默认，失败再带 id 重建 ✓
+        （成功的选择记进 ``self._id_used[ms]``，便于排查 ✓）
+        """
+        L = self.lib
+        # ★懒枚举★：**只有默认建失败时才去枚举 device id** ✓
+        #   实测教训：一上来就 OH_AI_GetAllNNRTDeviceDescs 枚举设备，
+        #   会把后续图（graphP）的 Predict 弄坏 ✗ —— 而 fp16 那条路
+        #   本来不需要 id ⇒ 绝不能替它做枚举 ✗
+        attempts = [(False, None), (True, "lazy")]
+        rc = -1
+        for use_id, dev_id in attempts:
+            if dev_id == "lazy":
+                dev_id = self._npu_device_id()
+                if dev_id is None:
+                    break
+            ctx = L.OH_AI_ContextCreate()
+            dev = L.OH_AI_DeviceInfoCreate(_DEV_NNRT)
+            # ★ 默认打开（可用 CANN_LLM_NO_FP16=1 关掉做对照 ✓）★
+            #   实测同一张 594MB 段图：Build 4.0s → 1.3s ✓，Predict 基本不变 ✓
+            if not os.environ.get("CANN_LLM_NO_FP16"):
+                L.OH_AI_DeviceInfoSetEnableFP16(dev, C.c_bool(True))
+            if use_id:
+                L.OH_AI_DeviceInfoSetDeviceId(dev, dev_id)
+            L.OH_AI_ContextAddDeviceInfo(ctx, dev)
+            m = L.OH_AI_ModelCreate()
+            # ★--large-mem：第一次 build 之前"报到—等放行"★（见 cann_llm.large_mem.rendezvous）
+            from ..large_mem import rendezvous as _large_mem_rendezvous
+            _large_mem_rendezvous()
+            rc = L.OH_AI_ModelBuildFromFile(m, ms.encode(), _MINDIR, ctx)
+            if rc == 0:
+                if not hasattr(self, "_id_used"):
+                    self._id_used = {}
+                self._id_used[ms] = use_id
+                if use_id:
+                    print("    [nnrt] %s 需要显式 device id ⇒ 已用它建成 ✓"
+                          % os.path.basename(os.path.dirname(ms)), flush=True)
+                return m
+        raise RuntimeError("Build 失败: %s（rc=%d）" % (ms, rc))
+
     def run(self, ms: str, feeds: dict) -> dict:
         L = self.lib
         # ★ 把"加载/构建"与"推理"分开计 ★ ——
@@ -76,19 +161,9 @@ class _Mslite:
         _t0 = time.perf_counter()
         m = self._cache.get(ms)
         if m is None:
-            ctx = L.OH_AI_ContextCreate()
-            dev = L.OH_AI_DeviceInfoCreate(_DEV_NNRT)
-            # ★ 默认打开（可用 CANN_LLM_NO_FP16=1 关掉做对照 ✓）★
-            #   实测同一张 594MB 段图：Build 4.0s → 1.3s ✓，Predict 基本不变 ✓
-            if not os.environ.get("CANN_LLM_NO_FP16"):
-                L.OH_AI_DeviceInfoSetEnableFP16(dev, C.c_bool(True))
-            L.OH_AI_ContextAddDeviceInfo(ctx, dev)
-            m = L.OH_AI_ModelCreate()
-            # ★--large-mem：第一次 build 之前"报到—等放行"★（见 cann_llm.large_mem.rendezvous）
-            from ..large_mem import rendezvous as _large_mem_rendezvous
-            _large_mem_rendezvous()
-            if L.OH_AI_ModelBuildFromFile(m, ms.encode(), _MINDIR, ctx) != 0:
-                raise RuntimeError("Build 失败: %s" % ms)
+            m = self._build(ms)
+            self._cache[ms] = m
+            t_load[key] = t_load.get(key, 0.0) + (time.perf_counter() - _t0)
             self._cache[ms] = m
             t_load[key] = t_load.get(key, 0.0) + (time.perf_counter() - _t0)
         _t1 = time.perf_counter()
@@ -167,13 +242,26 @@ class Gemma4SegRunner:
         #   这样"只放某一档"的符号链接对比目录也能被正确识别 ✓
         if any(n.startswith("mseg0") for n in os.listdir(self.dir)):
             self.MERGED = True
-            # ★ 实测可行的合并切法：每段 ≤8 层（含 full 层的段更小）⇒ 每段 <2GB ✓
-            #   13/14 与共享层被拆开也没关系 —— 含 13/14 的段会输出槽，后面的段消费它 ✓
-            self.SEG_STARTS = (0, 8, 16, 24, 30)
-            self.SEG_NO = {0: 8, 8: 8, 16: 8, 24: 6, 30: 5}
-            # ★ 合并段目前只有 S=32 一版 ⇒ 尺寸必须限定为它 ✓
+            # ★段起点【从目录名推断】★：mseg0 / mseg8 / mseg12 / mseg24 … ✓
+            #   层数 = 相邻起点之差，最后一段一直到 N_LAYERS ✓
+            #   —— 以前硬编码 (0,8,16,24,30)（那是 5 段切法）✗
+            #      换个切法（例如 3 段 0-11/12-23/24-34）就认不出来 ✗
+            #   13/14 与共享层被拆开也没关系：含 13/14 的段输出槽，后面的段消费它 ✓
+            import re as _re
+            starts = []
+            for n in os.listdir(self.dir):
+                m = _re.match(r"^mseg(\d+)(?:_s\d+)?$", n)
+                if m and os.path.exists(os.path.join(self.dir, n, "seg.ms")):
+                    starts.append(int(m.group(1)))
+            starts = sorted(set(starts))
+            if not starts:
+                raise FileNotFoundError("有 mseg0* 但找不到任何 mseg*/seg.ms")
+            self.SEG_STARTS = tuple(starts)
+            self.SEG_NO = {st: (starts[i + 1] - st if i + 1 < len(starts)
+                                else self.N_LAYERS - st)
+                           for i, st in enumerate(starts)}
+            # ★尺寸只保留"段图真的存在"的那些★
             #   （否则长 prompt 会选 S=128、拿到 S=32 的图 ⇒ "输入 hidden 大小不符" ✗）
-            #   若要支持长上下文，需要另建 mseg*_s128/ ✓
             self.SIZES = tuple(S for S in self.SIZES
                                if os.path.exists(os.path.join(self.dir, self._seg_dir(0, S), "seg.ms")))
         else:
@@ -330,7 +418,10 @@ class Gemma4SegRunner:
                      "sin_sl": self.sin_sl[:S * 256 * 4],
                      "cos_fu": self.cos_fu[:S * 512 * 4],
                      "sin_fu": self.sin_fu[:S * 512 * 4]}
-            if st >= 16:
+            # ★槽位【数据驱动】★：谁声明了 sk/sv/fk/fv 就喂谁 ✓
+            #   （以前硬编码 `st >= 16`，只对 5 段切法成立 ✗；
+            #    多喂不声明用不到的键是安全的 ✓，少喂会 KeyError ✗）
+            if kv:
                 feeds.update(kv)
             for i in range(no):
                 feeds["per_layer_%d" % i] = b"".join(
