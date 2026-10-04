@@ -74,7 +74,7 @@
 |---|---|---|
 | `bin/` | `lldb`、`huawei-debug-lldb-server` | 调试与 `--large-mem` 打补丁 |
 | `lib/` | `liblldb.so` 及其依赖 | ★必须在 `LD_LIBRARY_PATH` 里★，否则 `bin/lldb` 起不来 |
-| `python3/` | `bin/python3`（推理用解释器）+ `lib/`（它的库；另含 lldb 内嵌 python 3.11 的 stdlib） | 免装 Python |
+| `python3/` | `bin/python3`（推理用解释器）+ `lib/`（它的库；另含 lldb 内嵌 python 3.11 的 stdlib） | 免装 Python；**pip 与 pytest 都在里面** |
 
 **`scripts/start_chat.sh` / `scripts/start_server.sh` 会自动处理**：把
 `<根>/bin`、`<根>/python3/bin` 放进 `PATH` **开头**，把 `<根>/lib`、
@@ -84,6 +84,14 @@
 > `python3/lib/python3.11/` 是给 **lldb 内嵌 python** 用的（`liblldb.so` 的 RUNPATH
 > 写死了 `$ORIGIN/../python3`，位置不能改），与推理用的 3.14 各占一个版本子目录，
 > 互不干扰。
+
+跑测试也开箱可用（`python3/` 里带了 pytest；`make test` 会**优先选随包解释器**）：
+
+```sh
+make test                                              # pytest（自动挑解释器）
+make test TEST_PY=/path/to/python3                     # 指定解释器
+python3/bin/python3 -m unittest discover -s tests -t . # 不用 pytest 也能跑
+```
 
 ## 大模型分段与 `--large-mem`
 

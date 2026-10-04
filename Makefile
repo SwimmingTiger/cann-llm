@@ -1,5 +1,11 @@
 BACKEND ?= cann
-PY ?= python3
+
+# ★随包解释器优先★
+#   发布包里带 python3/bin/python3（推理与测试都用它，且它自带 pytest）；
+#   纯源码树里没有这个目录 ⇒ $(wildcard) 为空 ⇒ 回落到 PATH 上的 python3 ✓
+#   想强制指定：make test PY=/path/to/python3  或  make test TEST_PY=/path/to/python3
+BUNDLED_PY := $(firstword $(wildcard python3/bin/python3))
+PY ?= $(if $(BUNDLED_PY),$(BUNDLED_PY),python3)
 export PYTHONPATH := src
 
 .PHONY: test test-v test-unittest lint chat server clean
@@ -7,6 +13,7 @@ export PYTHONPATH := src
 # 跑测试用的解释器：依次尝试，取第一个【真能收集整套测试】的。
 # ★ 只看 `import pytest` 不够 —— 有的解释器 import 得动、收集阶段却会崩，
 #   所以这里用 --collect-only 实跑一遍来判定。
+#   $(PY) 就是第一个候选（默认=随包解释器，见上）⇒ 发布包里自动用它 ✓
 #   指定解释器：make test TEST_PY=/path/to/python
 TEST_PY ?=
 TEST_CANDIDATES = $(if $(TEST_PY),$(TEST_PY),$(PY) python3 /data/service/hnp/bin/python3 python)
