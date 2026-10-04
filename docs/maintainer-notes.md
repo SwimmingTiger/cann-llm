@@ -2354,3 +2354,85 @@ x8 = libai_fmk_hcl_model_runtime.so`HIAI_HCL_ModelBuilder_BuildV2
 `cbnz` 跳向【错误】路径（所以 `nop` 掉即可 ✓），而 `memmove_s` 是
 `b.hs` 跳向【正常】路径（`nop` 反而会掉进 ERANGE ✗）——
 所以要改成无条件跳转 `b 正常路径` ✓。
+
+---
+
+## 36. ★★★★★ "no runtime support" 的对照实验：环境/装载完全一致，差别只在运行时对模型的裁决 ★★★★★
+
+§35 把失败点定位到 `/vendor` 的 HCL 运行时。本节做**成功样本 vs 失败样本**的逐行对照，
+并排除掉"环境/装载有问题"这条岔路。
+
+### 36.1 关键技巧：默认被级别过滤掉的日志，看不到真相
+
+`AI_Log_Print` 在打日志前会先问 `OH_LOG_IsLoggable(domain, tag, level)`，
+**不允许就直接丢弃、连 `OH_LOG_Print` 都不调** ✗ ⇒ 我们的钩子完全看不见这些消息 ✗。
+
+把 `OH_LOG_IsLoggable` 也顶掉（恒返回 1）之后，整条 DDK 路径就现形了 ✓：
+
+```c
+int OH_LOG_IsLoggable(unsigned int domain, const char *tag, int level) { return 1; }
+```
+
+（顺带给日志量封顶，避免刷爆磁盘。）
+
+### 36.2 两次运行的前置步骤【逐行一致】
+
+```
+[W] model_manager_impl.cpp CreateModelManager(530)::"DDK pipe is HCL."
+[W] hiai_plugin_version.c HIAI_MR_GetVersion(104)::"version is 800.636.120.010"
+[W] model.cpp BuildWeightMergedModelBuffer(209)::"Build success!"          ← 补丁有效
+[I] model_type_util.cpp GetModelType(45)::"model type: 7"
+[I] hiai_model_runtime.c HIAI_ModelRuntime_LoadSo(324)::
+    "dlopen libhiai_hcl_model_runtime.so fail: No such file or directory."  ← ★成功样本里也有★
+[I] hiai_model_runtime.c HIAI_ModelRuntime_LoadFromAllSymbols(215)::"...success."
+```
+
+★注意★：那条 `dlopen libhiai_hcl_model_runtime.so fail` **在成功样本里同样出现** ✓
+（HCL 存根的真实文件名是 `libai_fmk_hcl_model_runtime.so`，DDK 先试一个旧名，
+失败后走 `LoadFromAllSymbols` 成功）⇒ **它不是故障，是正常的回退路径** ✗
+（§35.3 曾把它当嫌疑，这里更正 ✓）
+
+### 36.3 差别只在这一步
+
+| 样本 | `.ms` | staging | 后续日志 |
+|---|---|---|---|
+| c12（层 12-23） | 672 MB | ≈2.59 GB | `model_builder_impl.cpp BuildModel(42)::"build model success."` ✓ |
+| L0-23（层 0-23） | 1107 MB | 4.26 GB | `ModelRuntimeRepo_TryBuild(154)::"no runtime support the Model."` ✗<br>`model_builder_impl.cpp BuildModel(34)::"build model failed."` ✗ |
+
+⇒ **环境、装载、权重合并缓冲、模型类型全都一样**；唯一变量是模型尺寸，
+   而裁决结果不同 ⇒ 卡点确实在"该 runtime 能不能吃下这个模型" ✓
+
+### 36.4 运行时是谁、怎么被调的（ptrace 实测）
+
+```
+libhiai.so 0x6014c（ModelRuntimeRepo_TryBuild）：i=0..2 逐个 runtime
+   0x60db4 TryBuildOne → runtime+0xe0/+0x8 的函数指针
+   0x60df4 blr x8
+实测 x8 = libai_fmk_hcl_model_runtime.so`HIAI_HCL_ModelBuilder_BuildV2（/vendor/lib64/passthrough/）
+```
+
+在该次运行里另外两个断点**没有命中** ✓：
+```
+breakpoint HIAI_HCL_ModelBuilder_Build        （薄库导出，0x10448）  ✗ 未命中
+breakpoint HIAI_HCL_ModelBuilder_Build_Impl   （实现库 0x12d7dc）    ✗ 未命中
+```
+⇒ 薄库的 `BuildV2` 直接走**内部派发器**（0x1051c，它 `dlopen/dlsym` 实现库、
+并读 `GetParameter@1.0`），而不是走导出的 `Build`；
+  实现库里真正被调的是 **`HIAI_HCL_ModelBuilder_BuildV2_Impl`（0x12de7c）**，
+  不是我们先前反汇编的 `Build_Impl`（那是 V1 入口，所以它的入口日志没出现 ✓）✗
+
+### 36.5 当前结论与下一步
+
+```
+✓ 已排除：securec 的 2 GB（四个检查全打掉仍失败 ✓）
+✓ 已排除：环境/装载（成功样本有完全相同的启动序列 ✓）
+✓ 已确认：卡点在 HCL 运行时对模型的裁决，边界在 (2.59, 4.26] GB staging 之间 ✓
+★ 首要嫌疑仍是 §34.3 的 32 位截断：4.26 GB > 2³² = 4.295 GB，
+  4,575,984,244 − 2³² = 281,016,948 —— 若某处按 32 位存长度，
+  模型在运行时眼里就是"对不上"的 ✗（★仍未验证★）
+⇒ 下一步二选一：
+  (a) 在 HIAI_HCL_ModelBuilder_BuildV2_Impl（0x12de7c）下断，追它哪一步返回非 0；
+  (b) 造一个 staging 落在 3.0~4.2 GB 的段（例如层 0-17 左右）来二分 ——
+      若 ≤4.295 GB 能过、>4.295 GB 不过，就是 2³² 截断，且【每段 .ms 上限约 1 GB】
+      （比不碰系统库时的 ~500 MB 高一倍 ✓）
+```
