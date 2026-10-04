@@ -2164,3 +2164,98 @@ SerializeModelToModelDef / SerializeModelDefToBuffer / SerializeGraphDefToBuffer
 · 想证明"某库的 securec 是静态还是动态"：看它的动态符号表有没有 memcpy_s
   （U=动态导入⇒可插桩 / 没有⇒静态链入⇒插不进去）✓ 这比读源码还快 ✓
 ```
+
+---
+
+## 34. ★★★★★ 用调试器在运行时打掉两处检查 ⇒ 672 MB 的段（staging 2.59 GB）直接跑通；1107 MB 的失败点前移到 DDK ★★★★★
+
+§33 的结论是"第一道能绕、后两道绕不过"。**§33.3（protobuf 那条）被本节实验否掉了** ✗ ——
+在运行时把两处 `cbnz` 改成 `nop` 之后，**672 MB 的段 Build 0 · Predict 0**，
+protobuf 的 2 GB **根本没触发**。
+
+### 34.1 改哪两条指令
+
+静态定位（`llvm-objdump` 反汇编 + 从断言串反推调用点）：
+
+```
+① libhiai_ir.so 里【静态链入】的 memcpy_s（不是导出符号）：
+     调用点：ge::Model::SaveFullModel(ge::Buffer&) 内 0x44a68（4 参数 + 返回值判 0）
+     函数体：0xc16e4
+       c16e4: cbz  x3, fail          ; count==0
+       c16e8: lsr  x8, x1, #31       ; ★x1 = destMax★
+       c16ec: cbnz x8, fail          ; ★destMax ≥ 2GB ⇒ 失败（就是这条）★
+       c16f0: cbz  x2, fail
+       c16f4: cbz  x0, fail
+       c16f8: cmp  x3, x1 / b.hi fail ; count > destMax（保留）
+   ⇒ 编译器把 `destMax > 0x7fffffff` 优化成 `destMax >> 31` 测试，
+     所以按常量 0x7fffffff 搜是搜不到的 ✗（这是个坑）
+
+② libsec_shared.z.so 的导出 memcpy_s（第一道，适配层用的那个）：
+     符号地址 0x3e34，同样是 `lsr x9, x8, #31` ⇒ `cbnz x9` 在 ★0x3e50★
+```
+
+补丁就是一条 `nop`（`1f 20 03 d5`）：
+
+```
+memory read  -s 1 -f x -c 4 <base_ir + 0xc16ec>     # 原字节 e8 02 00 b5（cbnz x8）
+memory write -s 1 <base_ir + 0xc16ec> 0x1f 0x20 0x03 0xd5
+memory read  -s 1 -f x -c 4 <base_sec + 0x3e50>    # 原字节 09 03 00 b5（cbnz x9）
+memory write -s 1 <base_sec + 0x3e50> 0x1f 0x20 0x03 0xd5
+```
+
+**可行性要点**（都实测过）：
+```
+· 文本段是 r-xp，但 ptrace 仍可写 ⇒ lldb 的 memory write 直接成功 ✓
+· 补丁不影响 BTI/CFI（改的是函数体中间，不是入口）✓
+· 保留 count > destMax / NULL / 重叠检查，只拿掉"destMax ≥ 2GB"这一条 ✓
+· 基址用 image list -o -f <lib> 取（每次运行 ASLR 不同，必须重取）✓
+```
+
+### 34.2 实测结果
+
+| 样本 | `.ms` | staging | 打了补丁之后 |
+|---|---|---|---|
+| **c12（层 12-23）** | **672 MB** | **≈2.59 GB** | ★**Build 0 · Predict 0**★（输入 18 / 输出 5，全部成功）|
+| L0-23（层 0-23） | 1107 MB | 4.26 GB | ✗ **失败点前移**（见 34.3）|
+
+⇒ 只改内存里的 8 个字节，**一个原本 Build -1 的大段就在 NPU 上跑通了** ✓
+（没有改任何系统文件、没有落盘、没有用 memcpy_s 插桩 ✓）
+
+### 34.3 1107 MB 的段：失败点前移到 DDK 的 runtime 选择
+
+```
+[F] HIAI_DDK_MSG: hiai_model_runtime_repo.c ModelRuntimeRepo_TryBuild(154)::"no runtime support the Model."
+[F] HIAI_DDK_MSG: model_builder_impl.cpp BuildModel(34)::"build model failed."
+[F] NNRt_HiAIAdapter: HiaiExecutorImpl::model build fail !.
+[F] NNRt_HiAIAdapter: Build from lite graph failed.
+```
+
+```
+★关键：IR 序列化【过了】—— libhiai_ir.so 里那句 protobuf
+  "exceeded maximum protobuf size of 2GB" ★没有出现★ ✗
+⇒ §33.3 那条"protobuf 会拦住"是【错的】：IR 里的权重并没有以 >2GB 的
+  单个 protobuf 消息形式出现（至少这个尺寸下不是）✗
+```
+
+**新的边界**：介于 **2.59 GB（过）** 与 **4.26 GB（不过）** 之间，
+而且 `0xFFFFFFFF = 4.294 GB` 正好落在这个区间里 ⇒ **怀疑某处按 32 位截断**
+（4,575,984,244 − 2³² = 281,016,948，模型在 DDK 眼里就是个"对不上"的模型）
+⇒ 但这【只是怀疑，未验证】：DDK（`hiai_model_runtime_repo.c`）是闭源的，
+   要坐实得再造一个 staging 刚好 3.8~4.2 GB 的段来二分 ✗
+
+### 34.4 意义与边界（别把研究结论当交付方案）
+
+```
+✓ 结论 1：那两道 2 GB 检查【不是】物理上限，是可以绕的（§33.1 的插桩、本节的运行时 nop 都行）
+✓ 结论 2：绕掉之后，天花板至少抬到 ★2.59 GB staging（672 MB 段）★以上
+          ⇒ 现役 9 段（≤264 MB）与 L0-11（435 MB）之外，
+            ★L12-23（672 MB）这种也能跑★，即"更少的段"在技术上成立 ✓
+✗ 结论 3：但到 ~4 GB 量级会撞上 DDK 的 runtime 选择（"no runtime support the Model"），
+          这一层是闭源 DDK，不可控 ✗
+★ 交付口径【不变】：不碰系统库时，每段 .ms ≲ 500 MB（§32.4）；
+  运行时补丁属【研究/验证手段】，不是一个可以随 app 发布的方案 ✗
+```
+
+**如果要让 app 侧也用上（未做，仅供参考）**：可以不用调试器——在 `LD_PRELOAD` 的
+构造函数里 `dl_iterate_phdr` 找到 `libhiai_ir.so` 基址、`mprotect` 那一页、
+写 `nop`、再还原保护位 ✓。但那属于"进程内自打补丁"，风险与合规都要另行评估 ✗
