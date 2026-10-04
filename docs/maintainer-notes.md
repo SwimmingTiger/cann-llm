@@ -2753,3 +2753,31 @@ python3/  bin/python3（推理用，3.14）+ lib/（含 lldb 内嵌 python 3.11 
 `liblldb.so` 的 RUNPATH 是 `$ORIGIN/../lib:$ORIGIN/../python3/lib`，且内嵌 python 按
 `$ORIGIN/../python3` 推算 `PYTHONHOME` ⇒ **`python3/` 这个名字和位置不能改**，
 `lib/python3.11/`（lldb 用）与 `lib/python3.14/`（推理用）各占一个版本子目录 ✓
+
+### 40.6 落地后修掉的两个实测 bug（真机跑 `--large-mem` 才暴露）
+
+```
+① ★SBListener.WaitForEvent 的秒数是 uint32_t（整数），传 float 直接 TypeError★
+     listener.WaitForEvent(1.0, event)
+     → TypeError: in method 'SBListener_WaitForEvent', argument 2 of type 'uint32_t'
+   为什么单测/短测没抓到：**它只在"进程活得够久"时才走到那行** ——
+   短命探针（1~2 秒就退出）还没轮到就结束了 ⇒ 长驻的对话/服务进程必踩 ✗
+   ⇒ 改成 WaitForEvent(1, event)；并在 tests/test_large_mem.py 里加**静态检查**
+     （ast 扫源码，断言该参数是 int 字面量）—— 这类 SWIG 类型坑用假 lldb 也照不出来 ✓
+
+② ★nnrt 后端下 libhiai_ir.so 是【第一次 BuildFromFile 之后】才加载的★
+   （实测日志：`✗ 没找到已加载的 libhiai_ir.so` ⇒ 那处补丁被跳过 ✗）
+   而 hiai/NDK 路径下它在首次 Build 时就已经在了 ✓ —— 两条路径加载时机不同。
+   ⇒ 两处改动：
+     · 模块没加载【不算错误】，只记 "pending"，断点先别禁用；
+     · run 的等待循环里同时监听 SBTarget.eBroadcastBitModulesLoaded，
+       新模块一出现就立刻补（幂等，只有真补上才打印）✓
+   实测（用户的 5 段 gemma4 nnrt 模型）：
+     第 1 次 Build：libsec_shared 三处 ✓（libhiai_ir 等到模块加载）
+     第 2 次 Build：libhiai_ir ✓ + 另外三处"= 已补丁（跳过）" ⇒ ★4/4 全部生效★
+     模型照常输出 bot> 2 ✓
+   ★注意★：nnrt 下真正卡住大段的是**动态导入的 libsec_shared.memcpy_s**
+     （适配层搬权重那条），它在首次 Build 前就打好 ✓；
+     libhiai_ir 里那份静态 memcpy_s 属 IR/hiai 管线，晚一点补不影响大段单跑 ✓
+     （c12 672 MB 单跑实测：首次 Build 即 4/4、rc=0 ✓）
+```

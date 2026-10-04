@@ -81,21 +81,29 @@ def _write(debugger, addr, data):
     debugger.HandleCommand("memory write -s 1 0x%x %s" % (addr, vals))
 
 
-def patch_all(debugger):
-    """按表打补丁；返回 ``(成功数, 跳过数)``。"""
+_STATE = {"pending": 0}   # 还有几处"模块没加载"而没补上（模块一加载就重试）
+
+
+def patch_all(debugger, quiet=False):
+    """按表打补丁；返回 ``(成功数, 跳过数)``。
+
+    ``quiet=True``：只在**这次真的补上了东西**时才打印（用于轮询重试，避免刷屏）。
+    """
     table = _table()
     if table is None:
         return 0, 0
 
     target = debugger.GetSelectedTarget()
     process = target.GetProcess()
-    done = skipped = 0
+    done = skipped = missing = 0
+    applied_now = []
 
     for p in table:
         base = _module_base(target, p.module)
         if base is None:
-            _p("[large-mem] ✗ 没找到已加载的 %s —— 跳过 %s" % (p.module, p.what))
-            skipped += 1
+            # ★不是错误★：nnrt 后端下 libhiai_ir.so 是**之后**才随 DDK 加载的，
+            #   这里先记下，等 modules-loaded 事件再补（见 run）✓
+            missing += 1
             continue
 
         addr = base + p.offset
@@ -106,7 +114,8 @@ def patch_all(debugger):
             continue
 
         if cur == p.patch:                       # 幂等：已经打过了 ✓
-            _p("[large-mem] = %-20s +0x%05X 已补丁（跳过）" % (p.module, p.offset))
+            if not quiet:
+                _p("[large-mem] = %-20s +0x%05X 已补丁（跳过）" % (p.module, p.offset))
             done += 1
             continue
         if cur != p.expect:
@@ -122,10 +131,12 @@ def patch_all(debugger):
         _write(debugger, addr, p.patch)
         back = _read(process, addr, len(p.patch))
         if back is not None and back == p.patch:
-            _p("[large-mem] ✓ %-20s +0x%05X  %s → %s 已就位  （%s）"
-               % (p.module, p.offset,
-                  " ".join("%02x" % b for b in cur),
-                  " ".join("%02x" % b for b in bytearray(p.patch)), p.what))
+            applied_now.append("%s+0x%05X %s" % (p.module, p.offset, p.what))
+            if not quiet:
+                _p("[large-mem] ✓ %-20s +0x%05X  %s → %s 已就位  （%s）"
+                   % (p.module, p.offset,
+                      " ".join("%02x" % b for b in cur),
+                      " ".join("%02x" % b for b in bytearray(p.patch)), p.what))
         else:
             _p("[large-mem] ✗ %s+0x%05X 写入后回读不一致 ⇒ 这处没生效 ✗"
                % (p.module, p.offset))
@@ -133,7 +144,13 @@ def patch_all(debugger):
             continue
         done += 1
 
-    _p("[large-mem] 补丁结果：成功 %d / 跳过 %d（共 %d 处）" % (done, skipped, len(table)))
+    _STATE["pending"] = missing
+    if applied_now and quiet:
+        _p("[large-mem] ✓ 新加载的模块上补了 %d 处：%s"
+           % (len(applied_now), "；".join(applied_now)))
+    if not quiet:
+        _p("[large-mem] 补丁结果：成功 %d / 跳过 %d / 等模块加载 %d（共 %d 处）"
+           % (done, skipped, missing, len(table)))
     return done, skipped
 
 
@@ -141,9 +158,14 @@ def on_build(frame, bp_loc, internal_dict):
     """`OH_AI_ModelBuildFromFile` 命中时打补丁，然后放行（返回 False = 继续）。"""
     debugger = frame.GetThread().GetProcess().GetTarget().GetDebugger()
     _p("")
-    _p("[large-mem] 命中 OH_AI_ModelBuildFromFile —— 开始打补丁（只打这一次）")
+    _p("[large-mem] 命中 OH_AI_ModelBuildFromFile —— 开始打补丁")
     patch_all(debugger)
-    bp_loc.GetBreakpoint().SetEnabled(False)
+    if _STATE["pending"]:
+        # ★还有模块没加载★（nnrt 后端下 libhiai_ir.so 就是之后才来的）——
+        #   断点先留着，等模块加载事件（run 里轮询）补上 ✓
+        _p("[large-mem] 还有 %d 处要等模块加载，稍后自动补 ✓" % _STATE["pending"])
+    else:
+        bp_loc.GetBreakpoint().SetEnabled(False)
     _p("[large-mem] 放行，进程照常运行 ✓")
     return False
 
@@ -183,8 +205,11 @@ def run(debugger=None, command=None, exe_ctx=None, result=None, internal_dict=No
     """
     target = debugger.GetSelectedTarget()
     proc = target.GetProcess()
-    listener = lldb.SBListener("large-mem-exit")
+    listener = lldb.SBListener("large-mem-watch")
     proc.GetBroadcaster().AddListener(listener, lldb.SBProcess.eBroadcastBitStateChanged)
+    # ★模块加载事件★：nnrt 后端下 libhiai_ir.so 在【第一次 BuildFromFile 之后】
+    #   才随 DDK 载入 ⇒ 必须在它出现时立刻补上，否则权重拷贝那步已经过了 ✗
+    target.GetBroadcaster().AddListener(listener, lldb.SBTarget.eBroadcastBitModulesLoaded)
 
     _install_bp(debugger)
     _p("[large-mem] 放行…")
@@ -194,7 +219,14 @@ def run(debugger=None, command=None, exe_ctx=None, result=None, internal_dict=No
             lldb.eStateCrashed, lldb.eStateInvalid}
     event = lldb.SBEvent()
     while proc.GetState() not in done:
-        listener.WaitForEvent(1.0, event)     # 超时也继续看状态（有的 stop 不发事件）
+        # ★第 2 个参数是 uint32_t（**整数**秒）★
+        #   传 1.0（float）会直接
+        #     TypeError: in method 'SBListener_WaitForEvent', argument 2 of type 'uint32_t'
+        #   —— 实测：短命进程可能还没轮到这行就退出了，长驻的对话/服务进程必踩 ✗
+        listener.WaitForEvent(1, event)
+        if _STATE["pending"]:
+            # 有新模块了？重试一下（幂等；只有真补上才会打印）
+            patch_all(debugger, quiet=True)
 
     status = proc.GetExitStatus()
     _p("[large-mem] 被调试进程退出码 = %d" % status)

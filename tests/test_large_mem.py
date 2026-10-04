@@ -10,6 +10,7 @@
    单测把它钉住，防止以后"顺手改成 nop"。
 3. argv 指向的**编排脚本与 lldb 脚本必须真的在仓库里**（发布包里也要在）。
 """
+import ast
 import os
 import sys
 import tempfile
@@ -184,6 +185,36 @@ class TestBuildLargeMemArgv(unittest.TestCase):
             argv, hints, err = large_mem.build_large_mem_argv(sys.executable, ["-m", "x"])
         self.assertIsNone(argv)
         self.assertIn("lldb", err)
+
+
+class TestLldbScriptApiUsage(unittest.TestCase):
+    """lldb 的 SWIG 接口对参数类型很挑 —— 静态查几处已知的坑，防回归。
+
+    实测踩过：`SBListener.WaitForEvent(1.0, event)` 里第二个参数是 **uint32_t**，
+    传 float 直接
+
+        TypeError: in method 'SBListener_WaitForEvent', argument 2 of type 'uint32_t'
+
+    ★而它只在"进程活得够久"时才暴露★：短命进程还没轮到那行就退出了 ⇒
+    单测里跑个假 lldb 也照不出来，所以这里做静态检查 ✓
+    """
+
+    def _calls(self, attr):
+        with open(large_mem.large_mem_script_path(), encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        return [n for n in ast.walk(tree)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == attr]
+
+    def test_waitforevent_gets_int_seconds(self):
+        calls = self._calls("WaitForEvent")
+        self.assertTrue(calls, "脚本里应当有 WaitForEvent 调用")
+        for call in calls:
+            self.assertTrue(call.args, "WaitForEvent 必须给超时参数")
+            arg = call.args[0]
+            self.assertIsInstance(arg, ast.Constant, "超时应当是字面量")
+            self.assertIsInstance(arg.value, int, "★超时必须是 int（uint32_t），不能是 float★")
+            self.assertNotIsInstance(arg.value, bool)
 
 
 if __name__ == "__main__":
