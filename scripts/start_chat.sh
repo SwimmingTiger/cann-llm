@@ -7,7 +7,7 @@
 #   scripts/start_chat.sh -d <模型目录> --lldb                  # 在调试器下跑（抓崩溃）
 #   scripts/start_chat.sh -d <模型目录> --large-mem             # ★自动打「大模型补丁」★
 #       经 gdbserver+lldb 在运行时把几处 2 GiB 上限检查改成 nop ⇒ 单段 .ms 上限
-#       从 ≈545 MB 提到 ≈1.09 GB（详见 docs/maintainer-notes.md §32–§39）。
+#       从 ≈545 MB 提到 ≈1.09 GB（详见 docs/maintainer-notes.md §32–§40）。
 #       全自动、只改内存不动磁盘；属验证手段，不是交付方案 ✗
 #
 # 本脚本只做一件事：**找到一个与引擎 libc 兼容的 python，然后把参数原样转发**。

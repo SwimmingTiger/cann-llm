@@ -229,7 +229,7 @@ _USAGE = """用法: scripts/start_server.sh [选项]
                         找不到会警告并建议从 CodeArts IDE 的终端运行
       --large-mem       ★自动打「大模型补丁」★：经 gdbserver+lldb 在运行时把几处
                         2 GiB 上限检查改成 nop，让单段 .ms 上限从 ≈545 MB 提到
-                        ≈1.09 GB（详见 docs/maintainer-notes.md §32–§39）。
+                        ≈1.09 GB（详见 docs/maintainer-notes.md §32–§40）。
                         全自动、不需要人工敲 lldb 命令；补丁只改内存、不动磁盘
                         （属验证手段，不是交付方案 ✗）；不能和 -B 一起用
       --status          查看状态
