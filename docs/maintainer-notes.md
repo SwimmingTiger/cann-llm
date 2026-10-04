@@ -2503,3 +2503,103 @@ L0-23 的 staging = 4.26 GB > 2³² = 4.295 GB，而 c12 的 2.59 GB 在 2³² �
    能过 ⇒ 就是 2³²，且【每段 .ms 上限约 1 GB】（比不碰系统库的 ~500 MB 高一倍 ✓）
    不过 ⇒ 上限更低，继续在实现函数里找那处比较
 ```
+
+---
+
+## 38. ★★★★★ 确切限制找到了：UnifiedModel 头里的长度字段是【32 位】，模型 > 4 GiB 必被截断 ★★★★★
+
+§37 把失败收敛到 `HIAI_HCL_ModelBuilder_BuildV2_Impl`。本节把它钉到**一条比较指令**上，
+并**实测出被截断的数值**——不是猜的。
+
+### 38.1 完整调用链（ptrace 逐层下断实测）
+
+```
+libhiai.so : ModelRuntimeRepo_TryBuild → TryBuildOne → blr x8
+  x8  = libai_fmk_hcl_model_runtime.so : HIAI_HCL_ModelBuilder_BuildV2
+        └─ GetBuildSymbol(...) + 0x74 : blr x22
+             x22 = ★libai_fmk_hcl_model_runtime_impl.so : HIAI_HCL_ModelBuilder_BuildV2_Impl★
+                   ├─ CheckInputParam(name, data, size, out)   → 返回 1（通过 ✓）
+                   ├─ hiai::UnifiedModel::UnifiedModel(obj, data, size, 0)
+                   └─ ldrb w8,[obj+0x130]; cbnz w8 → 继续
+                      ★实测 w8 = 0 ⇒ 判为"非法" ⇒ 直接返回 1 ⇒ "no runtime support"★
+```
+
+`UnifiedModel` 的合法性就写在这一个字节上（impl 0xa27b0）：
+
+```
+a27d8: bl   0xa27f4          ; 校验子函数：0 = 合法、非 0 = 非法
+a27dc: cbnz w0, a27e8        ; 非 0 ⇒ 跳过
+a27e0: mov  w8,#1; strb w8,[x19,#0x130]   ; ★合法才写 1★（obj+0x130 正是 [sp+0x4b8]）
+```
+
+### 38.2 那条比较：头里的长度字段是 u32
+
+校验体再进一层（impl 0xa288c），关键就四条：
+
+```
+a28b4: ldr  x9,  [x0, #0x8]      ; x9 = size（64 位）
+a28d8: ldr  w21, [x8, #0x4c]     ; ★头里偏移 0x4c 的长度字段，32 位★
+a28dc: add  x10, x21, #0x100     ; x10 = (u32)字段 + 0x100
+a28e0: cmp  x10, x9
+a28e4: b.ne 0xa2a00              ; ★不等 ⇒ 报错 ⇒ 校验返回非 0 ⇒ 非法★
+```
+
+### 38.3 实测数值（决定性）
+
+在 `BuildV2_Impl` 里读出 `UnifiedModel` 对象的 `(data, size)` 与模型头：
+
+```
+obj->data = 0x0000005b56201ac0
+obj->size = 0x0000000110c9bbc8 = 4,576,119,752 ≈ 4.262 GiB     ★ > 2³² = 4,294,967,296 ★
+magic @ data      = 0x444f4d49                                  （"MODI"，合法 ✓）
+head  @ data+0x4c = 0x10c9bac8                                  ← 【32 位字段】
+size − 0x100      = 0x110c9bac8
+0x110c9bac8 & 0xFFFFFFFF = ★0x10c9bac8★  ← 与头里的字段【逐位一致】⇒ 就是截断值 ✓✓
+```
+
+⇒ **结论（确切的限制）**：
+
+```
+★模型头里的总长度字段是 32 位（u32）★：
+   校验要求 (u32)head[0x4c] + 0x100 == size(64 位)
+   一旦模型 > 4 GiB，写入方只能存下低 32 位 ⇒ 必然不等 ⇒ UnifiedModel 判非法
+   ⇒ BuildV2_Impl 静默返回 1 ⇒ ModelRuntimeRepo_TryBuild 打 "no runtime support the Model."
+★这是【格式/序列化限制】，不是可以"改掉"的策略限制★
+```
+
+### 38.4 那能不能把这处比较也 patch 掉？
+
+能改（`a28e4: b.ne` 写成 `nop` 即可），但**没有意义** ✗：
+
+```
+· 该字段随后被【存进对象】并用在下游：a2940: str w21,[x19,#0x5c]
+  ⇒ 下游拿到的是 0x10C9BAC8（281 MB），而真实模型是 4,576,119,752（4.26 GiB）
+  ⇒ 尺寸/偏移全错 ⇒ 大概率崩溃或【静默的错误结果】，而不是"跑通" ✗
+· 也就是说：模型本身是【自相矛盾的】，不是被某条策略拦下的 ✓
+```
+
+### 38.5 真正的天花板（把三条限制合起来）
+
+| 层次 | 限制 | 来源 | 可绕过？ |
+|---|---|---|---|
+| ① 权重缓冲拷贝 | `destMax ≤ 0x7fffffff`（2 GiB−1） | securec `memcpy_s`×2 + `memset_s` + `memmove_s` | ✓ 可（§32–34：插桩或 ptrace 改 4 条） |
+| ② 同上（另一份代码） | 同① | `libhiai_ir.so` 里静态链入的 securec | ✓ 可（ptrace 改 `cbnz`） |
+| **③ 模型头长度字段** | **u32 ⇒ 模型必须 < 4 GiB** | `UnifiedModel` 头格式（impl 0xa28d8-e4） | ✗ **不可**（改了只会让自相矛盾的模型继续往下走） |
+
+⇒ **实际天花板 = 送给运行时的 IR/UnifiedModel 必须 < 4 GiB**。
+   而 IR 的大小 ≈ staging 缓冲（≈ 4× `.ms`，因为权重按 fp32 展开）：
+```
+   IR ≈ staging + 0x100 ⇒ 要求 3.94 × |.ms| < 2³²
+   ⇒ ★每段 .ms ≲ 1.06 GB★（相对"不碰系统库"时的 ~520 MB 高一倍 ✓）
+   实测锚点：c12 = 672 MB → IR ≈ 2.59 GB ✓ 通过；L0-23 = 1107 MB → IR 4.576 GB ✗ 失败
+```
+
+### 38.6 一个仍未解释的现象（如实记录）
+
+实现库 `libai_fmk_hcl_model_runtime_impl.so` 的一堆日志（入口行 198 "start to buildV2 model by hcl"、
+以及上面那条校验失败的分支）**在我们的日志钩子里一条都没出现** ✗
+（日志里只有 `NNRt_HiAIAdapter` 与 `HIAI_DDK_MSG` 两种 tag）。
+已知：该库**动态导入** `AI_Log_Print`（`U`），而全进程只有 `libhiai_ir.so` 定义它（`T`）；
+`AI_Log_Print` 内部会调 `OH_LOG_IsLoggable`（我们已强制返回 1）与 `OH_LOG_Print`（已挂钩）✓
+⇒ 说明这些消息在 `AI_Log_Print` 内部还有一道我们没接上的过滤（例如按 tag/域的白名单），
+   ★但本节的所有结论都不依赖日志——全部由寄存器/内存实测得到 ✓★
