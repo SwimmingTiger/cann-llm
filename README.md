@@ -66,6 +66,51 @@
 > 垫片运行，把 musl 版引擎加载进来会**直接段错误**。脚本在发现这类解释器时会
 > 逐个跳过并说明原因。
 
+### 发布包自带的 `bin/` `lib/` `python3/`
+
+从发布包解出来的目录里除了源码，还有三个自带资产的目录（源码树里没有，属正常）：
+
+| 目录 | 内容 | 用途 |
+|---|---|---|
+| `bin/` | `lldb`、`huawei-debug-lldb-server` | 调试与 `--large-mem` 打补丁 |
+| `lib/` | `liblldb.so` 及其依赖 | ★必须在 `LD_LIBRARY_PATH` 里★，否则 `bin/lldb` 起不来 |
+| `python3/` | `bin/python3`（推理用解释器）+ `lib/`（它的库；另含 lldb 内嵌 python 3.11 的 stdlib） | 免装 Python |
+
+**`scripts/start_chat.sh` / `scripts/start_server.sh` 会自动处理**：把
+`<根>/bin`、`<根>/python3/bin` 放进 `PATH` **开头**，把 `<根>/lib`、
+`<根>/python3/lib` 放进 `LD_LIBRARY_PATH` **开头**；候选解释器枚举时也会优先
+选中随包的 `python3/bin/python3` ✓ 所以发布包解出来即可用，无需手工配环境。
+
+> `python3/lib/python3.11/` 是给 **lldb 内嵌 python** 用的（`liblldb.so` 的 RUNPATH
+> 写死了 `$ORIGIN/../python3`，位置不能改），与推理用的 3.14 各占一个版本子目录，
+> 互不干扰。
+
+## 大模型分段与 `--large-mem`
+
+引擎在适配层用 securec 的 `memcpy_s` 一族搬权重，而它们的 `destMax` 有
+**2 GiB−1** 的硬上限 ⇒ **不处理时单段 `.ms` 只能到 ≈545 MB（≈520 MiB）**。
+
+`--large-mem` 会在启动时经 `gdbserver` + `lldb` **自动把这几处上限检查在运行时
+改成 `nop`**（只改进程内内存、不动磁盘），随后单段上限上移到模型头里的 32 位长度
+字段：**≈1.09 GB（≈1.02 GiB）**。
+
+```sh
+scripts/start_chat.sh -d <模型目录> --large-mem
+scripts/start_server.sh -d <模型目录> --large-mem      # 不能与 -B 同用
+```
+
+| 单段 `.ms` | 不处理 | `--large-mem` |
+|---|---|---|
+| 435 MB | ✓ | ✓ |
+| 672 MB | ✗ `Build rc=-1` | ✓ |
+| 730 MB | ✗ | ✓ |
+| ≈1.09 GB | ✗ | ✗（模型头 32 位长度字段的硬墙） |
+
+> ⚠️ 这是**实验特性**：它改的是系统库在进程里的副本（靠 ptrace/调试器写内存），
+> 属验证手段而非交付方案；换系统库版本后偏移可能变，补丁前会逐处校验原字节，
+> 对不上会明确跳过而不会乱改。技术细节与实测数据见
+> [docs/maintainer-notes.md](docs/maintainer-notes.md) §32–§40。
+
 ## 终端权限问题
 
 以下应用的内置终端没有打开华为推理框架的权限，与`cann-llm`不兼容：

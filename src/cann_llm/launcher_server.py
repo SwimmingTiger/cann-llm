@@ -227,6 +227,11 @@ _USAGE = """用法: scripts/start_server.sh [选项]
                         设 CANN_LLM_LLDB_BATCH=1 则非交互：run→bt→quit
                         本机只有 huawei-debug-lldb-server 能正常调试，
                         找不到会警告并建议从 CodeArts IDE 的终端运行
+      --large-mem       ★自动打「大模型补丁」★：经 gdbserver+lldb 在运行时把几处
+                        2 GiB 上限检查改成 nop，让单段 .ms 上限从 ≈545 MB 提到
+                        ≈1.09 GB（详见 docs/maintainer-notes.md §32–§39）。
+                        全自动、不需要人工敲 lldb 命令；补丁只改内存、不动磁盘
+                        （属验证手段，不是交付方案 ✗）；不能和 -B 一起用
       --status          查看状态
       --stop            停止后台服务
   -h, --help            显示本帮助
@@ -252,6 +257,7 @@ def parse_args(argv: "List[str]") -> "Dict[str, object]":
         "background": False,
         "debug": False,
         "lldb": False,
+        "large_mem": False,
         "action": "run",
         "rest": [],
     }
@@ -288,6 +294,9 @@ def parse_args(argv: "List[str]") -> "Dict[str, object]":
         elif a == "--lldb":
             # 在调试器下前台启动（抓崩溃现场用）。这是启动器自己的选项，不透传。
             o["lldb"] = True
+        elif a == "--large-mem":
+            # 自动打大模型补丁（见 cann_llm.large_mem）。启动器自己的选项，不透传。
+            o["large_mem"] = True
         elif a in ("-B", "--background"):
             o["background"] = True
         elif a == "--status":
@@ -393,6 +402,8 @@ def run_server(root: str, argv: "List[str]") -> int:
 
     if o.get("lldb") and o["background"]:
         die("--lldb 不能和 -B 一起用：调试器要前台交互")
+    if o.get("large_mem") and o["background"]:
+        die("--large-mem 不能和 -B 一起用：补丁要在前台由 lldb 批处理打上")
 
     print()
     if not o["background"]:
@@ -408,6 +419,20 @@ def run_server(root: str, argv: "List[str]") -> int:
         #   重定向/接管道时（块缓冲）上面那些提示会全丢，必须手动刷。
         sys.stdout.flush()
         sys.stderr.flush()
+        if o.get("large_mem"):
+            # ★ 大模型补丁：gdbserver + lldb 全自动（不需要人工敲命令）✓
+            #   和 --lldb 同时给时以本项为准 —— 它本身就是"带补丁的调试启动"
+            from .large_mem import build_large_mem_argv
+            argv_lm, hints, err = build_large_mem_argv(py, args, env)
+            if argv_lm is None:
+                die(err)
+            for line in hints:
+                info(line) if line else print()
+            print()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.execve(argv_lm[0], argv_lm, env)
+            return 0
         if o.get("lldb"):
             from .lldb_launch import build_debug_argv
             argv_dbg, hints, err = build_debug_argv(py, args)

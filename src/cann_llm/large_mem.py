@@ -1,0 +1,185 @@
+"""`--large-mem`：用 lldb 自动给推理进程打「大模型补丁」。
+
+## 为什么需要它
+
+鸿蒙侧引擎在**两个地方**用 securec 的安全函数拷贝权重，而 `memcpy_s` 一族的
+`destMax` 有硬上限 `0x7fffffff`（2 GiB − 1，见 `docs/maintainer-notes.md` §32/§32.8）：
+
+1. `libhiai_adapter.so` 通过 **动态导入** 的 `memcpy_s`（`libsec_shared.z.so`）；
+2. `libhiai_ir.so` 里 **静态链入** 的那份 securec `memcpy_s`（符号插桩够不着 ✗）。
+
+适配层把**整段模型的权重缓冲**（≈ 3.94 × `.ms` 文件大小，权重按 fp32 展开）当
+`destMax` 传进去；一旦超过 2 GiB 就直接返回 `ERANGE` ⇒ Build 失败（`Set Data Fail.`）。
+于是**不补丁**时每段 `.ms` 只能到 ≈545 MB（≈520 MiB）。
+
+把这几条检查在**运行时改成 `nop`**（或反极性的那条改成无条件跳转）之后，
+上限上移到模型头里的 **u32 长度字段**（§38）：每段 `.ms` 可到 ≈1.09 GB（≈1.02 GiB）。
+
+## 实现方式
+
+本模块只负责**宿主侧**：补丁表 + 组装 argv。真正的动作在
+- `large_mem_lldb.py` —— 由 lldb 的 python 载入，安装断点并打补丁；
+- `scripts/large_mem_run.sh` —— 编排 `gdbserver`（起被调试进程）+ `lldb`（批处理接入）。
+
+★ 为什么必须走 `huawei-debug-lldb-server`：本机 `lldb -- <bin>` 直接拉起进程会报
+`error: 'A' packet returned an error: 8`（平台限制），只有这份 gdbserver 能调试 ✓
+
+★ 定位用**文件内偏移**而不是绝对地址：ASLR 每次不同，偏移固定（受 lib 版本约束）。
+补丁前会先读回 4 字节与期望值比对，**不一致就跳过并告警**，避免改错地方。
+"""
+from __future__ import annotations
+
+import os
+import shutil
+from typing import List, NamedTuple, Optional, Sequence, Tuple
+
+__all__ = [
+    "LargeMemPatch", "PATCHES", "LLDB_SCRIPT_NAME", "DRIVER_NAME",
+    "DEFAULT_LARGE_MEM_PORT", "LIMIT_STOCK", "LIMIT_PATCHED",
+    "large_mem_script_path", "large_mem_driver_path", "strip_large_mem",
+    "build_large_mem_argv", "describe_patches",
+]
+
+
+class LargeMemPatch(NamedTuple):
+    """一处「2 GiB 上限」检查的补丁。"""
+
+    module: str        #: .so 文件名（按名字在已加载模块里找）
+    offset: int        #: 文件内偏移（= vaddr，与模块基址相加即运行期地址）
+    expect: bytes      #: 期望读到的原始指令字节（补丁前校验，防止改错）
+    patch: bytes       #: 要写入的字节
+    what: str          #: 这处检查属于哪个函数
+    note: str = ""     #: 额外说明
+
+
+#: ★补丁表★ —— 偏移与字节来自本机实测（`docs/maintainer-notes.md` §33/§35/§38）。
+#: 这些值与**系统库版本**绑定：换版本后偏移可能变 ✗
+#: 好在补丁前会校验 `expect`，对不上会明确报"跳过"而不是把别处改坏 ✓
+PATCHES: Tuple[LargeMemPatch, ...] = (
+    LargeMemPatch(
+        "libhiai_ir.so", 0xC16EC,
+        b"\xe8\x02\x00\xb5", b"\x1f\x20\x03\xd5",
+        "securec memcpy_s（静态链入）",
+        "cbnz x8（x8 = destMax>>31）：destMax ≥ 2 GiB 即拒，nop 即可 ✓ "
+        "★符号表把这段归在 AI_Log_Print 名下（本地符号），其实是一份 memcpy_s 克隆★",
+    ),
+    LargeMemPatch(
+        "libsec_shared.z.so", 0x3E50,
+        b"\x09\x03\x00\xb5", b"\x1f\x20\x03\xd5",
+        "securec memcpy_s（导出）",
+        "适配层搬权重走的就是它 ✓（0x3E4C: lsr x9,x8,#31 → 0x3E50: cbnz x9）",
+    ),
+    LargeMemPatch(
+        "libsec_shared.z.so", 0x51DC,
+        b"\x89\x01\x00\xb5", b"\x1f\x20\x03\xd5",
+        "securec memset_s",
+        "同一族的上限门（x9 = destMax>>31）。★编码与 memcpy_s 不同★（立即数不一样），"
+        "所以必须按实测字节校验，不能照抄 ✓",
+    ),
+    LargeMemPatch(
+        "libsec_shared.z.so", 0x5138,
+        b"\xc2\x00\x00\x54", b"\x06\x00\x00\x14",
+        "securec memmove_s",
+        "★极性相反★：它是 b.hs 跳向【正常】路径（0x5150），nop 反而会掉进 ERANGE ✗ "
+        "⇒ 必须改成无条件跳转 b 0x5150 ✓",
+    ),
+)
+
+#: lldb 侧脚本名（与 `large_mem_lldb.py` 同目录）
+LLDB_SCRIPT_NAME = "large_mem_lldb.py"
+
+#: 编排脚本名（在 `scripts/` 下）
+DRIVER_NAME = "large_mem_run.sh"
+
+#: 默认端口（与 `--lldb` 的 5091 错开，避免撞车）
+DEFAULT_LARGE_MEM_PORT = 5092
+
+#: 两种模式下的单段 `.ms` 上限（§38 实测 + 推算）
+LIMIT_STOCK = "≈545 MB（≈520 MiB）"
+LIMIT_PATCHED = "≈1.09 GB（≈1.02 GiB）"
+
+
+def large_mem_script_path() -> str:
+    """lldb 侧脚本的绝对路径（本模块同目录）。"""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), LLDB_SCRIPT_NAME)
+
+
+def large_mem_driver_path() -> str:
+    """编排脚本的绝对路径（仓库 `scripts/` 下，由本模块位置反推）。"""
+    here = os.path.dirname(os.path.abspath(__file__))     # <root>/src/cann_llm
+    root = os.path.dirname(os.path.dirname(here))         # <root>
+    return os.path.join(root, "scripts", DRIVER_NAME)
+
+
+def strip_large_mem(argv: Sequence[str]) -> Tuple[List[str], bool]:
+    """把 ``--large-mem`` 从参数表里摘出来（``--large-mem=<x>`` 也一并摘）。"""
+    out, found = [], False
+    for a in argv:
+        if a == "--large-mem" or a.startswith("--large-mem="):
+            found = True
+            continue
+        out.append(a)
+    return out, found
+
+
+def describe_patches() -> List[str]:
+    """给用户看的补丁清单（启动时打印）。"""
+    lines = []
+    for p in PATCHES:
+        lines.append("  · %-20s +0x%05X  %-28s %s"
+                     % (p.module, p.offset, p.what, p.note))
+    return lines
+
+
+def build_large_mem_argv(py: str, args: Sequence[str],
+                         env: "Optional[dict]" = None
+                         ) -> Tuple[Optional[List[str]], List[str], str]:
+    """构造「自动打补丁地运行 ``py`` + ``args``」的 argv。
+
+    返回 ``(argv, 提示行, 错误信息)``；失败时 ``argv`` 为 ``None``。
+    """
+    env = os.environ if env is None else env
+
+    # gdbserver 用 execve 直接拉起进程、不解析 shebang ⇒ 解释器必须是真 ELF
+    from .lldb_launch import find_gdbserver, is_real_executable
+    if not is_real_executable(py):
+        return None, [], (
+            "--large-mem 需要真正的可执行文件，但 %s 不是 ELF（看起来是脚本包装器）。\n"
+            "      gdbserver 用 execve 直接拉起进程、不解析 shebang ✓\n"
+            "      请改用同目录下带版本号的那个解释器" % py)
+
+    driver = large_mem_driver_path()
+    if not os.path.exists(driver):
+        return None, [], ("找不到 %s（--large-mem 的编排脚本）" % driver)
+
+    script = large_mem_script_path()
+    if not os.path.exists(script):
+        return None, [], ("找不到 %s（--large-mem 的 lldb 脚本）" % script)
+
+    gdbserver = find_gdbserver(env)
+    if not gdbserver:
+        return None, [], (
+            "找不到 huawei-debug-lldb-server —— --large-mem 必须经它来改内存\n"
+            "      （本机 `lldb -- <bin>` 直接拉起进程会报 'A' packet returned an error: 8）\n"
+            "      可用 CANN_LLM_LLDB_SERVER=/path/to/huawei-debug-lldb-server 指定")
+
+    lldb = (env.get("CANN_LLM_LLDB") or shutil.which("lldb")
+            or env.get("LLDB") or "")
+    if not lldb or not os.path.exists(lldb):
+        return None, [], (
+            "找不到 lldb —— 可用 CANN_LLM_LLDB=/path/to/lldb 指定\n"
+            "      （发布包里它在 bin/lldb，并需要 lib/liblldb.so 在 LD_LIBRARY_PATH 里）")
+
+    port = int(env.get("CANN_LLM_LLDB_PORT") or DEFAULT_LARGE_MEM_PORT)
+    argv = ["/bin/sh", driver, py, "-X", "faulthandler"] + list(args)
+
+    hints = [
+        "── --large-mem：自动给推理进程打「大模型补丁」（经 ptrace 改内存）──",
+        "  单段 .ms 上限：不补丁 %s  →  补丁后 %s" % (LIMIT_STOCK, LIMIT_PATCHED),
+        "  将改这几处 2 GiB 上限检查（先校验原字节，对不上就跳过并告警）：",
+    ] + describe_patches() + [
+        "  编排：%s gdbserver 127.0.0.1:%d  +  lldb 批处理接入" % (
+            os.path.basename(gdbserver), port),
+        "  ★这是【验证手段】不是交付方案：改的是系统库的进程内副本（内存），磁盘不动 ✓",
+    ]
+    return argv, hints, ""

@@ -5,6 +5,10 @@
 #   scripts/start_chat.sh -d /path/to/model_dir --temp 0 --topk 1
 #   scripts/start_chat.sh -d /path/to/model_dir -p "你好"      # 单轮模式
 #   scripts/start_chat.sh -d <模型目录> --lldb                  # 在调试器下跑（抓崩溃）
+#   scripts/start_chat.sh -d <模型目录> --large-mem             # ★自动打「大模型补丁」★
+#       经 gdbserver+lldb 在运行时把几处 2 GiB 上限检查改成 nop ⇒ 单段 .ms 上限
+#       从 ≈545 MB 提到 ≈1.09 GB（详见 docs/maintainer-notes.md §32–§39）。
+#       全自动、只改内存不动磁盘；属验证手段，不是交付方案 ✗
 #
 # 本脚本只做一件事：**找到一个与引擎 libc 兼容的 python，然后把参数原样转发**。
 # 其余逻辑（引擎库选择、模型目录探测、预检提示）都在 cann_llm.launcher 里 ——
@@ -17,6 +21,31 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+# ── 发布态资产：bin/ lib/ python3/（可能不存在，纯源码树里就没有）──
+#   bin/      huawei-debug-lldb-server + lldb        （--lldb / --large-mem 用）
+#   lib/      lldb 的依赖库（liblldb.so 等）          （必须在 LD_LIBRARY_PATH 里，否则 bin/lldb 起不来）
+#   python3/  随包解释器与它的库：
+#               · python3/bin/python3      —— 推理程序用它跑（本包是 3.14）
+#               · python3/lib/python3.11/  —— lldb【内嵌 python】的 stdlib
+#                 （lldb 的 RUNPATH 写死了 $ORIGIN/../python3，所以它必须在这个位置 ✓
+#                  同一个 python3/ 下两种版本各占一个 lib/pythonX.Y，互不干扰 ✓）
+# 全部放在【开头】：随包资产优先于系统里同名的东西 ✓
+for _d in "$ROOT/bin" "$ROOT/python3/bin"; do
+    [ -d "$_d" ] || continue
+    case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH" ;; esac
+done
+export PATH
+_ld=""
+for _d in "$ROOT/lib" "$ROOT/python3/lib"; do
+    [ -d "$_d" ] || continue
+    _ld="${_ld:+$_ld:}$_d"
+done
+if [ -n "$_ld" ]; then
+    LD_LIBRARY_PATH="$_ld${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH
+fi
+unset _d _ld
 
 # hnp（鸿蒙包服务）装的工具在 /data/service/hnp/bin，默认不在 PATH 里。
 # 补在**末尾**：用户自己的 python3 仍优先，只有它不兼容时才用到这个。

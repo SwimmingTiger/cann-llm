@@ -2670,3 +2670,86 @@ size − 0x100      = 0x110c9bac8
 ② 重造主机侧输入（hidden/mask3/per_layer_*/cos_*/sin_* + ref_ids.txt）→ 才能做数值对拍
    （临时目录里的 io 产物已清掉：无 ref_ids.txt、无 seg 目录 ✗）
 ```
+
+---
+
+## 40. ★★★★ `--large-mem`：把 §32–§38 的补丁做成一条命令（含三个 lldb 实测坑）★★★★
+
+§32–§38 把「2 GiB 上限」查清并验证了 patch 可行；本节把它做成发布包里的功能：
+`scripts/start_chat.sh … --large-mem` / `scripts/start_server.sh … --large-mem`。
+
+### 40.1 组成
+
+```
+src/cann_llm/large_mem.py        宿主侧：补丁表（单一来源）+ argv 构造 + 用户提示
+src/cann_llm/large_mem_lldb.py   lldb 侧：装断点、改内存、等退出、记退出码
+scripts/large_mem_run.sh         编排：gdbserver 起进程 → lldb 批处理接入 → 传退出码
+launcher.py / launcher_server.py 接线 --large-mem（与 --lldb 同一套，优先于 --lldb）
+scripts/start_{chat,server}.sh   用法说明；并把 bin/ lib/ python3/ 接到 PATH / LD_LIBRARY_PATH 开头
+```
+
+### 40.2 补丁表（★反汇编逐条核对过的真实字节★）
+
+| 模块 | 偏移 | 原指令 | 补丁 | 说明 |
+|---|---|---|---|---|
+| `libhiai_ir.so` | `0xC16EC` | `e8 02 00 b5` | `1f 20 03 d5` | `cbnz x8`，x8 = destMax>>31 ⇒ 静态链入的 memcpy_s（★符号表把它归在 `AI_Log_Print` 名下★，因为它是本地符号） |
+| `libsec_shared.z.so` | `0x3E50` | `09 03 00 b5` | `1f 20 03 d5` | `memcpy_s+0x1C`：`lsr x9,x8,#31` → `cbnz x9` |
+| `libsec_shared.z.so` | `0x51DC` | ★`89 01 00 b5`★ | `1f 20 03 d5` | `memset_s+0x20`：同族上限门，**但立即数与 memcpy_s 不同** |
+| `libsec_shared.z.so` | `0x5138` | `c2 00 00 54` | ★`06 00 00 14`★ | `memmove_s+0x1C`：`b.hs 0x5150` 是跳向【正常】路径 ⇒ **nop 会掉进 ERANGE，必须改成无条件跳转** |
+
+★**踩过的坑**★：`memset_s` 那处最初照抄了 `memcpy_s` 的 `09 03 00 b5`，
+运行期被"原字节不符"拦下（实际 `89 01 00 b5`）—— 这正说明**补丁前必须读回校验**：
+同为 `cbnz x9`，跳转距离不同，编码就不同 ✓
+
+### 40.3 实测（设备端）
+
+```
+① 672 MB 段(c12) 不带补丁：  ⑥ ModelBuildFromFile rc=-1  ✗
+② 672 MB 段(c12) 带 --large-mem：
+     [large-mem] ✓ libhiai_ir.so      +0xC16EC  e8 02 00 b5 → nop 已就位
+     [large-mem] ✓ libsec_shared.z.so +0x03E50  09 03 00 b5 → nop 已就位
+     [large-mem] ✓ libsec_shared.z.so +0x051DC  89 01 00 b5 → nop 已就位
+     [large-mem] ✓ libsec_shared.z.so +0x05138  c2 00 00 54 → 06 00 00 14 已就位
+     [large-mem] 补丁结果：成功 4 / 跳过 0（共 4 处）
+     ⑥ rc=0 ✓   ⑧ ModelPredict rc=0（输出 5 个）✓
+③ 退出码传递：被调试进程 exit(7) ⇒ 编排脚本返回 7 ✓；exit(0) ⇒ 0 ✓
+```
+
+### 40.4 ★三个 lldb 实测坑（都在实现时踩到）★
+
+```
+① 批处理模式下，"python 实现的命令"会【截断】后续 -o ✗
+   lldb --batch -o A -o B -o "process continue" …
+   一旦执行了 `script …` 或 `command script add` 注册的命令，
+   后面的 -o 就不再执行 ⇒ `process continue` 根本没跑、进程一直停着 ✗
+   （表现：日志停在装断点那行，然后 lldb 直接退出、返回 0）
+   ⇒ 解法：把「装断点 + 放行 + 等结束 + 记退出码」全塞进【一条】python 命令
+     （large_mem_run）✓
+
+② 一条命令内要继续跑进程，必须用 SBListener 泵事件 ✗→✓
+   SBProcess.Continue() 是异步的；紧接着轮询 GetState() 拿不到状态更新
+   （事件没被泵）✗ ⇒ 用 SBListener.WaitForEvent() 等
+   eBroadcastBitStateChanged，状态才会动 ✓
+
+③ ★本机 /tmp 是【只读】的★
+   退出码最初想用 mktemp 落地 ⇒ 直接失败 ✗
+   ⇒ 改放仓库 .run/（已 gitignore，launcher 本来也用这个目录放 pid/state）✓
+
+④ stdout 必须直通终端
+   取退出码若去捕获 lldb 的 stdout，对话就变成"跑完才出字" ✗
+   ⇒ 退出码走【状态文件】(CANN_LLM_LARGE_MEM_STATUS_FILE)，stdout 不拦 ✓
+```
+
+### 40.5 发布包布局（与本节配套）
+
+```
+bin/      lldb、huawei-debug-lldb-server            （3.6 MB）
+lib/      liblldb.so + 8 个依赖                     （99 MB；★必须进 LD_LIBRARY_PATH★）
+python3/  bin/python3（推理用，3.14）+ lib/（含 lldb 内嵌 python 3.11 的 stdlib）（422 MB）
+          └─ lib/python3.11/lldb/_lldb.so → ../../../../lib/liblldb.so
+             ★符号链接★：它与 liblldb.so 是同一份文件（前 64KB md5 一致），链接省 91 MB ✓
+```
+
+`liblldb.so` 的 RUNPATH 是 `$ORIGIN/../lib:$ORIGIN/../python3/lib`，且内嵌 python 按
+`$ORIGIN/../python3` 推算 `PYTHONHOME` ⇒ **`python3/` 这个名字和位置不能改**，
+`lib/python3.11/`（lldb 用）与 `lib/python3.14/`（推理用）各占一个版本子目录 ✓

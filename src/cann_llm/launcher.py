@@ -228,9 +228,11 @@ def run_chat(root: str, argv: "List[str]") -> int:
     if model_dir:
         from .omcimport import ensure_model_dir
         ensure_model_dir(model_dir, backend)
-    # --lldb：本启动器的选项，不属于 chat CLI 的参数，先摘掉
+    # --lldb / --large-mem：本启动器的选项，不属于 chat CLI 的参数，先摘掉
     from .lldb_launch import build_debug_argv, strip_flag
+    from .large_mem import build_large_mem_argv, strip_large_mem
     rest, want_lldb = strip_flag(rest)
+    rest, want_large_mem = strip_large_mem(rest)
     var, lib, kind = pick_engine_lib(backend)
 
     py = current_python()
@@ -275,6 +277,20 @@ def run_chat(root: str, argv: "List[str]") -> int:
     #   上面那些 ✓/› 提示就会【全部丢失】。必须手动刷。
     sys.stdout.flush()
     sys.stderr.flush()
+    if want_large_mem:
+        # ★ 大模型补丁：gdbserver + lldb 全自动（不需要人工敲命令）✓
+        #   和 --lldb 同时给时以本项为准 —— 它本身就是"带补丁的调试启动"
+        argv_lm, hints, err = build_large_mem_argv(
+            py, ["-m", "cann_llm.cli.chat"] + rest, env)
+        if argv_lm is None:
+            die(err)
+        for line in hints:
+            info(line) if line else print()
+        print()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execve(argv_lm[0], argv_lm, env)
+        return 0
     if want_lldb:
         argv_dbg, hints, err = build_debug_argv(
             py, ["-m", "cann_llm.cli.chat"] + rest)
@@ -298,6 +314,9 @@ def main(argv: "Optional[List[str]]" = None) -> int:
         print("      --lldb   在调试器下前台运行（抓崩溃现场）")
         print("               本机只有 huawei-debug-lldb-server 能正常调试，")
         print("               找不到会警告并建议从 CodeArts IDE 的终端运行")
+        print("      --large-mem  自动打「大模型补丁」（经 gdbserver+lldb 改内存）：")
+        print("               单段 .ms 上限从 ≈545 MB 提到 ≈1.09 GB；全自动，")
+        print("               只改内存不动磁盘（验证手段，不是交付方案）")
         return 0
     what, rest = argv[0], argv[1:]
     # 脚本所在仓库根：src/cann_llm/launcher.py → 上溯三级
