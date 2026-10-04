@@ -281,7 +281,7 @@ def run_chat(root: str, argv: "List[str]") -> int:
         # ★ 大模型补丁：gdbserver + lldb 全自动（不需要人工敲命令）✓
         #   和 --lldb 同时给时以本项为准 —— 它本身就是"带补丁的调试启动"
         argv_lm, hints, err = build_large_mem_argv(
-            py, ["-m", "cann_llm.cli.chat"] + rest, env)
+            py, "cann_llm.cli.chat", rest, env)
         if argv_lm is None:
             die(err)
         for line in hints:

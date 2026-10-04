@@ -133,12 +133,12 @@ class TestBuildLargeMemArgv(unittest.TestCase):
              mock.patch.object(lldb_launch, "find_gdbserver", return_value="/some/gdbserver"), \
              mock.patch.dict(os.environ, {"CANN_LLM_LLDB": "/some/lldb"}):
             argv, hints, err = large_mem.build_large_mem_argv(
-                sys.executable, ["-m", "cann_llm.cli.chat"])
+                sys.executable, "cann_llm.cli.chat", ["-d", "m"])
         self.assertEqual(err, "")
         self.assertEqual(argv[0], "/bin/sh")
         self.assertEqual(argv[1], driver)
-        self.assertEqual(argv[2:], [sys.executable, "-X", "faulthandler",
-                                    "-m", "cann_llm.cli.chat"])
+        # 编排脚本拿到的是 (python, 模块名, 模块参数…)：它用 runpy 在同进程跑模块
+        self.assertEqual(argv[2:], [sys.executable, "cann_llm.cli.chat", "-d", "m"])
         text = "\n".join(hints)
         self.assertIn(large_mem.LIMIT_STOCK, text)
         self.assertIn(large_mem.LIMIT_PATCHED, text)
@@ -151,14 +151,16 @@ class TestBuildLargeMemArgv(unittest.TestCase):
              mock.patch.object(lldb_launch, "find_gdbserver", return_value="/some/gdbserver"), \
              mock.patch.dict(os.environ, {"CANN_LLM_LLDB": "/some/lldb",
                                           "CANN_LLM_LLDB_PORT": "6001"}):
-            argv, hints, _ = large_mem.build_large_mem_argv(sys.executable, ["-m", "x"])
+            argv, hints, _ = large_mem.build_large_mem_argv(
+                sys.executable, "cann_llm.cli.chat", [])
         self.assertTrue(any("6001" in h for h in hints))
 
     def test_rejects_script_wrapper(self):
         path = _script_wrapper()
         try:
             with mock.patch.object(os.path, "exists", lambda p: True):
-                argv, hints, err = large_mem.build_large_mem_argv(path, ["-m", "x"])
+                argv, hints, err = large_mem.build_large_mem_argv(
+                    path, "cann_llm.cli.chat", [])
             self.assertIsNone(argv)
             self.assertIn("不是 ELF", err)
         finally:
@@ -169,7 +171,8 @@ class TestBuildLargeMemArgv(unittest.TestCase):
         script = large_mem.large_mem_script_path()
         with mock.patch.object(os.path, "exists", self._exists_for({driver, script})), \
              mock.patch.object(lldb_launch, "find_gdbserver", return_value=""):
-            argv, hints, err = large_mem.build_large_mem_argv(sys.executable, ["-m", "x"])
+            argv, hints, err = large_mem.build_large_mem_argv(
+                sys.executable, "cann_llm.cli.chat", [])
         self.assertIsNone(argv)
         self.assertIn("huawei-debug-lldb-server", err)
 
@@ -182,7 +185,8 @@ class TestBuildLargeMemArgv(unittest.TestCase):
              mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CANN_LLM_LLDB", None)
             os.environ.pop("LLDB", None)
-            argv, hints, err = large_mem.build_large_mem_argv(sys.executable, ["-m", "x"])
+            argv, hints, err = large_mem.build_large_mem_argv(
+                sys.executable, "cann_llm.cli.chat", [])
         self.assertIsNone(argv)
         self.assertIn("lldb", err)
 

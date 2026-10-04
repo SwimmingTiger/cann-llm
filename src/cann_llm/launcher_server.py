@@ -423,7 +423,9 @@ def run_server(root: str, argv: "List[str]") -> int:
             # ★ 大模型补丁：gdbserver + lldb 全自动（不需要人工敲命令）✓
             #   和 --lldb 同时给时以本项为准 —— 它本身就是"带补丁的调试启动"
             from .large_mem import build_large_mem_argv
-            argv_lm, hints, err = build_large_mem_argv(py, args, env)
+            # args 形如 ["-m", "cann_llm.api.server", "-d", …] ⇒ 拆成模块名 + 参数
+            argv_lm, hints, err = build_large_mem_argv(
+                py, args[1], list(args[2:]), env)
             if argv_lm is None:
                 die(err)
             for line in hints:

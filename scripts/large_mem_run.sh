@@ -1,37 +1,42 @@
 #!/bin/sh
-# 编排「gdbserver 起进程 + lldb 自动打大模型补丁」——由 `--large-mem` 调用。
+# 编排「--large-mem」：**让程序正常启动、保住它自己的终端**，再用 gdbserver 附着上去
+# 在运行时打「大模型补丁」，补完立刻 detach，程序继续原样运行。
 #
-#   scripts/large_mem_run.sh <python> [python 的参数…]
+#   scripts/large_mem_run.sh <python> <module> [模块参数…]
 #
-# 做三件事：
-#   1. 用 huawei-debug-lldb-server 起被调试进程（它会先停住等调试器）；
-#   2. 用 lldb 批处理接上去（gdb-remote），装断点（命中 OH_AI_ModelBuildFromFile
-#      时把 4 处 2 GiB 上限检查改成 nop），然后放行；
-#   3. 等进程跑完，把它的退出码原样返回。
+# ★为什么不用 `gdbserver -- prog`（由调试器拉起进程）★
+#   那样 lldb-server 会给被调试进程【另开一个 pty】：实测程序 fd0/fd1 指向
+#   /dev/pts/N 而不是当前终端 —— 程序的**输出**靠 lldb 转发还能看见，但
+#   **用户的键盘输入永远进不去** ⇒ 交互式程序（对话）会卡死在提示符 ✗
+#   （`-p "…"` 那种单轮、以及服务端不读键盘，所以看不出来 ✗）
+#   attach 模式下程序是被"我们"正常启动的，终端自始至终是它自己的 ✓
 #
-# ★ 为什么必须绕这么一圈：本机 `lldb -- <bin>` 直接拉起进程会报
-#   `error: 'A' packet returned an error: 8`（平台限制），只有这份 gdbserver 能调试 ✓
+# ★为什么要"启动即自停"★
+#   补丁必须在第一次 OH_AI_ModelBuildFromFile **之前/当时**打上。让程序一启动就
+#   SIGSTOP 自己（用 -c 包一层），调试器从容 attach 后再放行 —— 无竞态 ✓
 #
-# ★ 退出码用【状态文件】传递（CANN_LLM_LARGE_MEM_STATUS_FILE）：
-#   lldb 的 stdout 必须直通终端，对话/服务要流式输出，不能为了取退出码去捕获它 ✗
+# ★POSIX 冷知识★：非交互 shell 里 `cmd &` 的 **stdin 默认被指到 /dev/null** ✗
+#   ⇒ 必须显式重定向一次（显式重定向优先于那条默认规则）✓
 #
 # 环境变量:
 #   CANN_LLM_LLDB_SERVER   gdbserver 路径（默认 $ROOT/bin/… 或 PATH）
 #   CANN_LLM_LLDB          lldb 路径（默认 $ROOT/bin/lldb 或 PATH）
-#   CANN_LLM_LLDB_PORT     端口（默认 5092）
-#   CANN_LLM_LARGE_MEM_ATTACH_TIMEOUT  等 gdbserver 就绪的上限（默认 5 秒）
+#   CANN_LLM_LLDB_PORT     调试端口（默认 5092）
+#   CANN_LLM_LARGE_MEM_ATTACH_TIMEOUT  等补丁打上的上限秒数（默认 60）
 set -eu
 
 SELF=$0
 ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
 
-if [ "$#" -lt 1 ]; then
-    printf '用法: %s <python> [参数…]\n' "$SELF" >&2
+if [ "$#" -lt 2 ]; then
+    printf '用法: %s <python> <module> [模块参数…]\n' "$SELF" >&2
     exit 2
 fi
+PY=$1
+MOD=$2
+shift 2
 
 PORT=${CANN_LLM_LLDB_PORT:-5092}
-WAIT_MAX=${CANN_LLM_LARGE_MEM_ATTACH_TIMEOUT:-5}
 
 # 随包资产优先（与 start_*.sh 同一套规则；被直接调用也能自洽 ✓）
 for _d in "$ROOT/bin" "$ROOT/python3/bin"; do
@@ -50,7 +55,7 @@ if [ -n "$_ld" ]; then
 fi
 unset _d _ld
 
-# lldb 的内嵌 python 要 import cann_llm.large_mem（补丁表的单一来源）⇒ 必须给 PYTHONPATH
+# lldb 的内嵌 python 要 import cann_llm.large_mem（补丁表的单一来源）⇒ 给 PYTHONPATH
 PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
 
@@ -70,55 +75,66 @@ fi
 SCRIPT="$ROOT/src/cann_llm/large_mem_lldb.py"
 [ -f "$SCRIPT" ] || { printf '✗ 找不到 %s\n' "$SCRIPT" >&2; exit 127; }
 
-# ★ 状态文件不能用 mktemp 的默认位置：本机 /tmp 是【只读】的 ✗
-#   放仓库的 .run/（已 gitignore；launcher 也用这个目录放 pid/state）
-RUNDIR=${CANN_LLM_RUNDIR:-$ROOT/.run}
-STATUS=""
-if mkdir -p "$RUNDIR" 2>/dev/null; then
-    STATUS="$RUNDIR/large_mem_status.$$"
-    : >"$STATUS" 2>/dev/null || STATUS=""
-fi
-if [ -n "$STATUS" ]; then
-    CANN_LLM_LARGE_MEM_STATUS_FILE="$STATUS"
-    export CANN_LLM_LARGE_MEM_STATUS_FILE
-fi
+# ── 1) 起程序：先自停、保留自己的终端 ──
+exec 3<&0                      # ★存下真正的 stdin（见文件头：`&` 会把它换成 /dev/null）★
+WRAPPER='import os, signal, sys, runpy
+os.kill(os.getpid(), signal.SIGSTOP)
+mod = sys.argv[1]
+sys.argv = sys.argv[1:]
+runpy.run_module(mod, run_name="__main__", alter_sys=True)'
 
-# ── 1) gdbserver 起被调试进程（后台；它先把进程停住等调试器）──
-printf '[large-mem] gdbserver 起进程（127.0.0.1:%s），随后 lldb 自动打补丁并放行…\n' "$PORT"
-"$GDB" gdbserver --native-regs "127.0.0.1:$PORT" -- "$@" &
-GDBPID=$!
-trap 'kill "$GDBPID" 2>/dev/null || true; [ -n "$STATUS" ] && rm -f "$STATUS"' INT TERM HUP
+"$PY" -X faulthandler -c "$WRAPPER" "$MOD" "$@" 0<&3 &
+APP=$!
+GDBPID=""
+trap 'kill "$APP" 2>/dev/null || true; [ -n "$GDBPID" ] && kill "$GDBPID" 2>/dev/null || true' INT TERM HUP
 
-# ── 2) lldb 批处理接入 ──
-#   ★ 只能有一条"python 实现的命令"★：实测批处理模式下，python 命令之后的
-#     `-o` 就不再执行了（`process continue` 会根本没跑、进程一直停着 ✗）
-#     ⇒ 所以 `large_mem_run` 一条命令里做完「装断点 + 放行 + 等结束 + 取退出码」✓
-#   连不上时重试：这时进程仍停在 gdbserver 里、什么都没发生，重试是安全的 ✓
+# 等它自停（/proc/<pid>/stat 第 3 列 = T）
 i=0
-LLDBRC=1
+while [ "$i" -lt 400 ]; do
+    if ! kill -0 "$APP" 2>/dev/null; then
+        printf '[large-mem] 程序在自停前就退出了 —— 原样返回它的退出码\n' >&2
+        RC=0; wait "$APP" || RC=$?
+        exit "$RC"
+    fi
+    [ "$(awk '{print $3}' "/proc/$APP/stat" 2>/dev/null || echo '?')" = "T" ] && break
+    i=$((i + 1))
+    sleep 0.05
+done
+
+# ── 2) gdbserver 附着 ──
+printf '[large-mem] 附着到 pid=%s（程序已自停，等打补丁）…\n' "$APP"
+"$GDB" gdbserver --native-regs "127.0.0.1:$PORT" --attach "$APP" >/dev/null 2>&1 &
+GDBPID=$!
+sleep 0.3
+
+# ── 3) lldb：import 时装断点 → 原生 `process continue` 放行 → 断点回调打补丁 ──
+#   ★lldb 的 stdin 显式指到 /dev/null★：程序用【它自己的终端】读键盘，
+#     若 lldb 也握着同一个 tty，用户敲的字会被它的命令解释器抢走 ✗
+#     （batch 模式下 lldb 只在 -o 命令之间才碰 stdin，指到 /dev/null 最省事 ✓）
+#   ★只用 lldb 原生命令 + 一条 python 命令（放在最后）★
+#     实测：批处理模式下"注册的 python 命令"会让其后的 -o 失效 ✗
+#     ⇒ 断点改在 `command script import` 时安装（import 不截断 ✓）
+i=0
+RC=1
 while [ "$i" -lt 40 ]; do
     i=$((i + 1))
     if "$LLDB" --batch \
         -o "gdb-remote 127.0.0.1:$PORT" \
+        -o "process handle SIGSTOP -s false -p false" \
         -o "command script import $SCRIPT" \
-        -o "large_mem_run"; then
-        LLDBRC=0
+        -o "process continue" </dev/null; then
+        RC=0
         break
     fi
     sleep 0.1
 done
-[ "$LLDBRC" -eq 0 ] || printf '[large-mem] ⚠ lldb 接入失败（已重试 %d 次）\n' "$i" >&2
-
-# ── 3) 收尾：优先用状态文件里的退出码（被调试进程的），否则退回等 gdbserver ──
-GDBRC=0
-wait "$GDBPID" 2>/dev/null || GDBRC=$?
-ST=""
-if [ -n "$STATUS" ]; then
-    ST=$(head -1 "$STATUS" 2>/dev/null || true)
-    rm -f "$STATUS"
+if [ "$RC" -ne 0 ]; then
+    printf '[large-mem] ⚠ lldb 接入失败（重试 %d 次）—— 让程序不带补丁继续跑\n' "$i" >&2
+    kill -CONT "$APP" 2>/dev/null || true
 fi
 
-if [ -n "$ST" ] && [ "$ST" -ge 0 ] 2>/dev/null; then
-    exit "$ST"
-fi
-exit "$GDBRC"
+# ── 4) 等程序自然结束，原样返回它的退出码（程序一直是我们的子进程 ✓）──
+RC=0
+wait "$APP" || RC=$?
+[ -n "$GDBPID" ] && kill "$GDBPID" 2>/dev/null || true
+exit "$RC"

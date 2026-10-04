@@ -2781,3 +2781,82 @@ python3/  bin/python3（推理用，3.14）+ lib/（含 lldb 内嵌 python 3.11 
      libhiai_ir 里那份静态 memcpy_s 属 IR/hiai 管线，晚一点补不影响大段单跑 ✓
      （c12 672 MB 单跑实测：首次 Build 即 4/4、rc=0 ✓）
 ```
+
+### 40.7 ★★★★★ 交互式对话在 `--large-mem` 下卡死的真因与修法（实测）★★★★★
+
+```
+现象：./scripts/start_chat.sh -d … --large-mem      （交互式，不带 -p）
+      you> 1+1=        ← 敲进去被回显了，但【没有任何推理输出】，一直卡着 ✗
+      （同一模型的 -p "1+1=" 单轮却是好的 ⇒ 说明补丁本身没问题 ✓）
+```
+
+#### 真因：`gdbserver -- prog` 会给被调试进程**另开一个 pty**
+
+```
+被调试进程 fd0/fd1 → /dev/pts/11   ← 不是当前终端 ✗
+lldb        fd0/fd1 → /dev/pts/7   ← 用户的终端被它握着
+```
+程序的**输出**由 lldb 转发到终端，所以看起来"能跑" ✓；但**键盘输入永远不会转发进那个私有 pty** ✗
+⇒ 任何读键盘的程序（对话 REPL）必然卡死 ✗。（服务端/`-p` 单轮不读键盘，所以看不出 ✗）
+
+#### 修法：改成 **attach**（程序自己启动、保留自己的终端），补丁打完就地放行
+
+```
+1. 驱动自己把程序起起来（终端是它的 ✓），并用 -c 包一层让它【启动即自停】SIGSTOP
+   —— 确定性，无竞态（等 /proc/<pid>/stat 第 3 列变成 T 再继续）✓
+2. gdbserver --native-regs 127.0.0.1:PORT --attach <pid>
+3. lldb --batch
+     -o "gdb-remote …"
+     -o "process handle SIGSTOP -s false -p false"   ← ★见下★
+     -o "command script import …"                    ← 断点在 import 时就装上 ✓
+     -o "process continue" </dev/null                ← ★stdin 让开，别抢键盘★
+4. 断点回调里打补丁、返回 False（继续）—— ★不要 detach★（见下）
+```
+
+#### 三个实测踩出来的关键点
+
+```
+① ★自停用的 SIGSTOP 是"待处理信号"，会在 continue 后【再投递一次】★
+    现象：continue → 立刻又停在 SIGSTOP（frame 还在 kill 里）⇒
+          批处理结束 ⇒ lldb 退出时把停着的进程【SIGKILL】✗（实测 "Signal 9"、rc=137）
+    ⇒ 必须先 `process handle SIGSTOP -s false -p false`（不因它停、也不传递）✓
+
+② ★不要在断点回调里 proc.Detach()★
+    实测 lldb 会报
+      error: Failed to resume process: process not in stopped state after
+             synchronous resume: detached.
+    之后程序【活着却卡住不再往下跑】✗
+    ⇒ 补丁打完就 return False 继续跑；让"输入不被抢"靠 ③ 解决，而不是靠 detach ✓
+
+③ ★lldb 的 stdin 必须让开（</dev/null）★
+    程序用的是自己的终端 ✓，但 lldb 也握着同一个 tty ⇒ 用户敲的字会被
+    lldb 的命令解释器抢走 ✗ ⇒ 把 lldb 的 stdin 指到 /dev/null 即可 ✓
+    （batch 模式下 lldb 只在 -o 之间才碰 stdin，所以这样最省事 ✓）
+
+④ ★POSIX 冷知识★：非交互 shell 里 `cmd &` 的 **stdin 默认被指到 /dev/null** ✗
+    （POSIX 对"异步列表"的规定）⇒ 必须显式重定向一次：
+      exec 3<&0 … "$PY" … 0<&3 &
+    ★显式重定向优先于那条默认规则★ ✓（不写的话程序读到 EOF，直接 EOFError ✗）
+```
+
+#### 实测结果（用户那条命令，逐字）
+
+```
+$ ./scripts/start_chat.sh -d ../models/gemma4_5seg_s128 --large-mem
+[large-mem] 附着到 pid=… （程序已自停，等打补丁）…
+[large-mem] 命中 OH_AI_ModelBuildFromFile —— 开始打补丁
+[large-mem] ✓ libsec_shared.z.so   +0x03E50 / +0x051DC / +0x05138  已就位
+[large-mem] 补丁结果：成功 3 / 跳过 0 / 等模块加载 1（共 4 处）
+[large-mem] 还有 1 处要等模块加载 —— 下次 Build 时自动补 ✓
+cann-llm 0.1.0 · gemma4_5seg_s128 · nnrt · 加载 2.3s
+you> 1+1=
+[large-mem] 命中 OH_AI_ModelBuildFromFile —— 开始打补丁
+[large-mem] ✓ libhiai_ir.so        +0xC16EC  e8 02 00 b5 → nop 已就位
+[large-mem] = libsec_shared.z.so   三处「已补丁（跳过）」
+[large-mem] 补丁结果：成功 4 / 跳过 0 / 等模块加载 0（共 4 处）
+[large-mem] 补丁已就绪；程序带着自己的终端继续 ✓
+bot> 2                                        ← ★交互式回答出来了★
+```
+★注意★：这个模型的段是**懒加载**的 —— 第一次推理时才第一次 `BuildFromFile`
+⇒ 补丁正好在**该次 build 的入口**打上，赶在适配层搬权重之前 ✓
+（`-p "1+1="` 单轮同样通过 ✓）

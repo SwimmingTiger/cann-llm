@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 try:
     import lldb
@@ -81,7 +82,8 @@ def _write(debugger, addr, data):
     debugger.HandleCommand("memory write -s 1 0x%x %s" % (addr, vals))
 
 
-_STATE = {"pending": 0}   # 还有几处"模块没加载"而没补上（模块一加载就重试）
+_STATE = {"pending": 0,      # 还有几处"模块没加载"而没补上（模块一加载就重试）
+          "patched": False}   # 首次 Build 命中、补丁处理过一次
 
 
 def patch_all(debugger, quiet=False):
@@ -156,17 +158,28 @@ def patch_all(debugger, quiet=False):
 
 def on_build(frame, bp_loc, internal_dict):
     """`OH_AI_ModelBuildFromFile` 命中时打补丁，然后放行（返回 False = 继续）。"""
-    debugger = frame.GetThread().GetProcess().GetTarget().GetDebugger()
+    proc = frame.GetThread().GetProcess()
+    debugger = proc.GetTarget().GetDebugger()
+    _STATE["patched"] = True
     _p("")
     _p("[large-mem] 命中 OH_AI_ModelBuildFromFile —— 开始打补丁")
     patch_all(debugger)
+
     if _STATE["pending"]:
         # ★还有模块没加载★（nnrt 后端下 libhiai_ir.so 就是之后才来的）——
-        #   断点先留着，等模块加载事件（run 里轮询）补上 ✓
-        _p("[large-mem] 还有 %d 处要等模块加载，稍后自动补 ✓" % _STATE["pending"])
-    else:
-        bp_loc.GetBreakpoint().SetEnabled(False)
-    _p("[large-mem] 放行，进程照常运行 ✓")
+        #   不放行 detach，留着断点等**下一次 Build** 再补一轮 ✓
+        #   （真卡大段的 libsec_shared 那三处在首次 Build 前就补好了 ✓）
+        _p("[large-mem] 还有 %d 处要等模块加载 —— 下次 Build 时自动补 ✓"
+           % _STATE["pending"])
+        return False
+
+    # ★不做 detach★：在断点回调里调 Detach() 会把 lldb 的 resume 逻辑搞坏——
+    #   实测报 `Failed to resume process: process not in stopped state after
+    #   synchronous resume: detached`，之后程序活着却**卡住不再往下跑** ✗
+    #   改由驱动侧把 lldb 的 stdin 指到 /dev/null（它就不会去抢键盘），
+    #   程序本来就用【它自己的终端】✓（attach 模式下它的 stdio 一直是自己的）✓
+    bp_loc.GetBreakpoint().SetEnabled(False)
+    _p("[large-mem] 补丁已就绪；程序带着自己的终端继续 ✓")
     return False
 
 
@@ -233,6 +246,51 @@ def run(debugger=None, command=None, exe_ctx=None, result=None, internal_dict=No
     _write_status(status)
 
 
+def run_attach(debugger=None, command=None, exe_ctx=None, result=None, internal_dict=None):
+    """`large_mem_attach`：**附着式**流程 —— 放行 → 等补丁打完 → detach。
+
+    ★为什么是"打完就 detach"而不是一直挂着★
+      程序的终端必须始终是它自己的：`gdbserver -- prog` 那种"由调试器拉起"的模式会给
+      被调试进程**另开一个 pty** ✗（实测 fd0/fd1 指向 /dev/pts/N，不是当前终端），
+      程序输出靠 lldb 转发还能看见，但**键盘输入永远进不去** ⇒ 交互式对话卡死在提示符 ✗
+      attach 模式下程序本来就是被"我们"正常启动的、终端是自己的 ✓，
+      补丁一打完就 detach ⇒ 调试器彻底走人（连带它那个 `(lldb)` 提示符也不会抢输入）✓
+
+    超时（``CANN_LLM_LARGE_MEM_ATTACH_TIMEOUT``，默认 60 秒）到点也 detach，
+    免得程序被永远停着（这时打印警告，说明补丁可能没上全）。
+    """
+    target = debugger.GetSelectedTarget()
+    proc = target.GetProcess()
+    listener = lldb.SBListener("large-mem-attach")
+    proc.GetBroadcaster().AddListener(listener, lldb.SBProcess.eBroadcastBitStateChanged)
+    target.GetBroadcaster().AddListener(listener, lldb.SBTarget.eBroadcastBitModulesLoaded)
+
+    deadline = time.time() + float(os.environ.get("CANN_LLM_LARGE_MEM_ATTACH_TIMEOUT", "60"))
+    _p("[large-mem] 已附着 pid=%d，放行…" % proc.GetProcessID())
+    proc.Continue()
+
+    done = {lldb.eStateExited, lldb.eStateDetached,
+            lldb.eStateCrashed, lldb.eStateInvalid}
+    event = lldb.SBEvent()
+    while True:
+        state = proc.GetState()
+        if state in done:
+            _p("[large-mem] 程序已结束/已分离，无需再 detach")
+            return
+        if _STATE["patched"] and _STATE["pending"] == 0:
+            break
+        if time.time() > deadline:
+            _p("[large-mem] ⚠ 等补丁打上超时（%s 秒）—— 直接 detach 让程序继续跑"
+               % os.environ.get("CANN_LLM_LARGE_MEM_ATTACH_TIMEOUT", "60"))
+            break
+        listener.WaitForEvent(1, event)
+        if _STATE["pending"]:
+            patch_all(debugger, quiet=True)
+
+    proc.Detach()
+    _p("[large-mem] 已 detach：程序带着【自己的终端】继续运行 ✓（键盘输入照常可用）")
+
+
 def install(debugger, command=None, exe_ctx=None, result=None, internal_dict=None):
     """`large_mem_install`：只装断点（手工调试用；自动化请用 `large_mem_run`）。"""
     _install_bp(debugger)
@@ -250,12 +308,23 @@ def report_exit(debugger=None, command=None, exe_ctx=None, result=None, internal
 
 
 def __lldb_init_module(debugger, internal_dict):
-    for name, fn in (("large_mem_run", "run"),
+    # ★在 import 时就装好断点★
+    #   为什么：批处理模式下，**注册的 python 命令**会让后续 `-o` 失效 ✗，
+    #   而 `command script import` 不会 ⇒ 把"装断点"放这里，驱动脚本就能用
+    #   lldb 原生的 `process continue` 放行 ✓
+    #   这一点很关键：`process continue` 跑的是 lldb 自己的事件循环，
+    #   ★它会把终端的键盘输入转发给被调试进程★（`target.process.disable-stdio`
+    #   默认 false）—— gdbserver 给被调试进程另开的那个 pty 就是靠这个打通的 ✓
+    #   而用 python 命令里的 SBListener 自己等，事件循环不在跑 ⇒
+    #   输入根本转发不过去，交互式程序（对话）会卡死 ✗
+    _install_bp(debugger)
+    for name, fn in (("large_mem_attach", "run_attach"),
                      ("large_mem_install", "install"),
+                     ("large_mem_run", "run"),
                      ("large_mem_report_exit", "report_exit")):
         debugger.HandleCommand(
             "command script add -f large_mem_lldb.%s %s" % (fn, name))
-    _p("[large-mem] lldb 侧脚本已载入（large_mem_run）")
+    _p("[large-mem] lldb 侧脚本已载入（断点已装；手工调试另有 large_mem_install/run/report_exit）")
 
 
 if __name__ == "__main__":

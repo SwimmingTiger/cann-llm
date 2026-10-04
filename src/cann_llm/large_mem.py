@@ -131,10 +131,13 @@ def describe_patches() -> List[str]:
     return lines
 
 
-def build_large_mem_argv(py: str, args: Sequence[str],
+def build_large_mem_argv(py: str, module: str, args: Sequence[str],
                          env: "Optional[dict]" = None
                          ) -> Tuple[Optional[List[str]], List[str], str]:
-    """构造「自动打补丁地运行 ``py`` + ``args``」的 argv。
+    """构造「自动打补丁地运行 ``py -m module args…``」的 argv。
+
+    实际交给编排脚本的是 ``(python, 模块名, 模块参数…)``：脚本要用 ``runpy``
+    在**同一个进程**里把模块跑起来（先自停等调试器，见 ``large_mem_run.sh``）✓
 
     返回 ``(argv, 提示行, 错误信息)``；失败时 ``argv`` 为 ``None``。
     """
@@ -171,15 +174,19 @@ def build_large_mem_argv(py: str, args: Sequence[str],
             "      （发布包里它在 bin/lldb，并需要 lib/liblldb.so 在 LD_LIBRARY_PATH 里）")
 
     port = int(env.get("CANN_LLM_LLDB_PORT") or DEFAULT_LARGE_MEM_PORT)
-    argv = ["/bin/sh", driver, py, "-X", "faulthandler"] + list(args)
+    argv = ["/bin/sh", driver, py, module] + list(args)
 
     hints = [
         "── --large-mem：自动给推理进程打「大模型补丁」（经 ptrace 改内存）──",
         "  单段 .ms 上限：不补丁 %s  →  补丁后 %s" % (LIMIT_STOCK, LIMIT_PATCHED),
         "  将改这几处 2 GiB 上限检查（先校验原字节，对不上就跳过并告警）：",
     ] + describe_patches() + [
-        "  编排：%s gdbserver 127.0.0.1:%d  +  lldb 批处理接入" % (
-            os.path.basename(gdbserver), port),
+        "  接法：程序先自停 → %s 附着 → lldb 打补丁（程序的终端自始至终是它自己的）"
+        % os.path.basename(gdbserver),
+        "        ★输入能进得去★：不打补丁时 gdbserver 会给被调试进程另开一个 pty，"
+        "键盘输入永远进不去 ✗；",
+        "        这里改成 attach ⇒ 程序用【自己的终端】，交互式对话照常可用 ✓",
+        "  端口 %d；等补丁的超时可用 CANN_LLM_LARGE_MEM_ATTACH_TIMEOUT 调（默认 60 秒）" % port,
         "  ★这是【验证手段】不是交付方案：改的是系统库的进程内副本（内存），磁盘不动 ✓",
     ]
     return argv, hints, ""
