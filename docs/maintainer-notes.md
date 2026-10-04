@@ -1596,3 +1596,72 @@ NPU 侧 hilog：npu_graph_executor_om.cc "load model succ: modelName=… modelId
 △ 已知待办：hilog 有 88 次 "… is not supported in npucl"（BatchMatMul/ReduceMean 等），
   说明相当一部分算子未落在 NPU 上，需另行核实其实际执行者
 ```
+
+## 30. ★★★★★ 更粗的切法实验：段 0-11（12 层）跑通；含 KV 槽的段卡在适配层 Set Data ★★★★★
+
+**目的**：验证"OMG 退出新路线后，是否还能用更少的段"（旧 §2 把「OMG 单张量 ≤ INT_MAX」
+列为"必须分段"的头号理由）。
+
+**做法**：用 `--fmk=ONNX + WEIGHT_QUANT`（不带 OMG）导出并按 12/12/11 层切三段。
+
+**结果**：
+
+| 段 | 层数 | KV 模式 | ONNX | 转换 | int8 `.ms` | 量化张量 | 设备 Build/Predict |
+|---|---|---|---|---|---|---|---|
+| 0-11 | 12 | none | 1.79 GB | ★SUCCESS★ | 435 MB | ★110★ | ★0 / 0 ✓★ |
+| 12-23 | 12 | ★out★（store+shared） | 2.78 GB | ★SUCCESS★ | 672 MB | ★92★ | ✗ -1 / -2 |
+| 24-34 | 11 | ★in★（shared） | 2.88 GB | ★SUCCESS★ | 696 MB | ★79★ | ✗ -1 / -2 |
+
+**结论 1：OMG 的 INT_MAX 限制确实随 OMG 一起消失** ✓
+
+```
+旧理由「OMG 单张量 ≤ INT_MAX」针对的是 `embed_tokens_per_layer` = [262144, 8960] = 2.35e9 元素 ✗
+但那张量【根本不在图里】—— 它是【输入】`per_layer_N`，由主机侧切片后喂进来 ✓
+⇒ 所以它从未进入 OMG 或 converter 的图 ⇒ 该限制对本路线不成立 ✓
+⇒ 实测印证：12 层/段（图 1.79 GB）在三段里都【转换成功】✓
+```
+
+**结论 2：但含 KV 共享槽的段在设备侧失败，原因【不是】旧文档担忧的"特定 KV"** ✗
+
+```
+失败链（hilog）：
+  ① nnrt_delegate.cc:765 InitNNCompilation# hiai_foundation is not nullptr,
+     current device name prefix is not HIAI_F        ⇒ ★确实进了在线通道★ ✓
+  ② ★NNRt_HiAIAdapter: [nodict]★★Set Data Fail.★★★  ⇒ ★★就是这里★★
+  ③ BuildImpl from lite graph failed, failed to parse from lite graph.
+  ④ nnrt_delegate.cc:772 InitNNCompilation# Build NNCompilation failed, ret: 1
+  ⑤ BuildKirinNPUModel# Create full model kernel failed
+
+对照成功段（g4s0_wq.ms，4 层）：没有 Set Data Fail；两边都有 libhiai_ir_infershape 加载失败
+（该库在系统里确实不存在，errno=2）⇒ ★与本失败无关★ ✓
+```
+
+**反编译该报错点（`libhiai_adapter.so` sub_67CBC）**：
+
+```c
+v7 = *(int *)(a4 + 48);      // isMerged
+v8 = *(u64 *)(a4 + 24);      // offset
+sz = *(u64 *)(a4 + 56);      // size
+if (v7 == 2) { rc = memcpy_s(baseAddr + v8, ★bufSize - v8★, src, sz); ge::Tensor::SetData(…); if (rc) LOG("Set Data Fail."); }
+if (v7 == 1) { if (memcpy_s(baseAddr + v8, bufSize - v8, src, sz)) LOG("Set Data Fail."); }
+if (v7 == 0) { ge::Tensor::SetData(…); }        // 不拷贝
+else LOG("Parameter isMerged is invalid.");
+```
+
+```
+⇒ `Set Data Fail` 的真实含义：★`memcpy_s` 失败★
+  —— 即「目标缓冲剩余空间（bufSize − offset）不足以容纳 size」或参数非法 ✓
+⇒ 这是 ★hiai 适配层自身的缓冲/偏移计算★ 与 KV 共享槽（输入/输出同名、in-place）形态的冲突 ✗
+  ★不是★ "OMG 高层数只吃特定 KV" 那件事 ✗（那条在新路线下没被触发 ✓）
+```
+
+**⇒ 净结论**：
+
+```
+✓ 更粗的切法【部分可行】：不含 KV 共享槽的段（0-11，12 层）完全跑通（int8 · Build 0 · Predict 0）
+✗ 含 KV 共享槽的段（12-23 out / 24-34 in）在 hiai 适配层 Set Data 处失败 ✗
+   ⇒ 若要合并这些段，需要先解决适配层的缓冲/偏移与 in-place 语义冲突
+   ⇒ 可行方向：把 KV 槽改成显式独立输入/输出（不让同名张量同时进出一张图）
+★ 附：>2 GB 的 ONNX 导出会切成 external data（壳 + 数百个数据文件），
+  送进转换环境时必须【整目录一起送】，只送 seg.onnx 会失败 ✗（本次踩过 ✓）
+```
