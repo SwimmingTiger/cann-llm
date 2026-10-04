@@ -103,8 +103,15 @@ python3/bin/python3 -m unittest discover -s tests -t . # 不用 pytest 也能跑
 字段：**≈1.09 GB（≈1.02 GiB）**。
 
 ```sh
-scripts/start_chat.sh -d <模型目录> --large-mem
-scripts/start_server.sh -d <模型目录> --large-mem      # 不能与 -B 同用
+scripts/start_chat.sh   -d <模型目录> --large-mem              # 交互式对话（键盘输入照常 ✓）
+scripts/start_server.sh -d <模型目录> --large-mem              # 前台服务
+scripts/start_server.sh -d <模型目录> --large-mem -B           # ★后台服务也可以★
+```
+> 服务端不读键盘，所以后台跑完全没问题：补丁日志写进 `log/<时间>.server.log`，
+> 补丁时机是"第一次真正 build"（即第一个请求进来时）✓
+```sh
+scripts/start_server.sh --status
+scripts/start_server.sh --stop        # 编排脚本会被整体收掉，不留孤儿
 ```
 
 | 单段 `.ms` | 不处理 | `--large-mem` |

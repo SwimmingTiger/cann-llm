@@ -185,20 +185,37 @@ def do_stop(root: str) -> int:
                 pass
         return 0
     info(f"停止 pid={pid} …")
-    try:
-        os.kill(pid, 15)
-    except OSError as e:
-        die(f"发送信号失败: {e}")
-    for _ in range(50):
-        if not alive(p):
-            break
-        time.sleep(0.2)
-    else:
-        warn("进程未在 10 秒内退出，发送 SIGKILL")
+    # ★按【进程组】发信号，而不是只发那一个 pid★
+    #   服务是 start_new_session=True 起的 ⇒ 它自己是组长；
+    #   `--large-mem` 时组长是**编排脚本**，它下面还挂着被调试的服务 + gdbserver + lldb
+    #   —— 只杀组长会把这几个留成孤儿 ✗（实测：留下的孤儿还占着 NPU ✗，
+    #   而且脚本里的 trap 未必来得及跑 ⇒ 不能指望它）
+    def _signal(sig: int) -> None:
         try:
-            os.kill(pid, 9)
+            os.killpg(pid, sig)
+            return
         except OSError:
             pass
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+    _signal(15)
+    # ★等【整个进程组】消失，而不是只等组长★
+    #   实测教训：`--large-mem` 下组长（编排脚本）收到 TERM 立刻退出 ✓，
+    #   但组里被调试的**服务本体**可能还挂在 ptrace 停住状态 ✗ ——
+    #   只判组长死活的话会"以为停干净了"，把服务留成孤儿（还占着 NPU ✗）。
+    #   `killpg(pgid, 0)` 在"组里还有活进程"时返回成功、全没了才 ESRCH ✓
+    for _ in range(50):
+        try:
+            os.killpg(pid, 0)
+        except OSError:
+            break                      # 整组都没了 ✓
+        time.sleep(0.2)
+    else:
+        warn("进程组未在 10 秒内退出，发送 SIGKILL")
+        _signal(9)                     # 整组收掉，别留孤儿 ✗
         time.sleep(0.5)
     for f in (p["pid"], p["state"]):
         try:
@@ -231,7 +248,8 @@ _USAGE = """用法: scripts/start_server.sh [选项]
                         2 GiB 上限检查改成 nop，让单段 .ms 上限从 ≈545 MB 提到
                         ≈1.09 GB（详见 docs/maintainer-notes.md §32–§40）。
                         全自动、不需要人工敲 lldb 命令；补丁只改内存、不动磁盘
-                        （属验证手段，不是交付方案 ✗）；不能和 -B 一起用
+                        （属验证手段，不是交付方案 ✗）。★可与 -B 同用★：
+                        服务端不读键盘，补丁日志写进 log/
       --status          查看状态
       --stop            停止后台服务
   -h, --help            显示本帮助
@@ -359,18 +377,15 @@ def run_server(root: str, argv: "List[str]") -> int:
     d = find_model_dir(root, o["model_dir"] if isinstance(o["model_dir"], str) else None)
     if d is None:
         die("未指定模型目录：用 -d 指定，或把模型放到 "
-            f"{root}/models/<名字>/ 下（需含 executor.json）")
+            f"{root}/models/<名字>/ 下")
     ok(f"模型目录: {d}")
-    for need in ("executor.json", "context.json", "tokenizer.json"):
-        if not os.path.isfile(os.path.join(d, need)):
-            die(f"模型目录缺少 {need}：{d}")
-    import glob as _glob
-    if not (_glob.glob(os.path.join(d, "*.omc"))
-            and _glob.glob(os.path.join(d, "SubGraph_*.weight"))):
-        die(f"模型目录缺少 *.omc 或 SubGraph_*.weight：{d}")
-    ok("模型文件: " + ", ".join(
-        [os.path.basename(x) for x in _glob.glob(os.path.join(d, "*.omc"))[:1]]
-        + [os.path.basename(x) for x in _glob.glob(os.path.join(d, "SubGraph_*.weight"))[:1]]))
+    # ★模型目录"够不够用"交给后端自己判断★ —— 与 run_chat 完全一致 ✓
+    #   这里以前**不分后端**一律按 cann/OMC 包的要求硬查
+    #   （executor.json / context.json / *.omc / SubGraph_*.weight）✗
+    #   ⇒ 那些文件只有官方 OMC 包才有，别的模型目录（hiai 自打包、nnrt 的分段 .ms
+    #     目录……）**根本起不来** ✗ —— 而 chat 路径从来不做这个校验 ✓
+    #   各后端要什么文件不一样（cann 要 .omc+weight、nnrt 要 .ms、hiai 要 …），
+    #   启动器猜不准 ⇒ 让它照原样交给后端报自己的错（错误信息也更准确 ✓）
     kv = model_info_line(d)
     if kv:
         ok(f"上下文窗口: {kv} token  (= kv_cache_max_len，输入 + 输出之和)")
@@ -402,8 +417,9 @@ def run_server(root: str, argv: "List[str]") -> int:
 
     if o.get("lldb") and o["background"]:
         die("--lldb 不能和 -B 一起用：调试器要前台交互")
-    if o.get("large_mem") and o["background"]:
-        die("--large-mem 不能和 -B 一起用：补丁要在前台由 lldb 批处理打上")
+    # ★--large-mem 可以和 -B 同用★：服务端不读键盘，补丁流程完全自动
+    #   （后台时把【编排脚本】本身作为被守护的进程；它的 pid 记进 .run/，
+    #    `--stop` 杀掉它时，脚本的 trap 会连带收掉被调试的服务与 gdbserver ✓）
 
     print()
     if not o["background"]:
@@ -452,7 +468,20 @@ def run_server(root: str, argv: "List[str]") -> int:
 
     info("后台启动…")
     log = open(p["log"], "a", encoding="utf-8")     # noqa: SIM115
-    proc = subprocess.Popen([py, "-X", "faulthandler"] + args, env=env,
+    # ★--large-mem 时，被守护的进程是【编排脚本】而不是裸 python★
+    #   （脚本负责 attach 调试器、打补丁、把服务跑在它自己的终端上；
+    #    服务端不读键盘，所以后台跑完全没问题 ✓）
+    cmd = [py, "-X", "faulthandler"] + args
+    if o.get("large_mem"):
+        from .large_mem import build_large_mem_argv
+        argv_lm, hints, err = build_large_mem_argv(py, args[1], list(args[2:]), env)
+        if argv_lm is None:
+            die(err)
+        for line in hints:
+            info(line) if line else print()
+        print()
+        cmd = argv_lm
+    proc = subprocess.Popen(cmd, env=env,
                             stdout=log, stderr=subprocess.STDOUT,
                             start_new_session=True)
     with open(p["pid"], "w", encoding="utf-8") as fh:

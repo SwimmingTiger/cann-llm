@@ -92,7 +92,24 @@ exec 3<&0
 "$PY" -X faulthandler -m "$MOD" "$@" 0<&3 &
 APP=$!
 GDBPID=""
-trap 'kill "$APP" 2>/dev/null || true; [ -n "$GDBPID" ] && kill "$GDBPID" 2>/dev/null || true; rm -f "$RELEASE" 2>/dev/null || true' INT TERM HUP
+# ★收到 TERM/INT 时的收尾顺序（实测踩过）★
+#   ① 先摘掉调试器 —— 被 ptrace 跟踪的进程收到 TERM 会**停在 ptrace-stop 里**，
+#      信号只是挂着不生效 ✗（表现：`--stop` 等满 10 秒才靠 SIGKILL 收掉 ✗）
+#   ② 再对程序 TERM，并**重试几秒**（刚脱离跟踪的那一瞬间仍可能吞掉信号）
+#   ③ 还不走就 KILL —— 宁可干净收掉，也别留个占着 NPU 的孤儿 ✗
+trap 'set +e
+[ -n "$GDBPID" ] && kill "$GDBPID" 2>/dev/null
+kill "$APP" 2>/dev/null
+i=0
+while [ "$i" -lt 30 ] && kill -0 "$APP" 2>/dev/null; do
+    sleep 0.1
+    kill "$APP" 2>/dev/null
+    i=$((i + 1))
+done
+kill -9 "$APP" 2>/dev/null
+kill -9 "$GDBPID" 2>/dev/null
+rm -f "$RELEASE" 2>/dev/null
+exit 0' INT TERM HUP
 
 # ── 2) gdbserver 附着（跑着的进程也能附；附上即停 ✓）──
 sleep 0.3
@@ -112,6 +129,8 @@ while [ "$i" -lt 40 ]; do
     i=$((i + 1))
     if "$LLDB" --batch \
         -o "gdb-remote 127.0.0.1:$PORT" \
+        -o "process handle SIGTERM -s false -p true" \
+        -o "process handle SIGINT -s false -p true" \
         -o "command script import $SCRIPT" \
         -o "process continue" </dev/null; then
         RC=0

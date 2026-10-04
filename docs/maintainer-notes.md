@@ -2928,3 +2928,39 @@ bot> 2                                                        ← ★交互式�
 you>
 ```
 `-p "1+1="` 单轮同样通过 ✓（rc=0）
+
+### 40.9 服务端（`start_server.sh`）接入 `--large-mem`：外加两个实测修出来的毛病
+
+```
+scripts/start_server.sh -d <模型目录> --large-mem          # 前台
+scripts/start_server.sh -d <模型目录> --large-mem -B       # ★后台也可以★（补丁日志进 log/）
+```
+服务端不读键盘 ⇒ §40.7 的"私有 pty"问题在它身上根本不存在 ✓；
+`--large-mem` 的报到发生在**第一次真正 build**（也就是第一个请求进来时），
+那时放行标记早就写好了 ⇒ runner 直接过 ✓，补丁在该次 build 入口落地 ✓（实测 4/4）。
+
+#### 修出来的毛病 ①：服务端**不分后端**硬查 OMC 包的文件 ✗
+
+```
+run_server 里原本一律要求  executor.json / context.json / *.omc / SubGraph_*.weight
+⇒ 那些文件只有官方 OMC 包才有 ⇒ hiai 自打包、nnrt 的分段 .ms 目录**根本起不来** ✗
+（chat 路径 run_chat 从来不做这个校验 ✓）
+```
+⇒ 改成**与 run_chat 完全一致**：找到目录就打印，模型文件够不够**交给后端自己报**
+（各后端要什么不一样，启动器猜不准；后端报的错也更准确 ✓）
+
+#### 修出来的毛病 ②：`--stop` 收不干净（留孤儿，还占着 NPU ✗）
+
+```
+现象：--stop 等满 10 秒 → SIGKILL → 看着"已停止"，但 app/gdbserver/lldb 还活着 ✗
+两个原因（都实测）：
+· do_stop 只对**组长 pid** 发信号，而 --large-mem 下组长是**编排脚本**，
+  它下面挂着被调试的服务 + gdbserver + lldb ⇒ 只杀组长就留下一串孤儿 ✗
+· 而且它只等**组长**退出就收工 ⇒ 组里还有活进程也不管 ✗
+⇒ 改成：按**进程组**收发信号（os.killpg），并等**整个组**消失
+  （`killpg(pgid, 0)` 返回成功即"组里还有活的"），超时才整组 SIGKILL ✓
+· 另外：被 ptrace 跟踪的进程收到 TERM 会**停在 ptrace-stop 里**，
+  信号只是挂着不生效 ✗ ⇒ 编排脚本的 trap 改成：先摘调试器 → TERM 程序并重试 3 秒
+  → 还不走就 KILL ✓
+实测：--stop 从「10 秒 + SIGKILL + 留孤儿」变成 ★0.65 秒、0 残留★ ✓
+```
