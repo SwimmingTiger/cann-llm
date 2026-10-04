@@ -43,6 +43,13 @@ where = ["src"]
 [tool.setuptools.dynamic]
 version = { attr = "cann_llm.version.__version__" }
 
+# ★测试只收 tests/★
+#   不限定的话，pytest 从仓库根递归会走进发布包自带的 python3/ —— 那里有
+#   CPython 自己的 stdlib 测试（idlelib/idle_test 等，要 Tk）⇒ 一片 error ✗
+#   （pytest 默认的 norecursedirs 只忽略 `.*`/build/dist/venv，不认 python3/ ✓）
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py39"

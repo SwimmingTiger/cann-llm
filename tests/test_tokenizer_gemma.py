@@ -1,17 +1,26 @@
-import os
 """与 HF 的 Gemma tokenizer 对拍（需装有 tokenizers 库的开发环境 ✓）
 
 路径经环境变量提供，缺省路径不存在时本文件自动跳过 ✓
+
+★跳过用 `unittest.SkipTest`★（而不是 `pytest.skip`）：
+  · 本文件原先调 `pytest.skip` 却没 `import pytest` ⇒ 被 loader import 时
+    直接 `NameError` ✗（`python -m unittest` 与 pytest 都会炸）
+  · `SkipTest` 是标准库的，两种跑法都认 ✓ 不需要把 pytest 变成硬依赖
 """
-import sys, time
-sys.path.insert(0, os.environ.get("CANN_LLM_TMP", ""))
+import os
+import sys
+import time
+import unittest
+
 if not os.path.isdir(os.environ.get("CANN_LLM_TMP", "")):
-    pytest.skip("未设置 CANN_LLM_TMP（对拍脚本目录），跳过", allow_module_level=True)
+    raise unittest.SkipTest("未设置 CANN_LLM_TMP（对拍脚本目录），跳过")
+
+sys.path.insert(0, os.environ.get("CANN_LLM_TMP", ""))
 from tok_gemma import GemmaTokenizer
 from transformers import AutoTokenizer
 M = os.environ.get("GEMMA_MODEL_DIR", "")
 if not M or not os.path.isdir(M):
-    pytest.skip("未设置 GEMMA_MODEL_DIR，跳过", allow_module_level=True)
+    raise unittest.SkipTest("未设置 GEMMA_MODEL_DIR，跳过")
 t0 = time.time(); mine = GemmaTokenizer(M); print("  我的加载 %.1fs" % (time.time()-t0), flush=True)
 hf = AutoTokenizer.from_pretrained(M)
 tests = ["Hello, world!", "The capital of France is", "1+1=", "你好，世界",
