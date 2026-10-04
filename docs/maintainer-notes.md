@@ -1934,3 +1934,105 @@ lldb -o "gdb-remote 127.0.0.1:40021"
 ⇒ 准确说法是：★内存分配得出来，但"把 4.26 GB 当 destMax 传给 memcpy_s"这个调用被安全函数拒绝★
    失败发生在【参数校验】阶段——一个字节都还没拷 ✓（§32.1 现场：count 只有 4 字节 ✓）
 ```
+
+### 32.8 ★为什么会有这条限制、目的是什么、有没有文档★ —— 出处是 securec 源码本身
+
+**设备上实现这个限制的是华为的 securec（libboundscheck，木兰 PSL v2 开源）**：
+设备侧导出实测 `/system/lib64/chipset-pub-sdk/libsec_shared.z.so` →
+`memcpy_s / memset_s / memmove_s / strcpy_s / vsnprintf_s` ✓
+
+**① 有文档，而且就写在头文件里**（`include/securectype.h` 文件头 Notes）：
+
+```
+ * Notes: User can change the value of SECUREC_STRING_MAX_LEN and SECUREC_MEM_MAX_LEN
+ *        macro to meet their special need, but ★The maximum value should not exceed 2G★.
+```
+
+对应的宏定义与编译期兜底（同一文件）：
+
+```c
+/* Define the max length of the string */
+#ifndef SECUREC_STRING_MAX_LEN
+#define SECUREC_STRING_MAX_LEN 0x7fffffffUL
+#endif
+/* Add SECUREC_MEM_MAX_LEN for memcpy and memmove */
+#ifndef SECUREC_MEM_MAX_LEN
+#define SECUREC_MEM_MAX_LEN 0x7fffffffUL          /* ← 就是 §32.3 二分到的那个值 ✓ */
+#endif
+#if SECUREC_STRING_MAX_LEN > 0x7fffffffUL
+#error "max string is 2G"
+#endif
+```
+
+⇒ 这是**白纸黑字的设计约束**（"不得超过 2G"），而且**允许使用者按需改这个宏** ✗
+—— 但系统库是预编译的专有二进制，我们改不了 ✓
+
+**② 我们命中的分支与源码逐字对应**（`src/memcpy_s.c`）：
+
+```c
+SECUREC_INLINE errno_t SecMemcpyError(void *dest, size_t destMax, const void *src, size_t count)
+{
+    if (destMax == 0 || destMax > SECUREC_MEM_MAX_LEN) {
+        SECUREC_ERROR_INVALID_RANGE("memcpy_s");
+        return ERANGE;                 /* ★34★ —— 正是 §32.1 读到的 w22 ✓ */
+    }
+    ...
+    if (count > destMax) {
+        (void)SECUREC_MEMSET_FUNC_OPT(dest, 0, destMax);   /* ← 注意这里用 destMax 去复位 */
+        ...
+        return ERANGE_AND_RESET;
+    }
+```
+
+参数快检宏（先在这里就被拦下）：
+
+```c
+#define SECUREC_MEMCPY_PARAM_OK(dest, destMax, src, count) (SECUREC_LIKELY((count) <= (destMax) && \
+    (dest) != NULL && (src) != NULL && ★(destMax) <= SECUREC_MEM_MAX_LEN★ && \
+    (count) > 0 && SECUREC_MEMORY_NO_OVERLAP((dest), (src), (count))))
+```
+
+**③ 目的是什么（从代码可确证的动机）**
+
+```
+· destMax 是 Annex K 语义里"调用方【声明】的目标缓冲容量"，抓的是缓冲区溢出
+  —— 它约束的是【声明值】，不是真实可用内存 ✗（所以 Resize 出 4.26 GB 与它无关 ✓）
+· 错误分支里会 `memset(dest, 0, destMax)` 做复位 ⇒ ★库必须先确认 destMax 本身可信★，
+  否则一个垃圾 destMax 会直接变成"memset 几个 GB"的灾难 ✗
+· 封顶 INT_MAX 让 32/64 位行为一致、比较与指针加法在 32 位下不溢出
+  （同文件里 "Limited format input and output width, use signed integer" 是同一取向 ✓）
+⇒ 本质是 ★"明显不可能正确的参数"上的 fail-fast★：>2 GB 的声明值几乎必然是调用方 bug ✓
+```
+
+**④ 华为自己也被这条卡过 —— 源码里有现成的例外注释**（很能说明"它是参数合理性检查、不是内存检查"）：
+
+```c
+#if defined(SECUREC_COMPATIBLE_WIN_FORMAT)
+    /*
+     * The fread API in windows will call memcpy_s and pass 0xffffffff to destMax.
+     * To avoid the failure of fread, we don't check desMax limit.
+     */
+#define SECUREC_MEMCPY_PARAM_OK(...)   /* ★Windows 兼容构建里干脆不查这条★ */
+```
+
+⇒ 官方认可"这条限制会误伤正常调用"，但**例外只给 Windows 兼容构建**；
+我们设备上走的是非 Windows 分支，照旧强制 ✗
+
+**⑤ 为什么 hilog 里什么都没有**：错误处理器宏在 release 构建里是**空宏**
+（`securecutil.h`：`/* Default handler is none */`），只有 `_DEBUG` +
+`SECUREC_ERROR_HANDLER_BY_ASSERT/PRINTF/FILE_LOG` 才会输出 ✓
+⇒ 所以只能靠返回码定位（§32.1 的 `w22 = 34`）✓ ✗ 日志指望不上
+
+**出处**（开源仓库 `openharmony/third_party_bounds_checking_function`）：
+
+```
+include/securectype.h   —— "The maximum value should not exceed 2G" + 宏定义 + #error
+include/securec.h       —— API 原型与错误码（ERANGE 34 / ERANGE_AND_RESET 162 …）
+src/memcpy_s.c          —— SecMemcpyError() 与 SECUREC_MEMCPY_PARAM_OK()
+src/securecutil.h       —— 错误处理器宏（release 下为空）
+```
+
+**⑥ 对我们的意义**：这条限制在**用户态 API 契约**里，绕不过（系统库只读、专有）
+⇒ 只能分段（§32.4：每段 .ms ≤ ≈520 MiB，工程上 ≤300 MB ✓）。
+真正"可修"的点在**调用方**：适配层拿整块 4.26 GB 当 `destMax`，而每次只拷 4 字节 ✗
+—— 若它按"本次可用窗口"声明就不会撞上限（但那是专有实现，我们改不了 ✓）。
