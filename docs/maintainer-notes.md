@@ -1725,3 +1725,212 @@ else LOG("Parameter isMerged is invalid.");
 现改为按层区间命名：★L0-11_wq.ms / L0-23_wq.ms★ ✓
 （重导 L0-11 得到 455,682,136 字节、110 个量化张量，与首次【逐位一致】⇒ 可复现 ✓）
 ```
+
+---
+
+## 32. ★★★★★ 上限的真正机制（调试器实测 + 直接探测）：适配层为整段权重声明约 4×模型大小的缓冲，securec `memcpy_s` 在 destMax ≥ 2 GiB 时一律返回 ERANGE ★★★★★
+
+§31 用"模型大小"括出了 `(435, 672] MB` 的**经验**边界，但没给机制。本节把机制**测出来**（不是推的）：
+
+```
+★真正限制不是"模型大小"这个数字，而是适配层的 32 位缓冲上限：
+  bufSize(适配层为整段权重一次性声明的缓冲) ≈ 3.94 × .ms 文件大小
+  而 securec 的 memcpy_s 规定 destMax > 0x7fffffff(2 GiB - 1) 就【直接拒绝】
+  ⇒ .ms 文件 ≤ ~520 MiB 才可能过；按层数说就是【每段约 ≤ 7 层】★
+```
+
+### 32.1 现场（lldb 附加到真实失败的进程）
+
+```
+失败样本：L0-23_wq.ms（1,161,204,624 B，含真 int8 权重）
+断点：libhiai_adapter.so 基址 + 0x67d68
+      （即失败日志 "Set Data Fail." 所在函数 1181/sub_67CBC 里的 memcpy_s 调用点）
+```
+
+调用点反汇编：
+
+```
+<+168>: add x0, x0, x8      ; dest    = 缓冲基址 + offset
+<+172>: sub x1, x1, x8      ; destMax = bufSize - offset        ← 断在这
+<+176>: mov x2, x19         ; src
+<+180>: mov x3, x21         ; count
+<+184>: bl  memcpy_s
+<+188>: mov w22, w0         ; 保存返回码
+<+208>: cbz w22, <+252>     ; 返回 0 才算成功
+<+212>: ...                 ; 否则走 "Set Data Fail."
+```
+
+断点处寄存器（第一次命中，就是失败的那次）：
+
+```
+x0  = 0x59d5201b40                     dest
+x1  = 0x110bfc874 = 4,575,984,244      ★destMax ≈ 4.26 GiB★
+x8  = 0                                offset
+x19 = 0x568dce3478                     src
+x21 = 4                                count —— ★只有 4 字节★
+```
+
+再在失败分支（`基址+0x67d90`）下断，命中的返回码：
+
+```
+w22 = 0x22 = 34 = ERANGE
+```
+
+⇒ **失败与"正在拷贝的那个张量"毫无关系**：`memcpy_s` 在动任何字节之前，就先否决了**声明的 `destMax`**。
+
+### 32.2 这块缓冲是谁定的
+
+```
+调用链：HIAIDevice::BuildLiteGraph（libneural_network_runtime_ext.so）
+        → 适配层 sub_2579 → sub_2574 → sub_2019 → sub_1197 → sub_1182 → sub_1181（memcpy 处）
+```
+
+`sub_2019` 里的关键三条：
+
+```
+ldr  x1, [x20, #0x108]        ; ★size = *(x20+0x108)：一个【预先算好】的字段★
+ge::Buffer::Resize(size)
+ge::Buffer::MutableData()     ; → base
+循环遍历张量（stride 0x40）：
+    sub_1197(name, base, *(x20+0x108), tensor)      ; bufSize 原样往下传
+```
+
+现场读该结构：`*(x20+0x108) = 0x110bfc874`，紧邻的 `*(x20+0x100) = 0xe0c`（3596，形如条目数）。
+⇒ **整段模型的权重被塞进【一整块】缓冲，一次 `Resize` 分配**；每个张量只是在这块缓冲里按 `offset` 续着写。
+
+### 32.3 为什么是 2 GiB：直接把阈值的边界二分出来
+
+`memcpy_s` 可以从 `libhiai_adapter.so` 的依赖链上 dlsym 到，所以不必猜实现——直接二分它的上限（返回 `34` 视为被拒）：
+
+```python
+import ctypes
+h = ctypes.CDLL("<libhiai_adapter.so 的绝对路径>")   # dlsym 会沿依赖链找到 memcpy_s
+f = h.memcpy_s; f.restype = ctypes.c_int
+f.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t]
+dst = ctypes.create_string_buffer(64)
+src = ctypes.create_string_buffer(b"abcd", 16)
+for n in (0x7ffffffe, 0x7fffffff, 0x80000000, 0x110bfc874):
+    print(hex(n), f(dst, n, src, 4))
+```
+
+实测输出：
+
+```
+destMax = 0x7fffffff (2,147,483,647)   -> 0    （接受）
+destMax = 0x80000000 (2,147,483,648)   -> 34   （ERANGE）
+二分结果：最大可接受 = 0x7fffffff，第一个被拒 = 0x80000000
+```
+
+⇒ **阈值正好是 2³¹ − 1**，即 securec `memcpy_s` 的 `destMax > SECUREC_MEM_MAX_LEN(0x7fffffff)` 检查。
+这是**32 位有符号数的硬上限**，与 RAM / NPU / 显存 / KV **统统无关**（也再次印证 §31 的"与 KV 无关"）。
+
+### 32.4 换算成工程规则
+
+```
+实测比例（单点）：bufSize / 文件大小 = 4,575,984,244 / 1,161,204,624 = 3.9407
+⇒ 适配层按【约 4 字节/元素】给权重计数
+   —— ★int8 的 1 字节存储【并不能】减少它声明的缓冲★（花在量化上的存储收益在这条路径上没了）
+⇒ 能过的文件大小上界 ≈ 0x7fffffff / 3.9407 ≈ 545,000,000 B ≈ 520 MiB
+```
+
+与 §31 的实测完全对得上：
+
+| 段 | `.ms` 大小 | 外推 bufSize | 设备实测 |
+|---|---|---|---|
+| L0-11 | 455,682,136 B | ≈ 1.68 GiB（限内 ✓） | ★Build 0 · Predict 0★ |
+| L12-23 | 705,524,856 B | ≈ 2.59 GiB（超限 ✗） | ✗ -1 / -2 |
+| L0-23 | 1,161,204,624 B | 4.26 GiB（★就是实测字段值★） | ✗ -1 / -2 |
+
+**结论（可直接当规则用）**：
+
+```
+· 每段 .ms 控制在 ★≤ 300 MB★（≈ ≤ 7 层）—— 与 §31 的建议一致，安全侧留足余量
+· 理论上界 ≈ 520 MiB，但别贴着走（比例目前是单点外推）
+· 这个上限【无法从外部绕过】：系统库只读、实现专有
+  ⇒ 唯一手段仍然是分段；"能不能用更少的段"的答案就是"受这条 32 位上限约束"
+```
+
+### 32.5 仍未验证的部分（如实标注，别当结论用）
+
+```
+✗ 精确公式 "bufSize = 4 × 元素数"【未验证】：只验证了 (a) 单点比例 3.94、
+  (b) 边界落在 (455 MB, 705 MB]。第二点（如 g4s0_wq.ms 147 MB，外推 ≈ 580 MB）还没测
+✗ "为什么是 4 字节/元素"未知（GE 图按 fp32 建 desc？还是别的途径）
+  ⇒ 这一条决定了【用 fp16 导出 ONNX 能否把上界抬高一倍】——★值得单独一试★
+```
+
+### 32.6 复现步骤
+
+**前置条件（漏了就白折腾一小时）**：`LD_LIBRARY_PATH` 必须含 `ndk` **和** `platformsdk` 两个目录，
+否则加载 `libmindspore_lite_ndk.so` 会在 musl 的 `dlopen` 里★段错误★ ✗，看起来像"环境/ABI 坏了" ✓
+（机制与实测见 `docs/gemma4-on-npu.md` §8.6；`launcher.py` 的 `ENGINE_LIB_DIRS` 已固化这条 ✓）。
+
+```
+export LD_LIBRARY_PATH=/system/lib64/ndk:/system/lib64/platformsdk
+# ★注意：探测脚本【不需要】调试器，普通进程直接跑即可★（过去"必须挂 gdbserver"的印象是缺上面那行导致的 ✓）
+
+# 终端 A：前台起调试服务（阻塞，别用 nohup/后台）
+LD_LIBRARY_PATH=/system/lib64/ndk:/system/lib64/platformsdk \
+  huawei-debug-lldb-server gdbserver 127.0.0.1:40021 -- <python3.14> <加载 .ms 的临时探测脚本> 60
+# 终端 B：
+lldb -o "gdb-remote 127.0.0.1:40021"
+(lldb) image list -o -f libhiai_adapter.so     # 取基址，例如 0x...6c0000
+(lldb) breakpoint set -a <基址+0x67d68>        # memcpy_s 调用点
+(lldb) continue
+(lldb) register read x0 x1 x8 x19 x20 x21      # ★x1 = bufSize★
+(lldb) frame select 3 ; register read x20      # 缓冲大小字段所在结构
+(lldb) memory read -s 8 -f x -c 12 <x20+0xf0>  # +0x108 = bufSize
+(lldb) breakpoint set -a <基址+0x67d90>        # 失败分支
+(lldb) continue ; register read w22            # ★34 = ERANGE★
+```
+
+（加载脚本是临时探针，不入库；每次设备侧加载都用同一个 Python 解释器，见 §22。）
+
+### 32.7 ★这块缓冲属于哪类内存？（实测：普通进程堆，不是 NPU 可见内存）+ "是否禁止单次分配 >2 GB" ★
+
+三个问题分开回答，都有实测：
+
+**① 它是什么**
+
+```
+适配层 ge::Buffer::Resize(*(x20+0x108))  →  ge::Buffer::MutableData()  →  base
+= ★GE 的主机侧缓冲★：把整段模型的所有权重【摊平成一块连续内存】，
+  源数据是 .ms 文件内容在进程内的副本（MindIR_Tensor_GetData 给的指针）
+它【不是】NPU 可见内存 / 设备内存 —— 交给设备是【之后】HIAI 那一步的事 ✓
+```
+
+**② 普通内存 vs NPU 可见内存 ⇒ 实测是【普通进程内存】✓**
+
+在进程内部轮询 `/proc/self/maps`，记录全过程出现过的 ≥256 MiB 映射：
+
+```
+005d99001000-005f43801000  6824.0 MiB rw-p [anon:native_heap:jemalloc]
+005f44801000-0060c4801000  6144.0 MiB rw-p [anon:native_heap:jemalloc]
+005bf9401000-005cf2e01000  3994.0 MiB rw-p [anon:native_heap:jemalloc]
+005ac5664000-005b45389000  2045.1 MiB ---p [anon:cfi_shadow:musl]
+……（全部大映射的名字只有 native_heap:jemalloc 与 cfi_shadow:musl 两种）
+```
+
+⇒ **一条设备/驱动映射都没有**（没有 `dma_heap` / `ion` / `dma-buf` / `/dev/*`）✓
+结合 lldb 现场：`dest = 0x59d5201b40`、`src = 0x568dce3478` 都落在这些 jemalloc 匿名区间内 ✓
+⇒ **结论：普通匿名内存（jemalloc 堆）**，NPU 可见/设备内存是后面另一步 ✓
+
+**③ 华为禁止单次分配 2 GB 以上内存吗？⇒ 不禁 ✗**
+
+```
+· Resize(0x110bfc874 = 4.26 GiB) 本身【成功了】✓：
+  MutableData() 返回了非空指针，而且该指针确实被当作 dest 使用
+  （否则根本走不到 memcpy_s 的参数检查那一行）✓
+· 独立实测（设备上、同一个解释器）：匿名分配并在【每一页】写入
+      2 GiB + 4 KiB ✓   2.5 GiB ✓   ★4.26 GiB ✓★   ★8 GiB ✓★
+  （MemTotal 32 GiB、ulimit -v unlimited）
+⇒ OS / 分配器 / 驱动都【不】禁止 >2 GB 的单次分配 ✗
+```
+
+**唯一的 2 GiB 限制在 securec `memcpy_s` 的 API 契约里**：`destMax > 0x7fffffff` 直接 `ERANGE`
+（§32.3 二分实测：`0x7fffffff` 收、`0x80000000` 拒）。
+
+```
+⇒ 准确说法是：★内存分配得出来，但"把 4.26 GB 当 destMax 传给 memcpy_s"这个调用被安全函数拒绝★
+   失败发生在【参数校验】阶段——一个字节都还没拷 ✓（§32.1 现场：count 只有 4 字节 ✓）
+```
