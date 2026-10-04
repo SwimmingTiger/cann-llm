@@ -102,6 +102,66 @@ class TestStripFlag(unittest.TestCase):
         self.assertEqual(rest, ["-d", "m"])
 
 
+class TestRendezvous(unittest.TestCase):
+    """★第一次 build 之前的"报到—等放行"★（--large-mem 专用）。
+
+    三件必须成立的事：
+    1. 没设 `CANN_LLM_LARGE_MEM_RENDEZVOUS` 时**立刻返回**（普通运行零开销 ✓）；
+    2. 放行文件已存在时**不等**（调试器先到的情况）⇒ 不浪费那几十秒 ✓；
+    3. 放行文件不出现时**必须超时走人** —— 绝不能把程序永久卡住 ✗
+    """
+
+    def test_noop_without_env(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(large_mem.RENDEZVOUS_ENV, None)
+            self.assertFalse(large_mem.rendezvous(log=lambda _m: None))
+
+    def test_returns_immediately_when_release_exists(self):
+        with tempfile.TemporaryDirectory() as d:
+            rel = os.path.join(d, "go")
+            open(rel, "w").write("go\n")
+            with mock.patch.dict(os.environ,
+                                 {large_mem.RENDEZVOUS_ENV: rel}, clear=False):
+                with mock.patch.object(large_mem, "preload_targets",
+                                       return_value=[]) as pre:
+                    # 幂等标志：这里要单独跑，先复位
+                    large_mem._rendezvous_done = False
+                    msgs = []
+                    self.assertTrue(large_mem.rendezvous(log=msgs.append))
+                    self.assertTrue(any("调试器已就位" in m for m in msgs))
+                    pre.assert_called_once()          # 还是要预加载 ✓
+
+    def test_times_out_instead_of_hanging(self):
+        with tempfile.TemporaryDirectory() as d:
+            rel = os.path.join(d, "never")
+            with mock.patch.dict(os.environ,
+                                 {large_mem.RENDEZVOUS_ENV: rel,
+                                  large_mem.WAIT_ENV: "0.2"}, clear=False):
+                with mock.patch.object(large_mem, "preload_targets", return_value=[]):
+                    large_mem._rendezvous_done = False
+                    msgs = []
+                    self.assertTrue(large_mem.rendezvous(log=msgs.append))
+                    self.assertTrue(any("超时" in m for m in msgs))
+
+
+class TestBuildCallsRendezvous(unittest.TestCase):
+    """app 侧：两条 build 路径都必须在 build **之前**调用 rendezvous ✓"""
+
+    def test_nnrt_backend_calls_it_before_build(self):
+        src = open(os.path.join(os.path.dirname(__file__), "..", "src", "cann_llm",
+                                "backends", "nnrt.py"), encoding="utf-8").read()
+        i = src.index("_large_mem_rendezvous()")
+        j = src.index("OH_AI_ModelBuildFromFile(")
+        self.assertLess(i, j, "rendezvous 必须在 build 之前调用 ✗")
+
+    def test_gemma4_runner_calls_it_before_build(self):
+        src = open(os.path.join(os.path.dirname(__file__), "..", "src", "cann_llm",
+                                "backends", "gemma4_runner.py"), encoding="utf-8").read()
+        i = src.index("_large_mem_rendezvous()")
+        j = src.index("L.OH_AI_ModelBuildFromFile(")
+        self.assertLess(i, j, "rendezvous 必须在 build 之前调用 ✗")
+
+
 class TestShippedFiles(unittest.TestCase):
     """argv 会把这些路径交给 sh / lldb，所以它们必须真的在仓库里。"""
 

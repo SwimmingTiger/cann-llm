@@ -328,6 +328,12 @@ class NnrtBackend(EngineBackend):
         lib.OH_AI_ContextAddDeviceInfo(self._ctx, dev)
         self._model = lib.OH_AI_ModelCreate()
 
+        # ★--large-mem：第一次 build 之前"报到—等放行"★（没设环境变量时零开销 ✓）
+        #   顺序见 cann_llm.large_mem.rendezvous：先 dlopen 补丁目标的库，
+        #   再等 lldb 打完补丁解锁 —— 这样 4 处补丁赶在这次 build 的权重拷贝之前 ✓
+        from ..large_mem import rendezvous as _large_mem_rendezvous
+        _large_mem_rendezvous()
+
         st = lib.OH_AI_ModelBuildFromFile(
             self._model, self._ms_path.encode(), OH_AI_MODELTYPE_MINDIR, self._ctx)
         if st != OH_AI_STATUS_SUCCESS:

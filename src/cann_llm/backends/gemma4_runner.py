@@ -84,6 +84,9 @@ class _Mslite:
                 L.OH_AI_DeviceInfoSetEnableFP16(dev, C.c_bool(True))
             L.OH_AI_ContextAddDeviceInfo(ctx, dev)
             m = L.OH_AI_ModelCreate()
+            # ★--large-mem：第一次 build 之前"报到—等放行"★（见 cann_llm.large_mem.rendezvous）
+            from ..large_mem import rendezvous as _large_mem_rendezvous
+            _large_mem_rendezvous()
             if L.OH_AI_ModelBuildFromFile(m, ms.encode(), _MINDIR, ctx) != 0:
                 raise RuntimeError("Build 失败: %s" % ms)
             self._cache[ms] = m

@@ -35,6 +35,8 @@ from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 __all__ = [
     "LargeMemPatch", "PATCHES", "LLDB_SCRIPT_NAME", "DRIVER_NAME",
+    "RENDEZVOUS_ENV", "WAIT_ENV", "PRELOAD_LIBS",
+    "preload_targets", "rendezvous",
     "DEFAULT_LARGE_MEM_PORT", "LIMIT_STOCK", "LIMIT_PATCHED",
     "large_mem_script_path", "large_mem_driver_path", "strip_large_mem",
     "build_large_mem_argv", "describe_patches",
@@ -93,6 +95,78 @@ DRIVER_NAME = "large_mem_run.sh"
 
 #: 默认端口（与 `--lldb` 的 5091 错开，避免撞车）
 DEFAULT_LARGE_MEM_PORT = 5092
+
+#: ★"报到—放行"握手★：值是**放行文件**的路径
+#:   · runner 在第一次 build 前，如果这个变量有值，就停下来等这个文件出现；
+#:   · lldb 侧脚本打完补丁就把它创建出来 ⇒ 取消等待 ✓
+#:   （一个变量给两边用：驱动 export，app 与 lldb 都继承 ✓）
+RENDEZVOUS_ENV = "CANN_LLM_LARGE_MEM_RENDEZVOUS"
+
+#: 等待上限（秒）—— 调试器要是没来，程序自己走，绝不永久卡住 ✗
+WAIT_ENV = "CANN_LLM_LARGE_MEM_WAIT"
+
+#: 报到前先 dlopen 的库
+#: ★为什么★：`libhiai_ir.so` 在 nnrt 路径下是**第一次 build 中途**才加载的，
+#:   于是那一处补丁赶不上这次 build ✗（只有 libsec_shared 那三处赶得上）。
+#:   先把它拉起来 ⇒ 4 处一次到位 ✓（§40.7 的遗留短板）
+PRELOAD_LIBS = ("libhiai_ir.so", "libsec_shared.z.so")
+
+_rendezvous_done = False
+
+
+def preload_targets(verbose: bool = True) -> List[str]:
+    """把补丁目标的库先 dlopen 起来；返回成功的库名。失败不报错（尽力而为）。"""
+    import ctypes
+    got = []
+    for name in PRELOAD_LIBS:
+        try:
+            ctypes.CDLL(name)
+            got.append(name)
+        except OSError:
+            pass
+    if verbose and got:
+        print("[large-mem] 已预加载 %s（让 4 处补丁一次到位）" % "、".join(got), flush=True)
+    return got
+
+
+def rendezvous(log=None) -> bool:
+    """★第一次 build 之前"报到—等放行"★（`--large-mem` 专用；幂等，可重复调用）
+
+    没有设 :data:`RENDEZVOUS_ENV` 时**立刻返回**（普通运行零开销 ✓）。
+
+    有值时的顺序（顺序很重要）：
+
+    1. 先 :func:`preload_targets` —— 让 ``libhiai_ir.so`` 这时就在 ✓
+    2. 等 lldb 侧脚本创建"放行文件"（它是在 `command script import` 时打完补丁后
+       创建的 ✓）—— 最多等 :data:`WAIT_ENV` 秒，超时就自己走（绝不永久卡住 ✗）
+
+    返回 ``True`` 表示这次确实走了报到流程。
+    """
+    global _rendezvous_done
+    release = os.environ.get(RENDEZVOUS_ENV)
+    if not release or _rendezvous_done:
+        return False
+    _rendezvous_done = True
+    say = log or (lambda msg: print(msg, flush=True))
+
+    if os.path.exists(release):
+        # 调试器已经先跑过了（补丁就位）⇒ 不必等，直接走 ✓
+        say("[large-mem] 调试器已就位（放行标记已存在），直接继续 ✓")
+        preload_targets(verbose=False)
+        return True
+
+    preload_targets()
+    wait = float(os.environ.get(WAIT_ENV) or 30)
+    import time
+    t0 = time.time()
+    say("[large-mem] 等调试器打补丁后放行（最多 %.0f 秒）…" % wait)
+    while time.time() - t0 < wait:
+        if os.path.exists(release):
+            say("[large-mem] 已放行（补丁就位）✓ 用时 %.1f 秒" % (time.time() - t0))
+            return True
+        time.sleep(0.05)
+    say("[large-mem] ⚠ 等调试器超时（%.0f 秒）—— 继续运行（这次可能没打上补丁）" % wait)
+    return True
 
 #: 两种模式下的单段 `.ms` 上限（§38 实测 + 推算）
 LIMIT_STOCK = "≈545 MB（≈520 MiB）"

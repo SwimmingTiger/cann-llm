@@ -2860,3 +2860,71 @@ bot> 2                                        ← ★交互式回答出来了★
 ★注意★：这个模型的段是**懒加载**的 —— 第一次推理时才第一次 `BuildFromFile`
 ⇒ 补丁正好在**该次 build 的入口**打上，赶在适配层搬权重之前 ✓
 （`-p "1+1="` 单轮同样通过 ✓）
+
+### 40.8 ★★★★★ runner「报到—等放行」：把补丁时机从"撞运气"变成"确定性"（并堵掉 §40.6 的短板）★★★★★
+
+§40.7 的接法靠"程序启动即自停"，只能保证**启动**那一刻的同步；而 §40.6 记着一处短板：
+
+```
+nnrt 路径下 libhiai_ir.so 是【第一次 build 中途】才加载的
+⇒ import 时补不到它 ⇒ 只能等第二次 build 才补上（单段超大模型就赶不上 ✗）
+```
+
+改成 **runner 主动报到**（应用侧配合，代码就是我们自己的 ✓）：
+
+```
+src/cann_llm/large_mem.py        rendezvous() / preload_targets()
+src/cann_llm/backends/nnrt.py          build 之前调 rendezvous()
+src/cann_llm/backends/gemma4_runner.py build 之前调 rendezvous()
+```
+
+#### 握手协议（一个环境变量给两边用）
+
+```
+CANN_LLM_LARGE_MEM_RENDEZVOUS = <放行文件路径>      ← 驱动 export，app 与 lldb 都继承 ✓
+CANN_LLM_LARGE_MEM_WAIT       = <等待上限秒，默认 30>（调试器不来就自己走 ✗ 绝不永久卡住）
+
+runner（第一次 build 之前）：
+  ① ★先 dlopen 补丁目标的库★（libhiai_ir.so / libsec_shared.z.so）
+     —— 这样那 4 处补丁**这次就都在**，不用等第二次 build ✓
+  ② 等放行文件出现（已存在 ⇒ 立刻走 ✓；超时 ⇒ 打印警告后自己走 ✓）
+lldb（`command script import` 时，进程此刻是停着的）：
+  ③ 装断点（安全网）+ 就地补一遍 + **创建放行文件** ⇒ 取消 runner 的等待 ✓
+  ④ `process continue`（原生命令）→ 程序带着自己的终端跑完 ✓
+```
+
+#### 三种时序都成立（这就是"确定性"的含义）
+
+```
+· lldb 先在：import 补 3/4（libhiai_ir 还没加载）→ 放行 → runner 看到标记直接走
+             → 第一次 build 命中断点 ⇒ ★在该次 build 入口补上第 4 处★ ✓
+· runner 先在：它已经预加载好 4 个模块 ⇒ import 时一次补满 4/4 ✓ → 放行 ✓
+· 调试器一直没来：runner 等 WAIT 秒后自己走（这次没补丁），程序不卡死 ✓
+```
+
+★关键点★：`libhiai_ir` 那一处现在**总能在该次 build 的入口**补上 ——
+因为 runner 在 build 前把它 dlopen 了，而断点正是在 build 入口触发的 ✓
+（实测两次运行的日志都收敛到 `补丁结果：成功 4 / 跳过 0 / 等模块加载 0`）
+
+#### 实测（用户那条交互式命令，逐字）
+
+```
+$ ./scripts/start_chat.sh -d ../models/gemma4_5seg_s128 --large-mem
+[large-mem] 附着到 pid=36070 …
+(lldb) gdb-remote 127.0.0.1:5092
+[large-mem] 断点已装 ✓
+[large-mem] ✓ libsec_shared.z.so   +0x03E50 / +0x051DC / +0x05138 已就位
+[large-mem] 补丁结果：成功 3 / 跳过 0 / 等模块加载 1（共 4 处）
+[large-mem] 已放行 runner ✓（它可以继续做第一次 build 了）
+(lldb) process continue
+cann-llm 0.1.0 · gemma4_5seg_s128 · nnrt · 加载 3.3s
+you> 1+1=
+[large-mem] 调试器已就位（放行标记已存在），直接继续 ✓        ← runner 报到
+[large-mem] 命中 OH_AI_ModelBuildFromFile —— 开始打补丁
+[large-mem] ✓ libhiai_ir.so +0xC16EC e8 02 00 b5 → nop 已就位  ← ★第 4 处赶在这次 build 里★
+[large-mem] 补丁结果：成功 4 / 跳过 0 / 等模块加载 0（共 4 处）
+[large-mem] 补丁已就绪；程序带着自己的终端继续 ✓
+bot> 2                                                        ← ★交互式回答★
+you>
+```
+`-p "1+1="` 单轮同样通过 ✓（rc=0）

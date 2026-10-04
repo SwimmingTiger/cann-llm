@@ -194,6 +194,19 @@ def _install_bp(debugger):
     return bp
 
 
+def _release():
+    """创建"放行文件" ⇒ 取消 runner 在第一次 build 前的等待（★顺序：先补丁后放行★）"""
+    path = os.environ.get("CANN_LLM_LARGE_MEM_RENDEZVOUS")
+    if not path:
+        return
+    try:
+        with open(path, "w") as fh:
+            fh.write("go\n")
+        _p("[large-mem] 已放行 runner ✓（它可以继续做第一次 build 了）")
+    except OSError as exc:
+        _p("[large-mem] ✗ 写放行文件失败：%s" % exc)
+
+
 def _write_status(status):
     """把退出码交给编排脚本（写状态文件，不动 stdout）。
 
@@ -318,6 +331,15 @@ def __lldb_init_module(debugger, internal_dict):
     #   而用 python 命令里的 SBListener 自己等，事件循环不在跑 ⇒
     #   输入根本转发不过去，交互式程序（对话）会卡死 ✗
     _install_bp(debugger)
+    # ★attach 时进程是停着的 ⇒ 立刻把已加载模块上的补丁打掉，然后放行 runner★
+    #   runner 在第一次 build 前会先 dlopen 补丁目标的库（含 libhiai_ir.so）
+    #   ⇒ 这一步通常就能一次到位 4/4 ✓
+    #   若 runner 还没来得及预加载（我们 attach 得更早），这里先补能补的，
+    #   剩下那处由 Build 断点（on_build，安全网）在该次 build 入口补上 ✓
+    try:
+        patch_all(debugger)
+    finally:
+        _release()
     for name, fn in (("large_mem_attach", "run_attach"),
                      ("large_mem_install", "install"),
                      ("large_mem_run", "run"),

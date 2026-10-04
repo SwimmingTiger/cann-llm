@@ -75,52 +75,43 @@ fi
 SCRIPT="$ROOT/src/cann_llm/large_mem_lldb.py"
 [ -f "$SCRIPT" ] || { printf '✗ 找不到 %s\n' "$SCRIPT" >&2; exit 127; }
 
-# ── 1) 起程序：先自停、保留自己的终端 ──
-exec 3<&0                      # ★存下真正的 stdin（见文件头：`&` 会把它换成 /dev/null）★
-WRAPPER='import os, signal, sys, runpy
-os.kill(os.getpid(), signal.SIGSTOP)
-mod = sys.argv[1]
-sys.argv = sys.argv[1:]
-runpy.run_module(mod, run_name="__main__", alter_sys=True)'
+# ── 1) 起程序（保留它自己的终端）──
+#   ★不再需要"启动即自停"★：runner 在**第一次 build 之前**会主动报到并等放行
+#   （见 cann_llm.large_mem.rendezvous）⇒ 我们从从容容 attach 就行 ✓
+#   这样也彻底避开了"SIGSTOP 待处理信号会在 continue 后再投递一次"那个坑 ✓
+# ★POSIX★：非交互 shell 里 `cmd &` 的 stdin 默认被指到 /dev/null ✗ ⇒ 显式重定向 ✓
+RUNDIR=${CANN_LLM_RUNDIR:-$ROOT/.run}
+mkdir -p "$RUNDIR" 2>/dev/null || true
+RELEASE="$RUNDIR/large_mem_go.$$"
+rm -f "$RELEASE" 2>/dev/null || true
+CANN_LLM_LARGE_MEM_RENDEZVOUS="$RELEASE"
+export CANN_LLM_LARGE_MEM_RENDEZVOUS
+[ -n "${CANN_LLM_LARGE_MEM_WAIT:-}" ] || { CANN_LLM_LARGE_MEM_WAIT=30; export CANN_LLM_LARGE_MEM_WAIT; }
 
-"$PY" -X faulthandler -c "$WRAPPER" "$MOD" "$@" 0<&3 &
+exec 3<&0
+"$PY" -X faulthandler -m "$MOD" "$@" 0<&3 &
 APP=$!
 GDBPID=""
-trap 'kill "$APP" 2>/dev/null || true; [ -n "$GDBPID" ] && kill "$GDBPID" 2>/dev/null || true' INT TERM HUP
+trap 'kill "$APP" 2>/dev/null || true; [ -n "$GDBPID" ] && kill "$GDBPID" 2>/dev/null || true; rm -f "$RELEASE" 2>/dev/null || true' INT TERM HUP
 
-# 等它自停（/proc/<pid>/stat 第 3 列 = T）
-i=0
-while [ "$i" -lt 400 ]; do
-    if ! kill -0 "$APP" 2>/dev/null; then
-        printf '[large-mem] 程序在自停前就退出了 —— 原样返回它的退出码\n' >&2
-        RC=0; wait "$APP" || RC=$?
-        exit "$RC"
-    fi
-    [ "$(awk '{print $3}' "/proc/$APP/stat" 2>/dev/null || echo '?')" = "T" ] && break
-    i=$((i + 1))
-    sleep 0.05
-done
-
-# ── 2) gdbserver 附着 ──
-printf '[large-mem] 附着到 pid=%s（程序已自停，等打补丁）…\n' "$APP"
+# ── 2) gdbserver 附着（跑着的进程也能附；附上即停 ✓）──
+sleep 0.3
+printf '[large-mem] 附着到 pid=%s …\n' "$APP"
 "$GDB" gdbserver --native-regs "127.0.0.1:$PORT" --attach "$APP" >/dev/null 2>&1 &
 GDBPID=$!
 sleep 0.3
 
-# ── 3) lldb：import 时装断点 → 原生 `process continue` 放行 → 断点回调打补丁 ──
-#   ★lldb 的 stdin 显式指到 /dev/null★：程序用【它自己的终端】读键盘，
-#     若 lldb 也握着同一个 tty，用户敲的字会被它的命令解释器抢走 ✗
-#     （batch 模式下 lldb 只在 -o 命令之间才碰 stdin，指到 /dev/null 最省事 ✓）
-#   ★只用 lldb 原生命令 + 一条 python 命令（放在最后）★
-#     实测：批处理模式下"注册的 python 命令"会让其后的 -o 失效 ✗
-#     ⇒ 断点改在 `command script import` 时安装（import 不截断 ✓）
+# ── 3) lldb：`command script import` 时就把补丁打好并放行 runner，然后 `process continue` ──
+#   ★只用 lldb 原生命令 + 一条"会截断后续 -o"的 python 命令放最后★
+#     （实测：批处理模式下注册的 python 命令会让其后的 -o 失效 ✗；
+#       而 `command script import` 不截断 ✓ —— 所以补丁动作放在 import 里 ✓）
+#   ★stdin 指到 /dev/null★：程序用【它自己的终端】读键盘，lldb 别去抢 ✓
 i=0
 RC=1
 while [ "$i" -lt 40 ]; do
     i=$((i + 1))
     if "$LLDB" --batch \
         -o "gdb-remote 127.0.0.1:$PORT" \
-        -o "process handle SIGSTOP -s false -p false" \
         -o "command script import $SCRIPT" \
         -o "process continue" </dev/null; then
         RC=0
@@ -128,13 +119,15 @@ while [ "$i" -lt 40 ]; do
     fi
     sleep 0.1
 done
+# 保险：万一 lldb 没能创建放行文件，也别让 runner 白等到超时
+[ -e "$RELEASE" ] || : >"$RELEASE" 2>/dev/null || true
 if [ "$RC" -ne 0 ]; then
-    printf '[large-mem] ⚠ lldb 接入失败（重试 %d 次）—— 让程序不带补丁继续跑\n' "$i" >&2
-    kill -CONT "$APP" 2>/dev/null || true
+    printf '[large-mem] ⚠ lldb 接入失败（重试 %d 次）—— 程序继续跑（这次可能没打上补丁）\n' "$i" >&2
 fi
 
 # ── 4) 等程序自然结束，原样返回它的退出码（程序一直是我们的子进程 ✓）──
 RC=0
 wait "$APP" || RC=$?
 [ -n "$GDBPID" ] && kill "$GDBPID" 2>/dev/null || true
+rm -f "$RELEASE" 2>/dev/null || true
 exit "$RC"
