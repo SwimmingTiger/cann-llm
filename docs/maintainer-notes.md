@@ -2259,3 +2259,98 @@ memory write -s 1 <base_sec + 0x3e50> 0x1f 0x20 0x03 0xd5
 **如果要让 app 侧也用上（未做，仅供参考）**：可以不用调试器——在 `LD_PRELOAD` 的
 构造函数里 `dl_iterate_phdr` 找到 `libhiai_ir.so` 基址、`mprotect` 那一页、
 写 `nop`、再还原保护位 ✓。但那属于"进程内自打补丁"，风险与合规都要另行评估 ✗
+
+---
+
+## 35. ★★★★★ 追"runtime 选择失败"：定位到 /vendor 的 HCL 运行时；四个 securec 检查全打掉后仍失败 ⇒ 拒绝原因在 HCL 自己 ★★★★★
+
+§34 把 1107 MB 段的失败点推到了 `"no runtime support the Model."`。本节把它继续往下钉。
+
+### 35.1 定位手法：给日志钩子加"帧指针链"
+
+`OH_LOG_Print` 的 `__builtin_return_address(0)` 只能给到**日志助手自己**的返回地址
+（`libhiai_ir.so+0xc1698`），拿不到真正的调用者 ✗。所以钩子里再加一段**帧指针链**回放
+（编译时加 `-fno-omit-frame-pointer`），一次就拿到了完整路径 ✓：
+
+```
+[F] HIAI_DDK_MSG: hiai_model_runtime_repo.c ModelRuntimeRepo_TryBuild(154)::
+    "no runtime support the Model."
+   stack: <libhiai_ir.so+0xc1698>   ← 日志助手
+          <libhiai.so+0x60200>      ← ★真正打日志的地方★
+          <libhiai.so+0x5d530>      ← 调用它的函数
+          <libhiai.so+0x32e40> <libhiai.so+0x32d68>
+```
+
+### 35.2 判定逻辑（libhiai.so 反汇编）
+
+```
+0x6014c: 函数入口
+0x6017c: x24 = 0                       ; i = 0
+0x6018c: loop:
+0x60194:   bl 0x60238                  ; 取第 i 个 runtime（按名字/版本 strstr+strncmp 选）
+0x601ac:   bl 0x60db4                  ; TryBuildOne(runtime, ...)
+0x601b4:   cbnz x0, 0x60200            ; 成功 ⇒ 返回
+0x601b8:   i++; cmp i, #3; b.ne loop   ; ★最多试 3 个 runtime★
+0x601fc:   bl AI_Log_Print             ; 全失败 ⇒ "no runtime support the Model."
+```
+
+`0x60db4`（TryBuildOne）核心就三条：
+
+```
+60ddc: ldr  x8, [x4, #0xe0]     ; runtime->fn（或 +0x8）
+60df4: blr  x8                  ; ★调用该 runtime 的建模型接口★
+60df8: cbz  w0, 成功            ; w0 != 0 ⇒ 这个 runtime 不接受
+```
+
+### 35.3 运行时是谁：`/vendor/lib64/passthrough/` 的 HCL 运行时
+
+在 `0x60df4`（`blr x8`）下断，读 `x8` 得到：
+
+```
+x8 = libai_fmk_hcl_model_runtime.so`HIAI_HCL_ModelBuilder_BuildV2
+     （实现在同目录 indirect/libai_fmk_hcl_model_runtime_impl.so）
+```
+
+薄库的 `BuildV2` 只是包一层 trace，真体转发到 `HIAI_HCL_ModelBuilder_Build`；
+它导入 `AI_Log_Print`（所以它的日志本可被钩子抓到 ✓）与 **`memset_s`**（securec ✓）。
+
+### 35.4 把【四个】securec 2 GB 检查全打掉 —— 仍然失败 ✗
+
+| 位置 | 指令 | 补丁 |
+|---|---|---|
+| `libhiai_ir.so+0xc16ec` | `cbnz x8`（静态 memcpy_s） | `nop` |
+| `libsec_shared.z.so+0x3e50` | `cbnz x9`（memcpy_s） | `nop` |
+| `libsec_shared.z.so+0x51dc` | `cbnz x9`（**memset_s**） | `nop` |
+| `libsec_shared.z.so+0x5138` | `b.hs`（**memmove_s**） | ★不是 nop★：它是**反极性**（跳向正常路径），要改成无条件 `b 0x5150` = `06 00 00 14` |
+
+⇒ 四条全打掉、逐条回读确认之后，**L0-23 依然 `rc=-1`，日志依旧是 `no runtime support`** ✗
+⇒ **HCL 的拒绝与 securec 的 2 GB 限制无关** ✓（这一条把嫌疑彻底排除了 ✓）
+
+### 35.5 嫌疑落在 HCL 自己的判定上
+
+`libai_fmk_hcl_model_runtime_impl.so` 里有一批"限制类"断言字符串，最像的两条：
+
+```
+%s %s(%d)::"(buf.st_size <= MAX_FILE_SIZE_LIMIT)"        "false, return %s."
+%s %s(%d)::"Current platform:%s does not support."
+```
+
+⇒ 下一步：在 `HIAI_HCL_ModelBuilder_Build`（薄库里有符号 ✓）里下断、追它哪一步返回非 0，
+   把那处判定/比较打掉 ✓（`MAX_FILE_SIZE_LIMIT` 的具体值还没取出来，静态没搜到引用点 ✗）
+
+### 35.6 一个重要的边界认识
+
+```
+· "选择循环"本身当然可以 patch（0x6014c / 0x60df4 都是普通指令）
+  但那样【没有意义】：x19 是"建好的模型句柄"，强制让它"成功"只会把 NULL 往下传 ✗
+· 真正要解决的是 HCL builder 内部的拒绝判定 —— 它在我们不可控的 /vendor 库里 ✓
+· 且即便打通：4.26 GB 已越过 2³²，模型内部若真有 32 位长度（§34.3 的怀疑），
+  后面可能出现【静默的错误结果】而不是干脆的失败 —— 这类风险要单独评估 ✗
+★ 本节把"到底卡在哪"钉到了具体函数与具体字符串；是否继续往里打，是一个
+  "收益 vs 依赖 /vendor 库行为"的判断 ✗
+```
+
+**顺带记一个补丁极性坑**：securec 里 `memcpy_s`/`memset_s` 的 2 GB 检查是
+`cbnz` 跳向【错误】路径（所以 `nop` 掉即可 ✓），而 `memmove_s` 是
+`b.hs` 跳向【正常】路径（`nop` 反而会掉进 ERANGE ✗）——
+所以要改成无条件跳转 `b 正常路径` ✓。
