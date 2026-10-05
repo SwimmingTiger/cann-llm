@@ -3745,3 +3745,48 @@ m2/m3         lowering 之后                → ★解析失败✗★（cannot 
       ⇒ 用 `Identity(b)`（b 是标量则 `Expand(b, Shape(x))` ✓）顶替 C 的输出 ✓
   这样既删掉了 IsNaN ✓，又是【重接】而非【改写节点】⇒ OMG 解析不会崩 ✓
 ```
+
+## 56. ★★★★★ IsNaN 问题彻底解决 ✓✓ —— OMG 的解析与 pre-check 全过，只剩「ascendc 内核」这一关 ✗
+
+### 56.1 修好的：`Where(IsNaN(x), a, b)` 的重接（用独立脚本验证 ✓）
+
+```
+做法：把每个 `Where(IsNaN(x), 0, x)` 整段重接成 `Identity(x)` ✓，并删掉 IsNaN 节点 ✓
+   （★重接消费者★而不是★改写 IsNaN 节点★ —— 后者必崩 ✗，§55 已证 ✓）
+
+结果（微型全注意力图）：
+  重接 1 处 | 未定义引用 0 | IsNaN 残留 False ✓✓
+  ★OMG：解析 ✓ + pre-check ✓ 都过了★ —— 错误信息从
+    "cannot find output tensor hidden_states"（解析崩 ✗）
+    变成 "ascendc 内核路径无效"（解析成功后的下一阶段 ✗）✓✓
+```
+
+（过程中踩的坑：`g.node.remove(n)` 在 protobuf 重建后会报 "x not in container" ✗
+ ⇒ 处理必须用【张量名】而不是节点对象、并且整表重建 ✓）
+
+### 56.2 只剩的这一关：某些算子要走 **ascendc** 内核，而该内核不在这个 DDK 版本里 ✗
+
+```
+E/ASC ascendc_adaptee.cpp GetKernelbinAddr(95)::
+   "file path '…/tools_omg/../platform/kirinx90/lib64/libai_npucore_ascendc_kernel.so' not valid." ✗
+W/ASC builtin_ascendc_adaptee.cpp Initialize(70)::
+   "kernel binary initialize failed, this store can use JIT only"
+
+★关键★：这个 .so 在【x570 上也不存在】✓（两边平台库都是同样的 17 个文件 ✓）
+   而 gemma4 当年 OMG 编译【成功】✓ ⇒ 说明 gemma4 的图【完全走 fusion-engine】✓，
+   ★我们的图里有算子被路由到了 ascendc✗★（所以才会去加载那个不存在的内核 ✓）
+   另外两条无关的噪声：`libai_npucore_generated.so` 本就不存在（只是警告 ✓）、
+   ascendc_config.json 的路径警告（已把配置拷到 OMG 会找的路径 ✓，但没解决 ✓）
+
+★下一步很清楚★：按算子二分，找出【哪些算子会被路由到 ascendc】✗，
+   然后像 §52–55 那样把它们 lower 掉 ✓（gemma4 那 12 个算子的路线是通的 ✓）。
+   怀疑对象：Softplus · Greater/Equal/Not/And · Expand/Split/Squeeze · Shape · Cos/Sin…
+```
+
+### 56.3 当前进度总览（目标① ② 已完成 ✓，③ 只剩算子路由这一关）
+
+```
+① 对拍（argmax 1.0000 ✓）          已完成 ✓
+② 导出图零缺失算子 ✓（DDK 平台库）  已完成 ✓
+③ OMG：解析 ✓ · pre-check ✓ · 内核路由 ✗（本文档 §56.2）→ converter → 设备建图  进行中
+```

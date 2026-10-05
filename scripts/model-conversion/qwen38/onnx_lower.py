@@ -18,6 +18,50 @@ import onnx
 from onnx import TensorProto, helper, numpy_helper
 
 
+def _handle_isnan(model, isnan_outs, counts, new_inits):
+    """处理所有 IsNaN（整表重建 ✓）。
+
+    ① 若它的消费者是 `Where(cond, a, b)`（cond 即它）⇒ 把该 Where 重接成 `Identity(b)`
+       （非 NaN 时 IsNaN=False ⇒ Where 取 b ✓，语义等价 ✓，且解析安全 ✓）
+    ② 剩下的 ⇒ 删节点 + 用常量 False 的 bool initializer 顶替它的输出 ✓
+    """
+    g = model.graph
+    if not isnan_outs:
+        return
+    outs = set(isnan_outs)
+    nodes = list(g.node)
+    cond_by_tensor = {o: n for n in nodes for o in n.output}
+    # ① 先找 Where 消费者
+    keep_nodes = []
+    for m in nodes:
+        if m.op_type == "Where" and len(m.input) == 3 and m.input[0] in outs:
+            cond = cond_by_tensor.get(m.input[0])
+            if cond is not None and cond.input[0] in (m.input[1], m.input[2]):
+                src = m.input[2] if m.input[2] != cond.input[0] else m.input[1]
+                keep_nodes.append(helper.make_node("Identity", [src], [m.output[0]],
+                                                   name=(m.name or m.output[0]) + "_noguard"))
+                counts["IsNaN(重接)"] = counts.get("IsNaN(重接)", 0) + 1
+                continue
+        keep_nodes.append(m)
+    nodes = keep_nodes
+    # ② 剩下的 IsNaN：删节点 + 常量输出
+    rest = []
+    handled = set()
+    for m in nodes:
+        if m.op_type == "IsNaN":
+            out = m.output[0]
+            shp = _shape_of(model, out)
+            if shp is not None:
+                new_inits.append(numpy_helper.from_array(np.zeros(shp, dtype=np.bool_), out))
+                handled.add(out)
+                counts["IsNaN(常量)"] = counts.get("IsNaN(常量)", 0) + 1
+                continue
+            counts["IsNaN(未处理)"] = counts.get("IsNaN(未处理)", 0) + 1
+        rest.append(m)
+    del g.node[:]
+    g.node.extend(rest)
+
+
 def _shape_of(model: onnx.ModelProto, name: str):
     """从 input/output/value_info 查静态形状（拿不到返回 None）。"""
     g = model.graph
@@ -48,20 +92,13 @@ def lower_model(model: onnx.ModelProto, kinds=None) -> dict:
     g = model.graph
     counts: dict[str, int] = {}
     new_inits: list = []
+    isnan_nodes: list = []          # IsNaN 的输出张量名 ✓
     used = {o for n in g.node for o in n.output}
     new_nodes = []
     for n in g.node:
         if n.op_type == "IsNaN":
-            # 实测(§54)：用【多个算子】替换 IsNaN(Not(Equal)/Expand(False,Shape) 等)
-            # 都会让 OMG 解析器崩 -> "cannot find output tensor ..." + ParseFromMemory FAIL
-            # ⇒ 用【单算子】等价写法：Less(x, x)
-            #   · 非 NaN 时 Less(x,x) 与 IsNaN(x) 都是 False（取值相同）
-            #   · NaN 时不同，但我们的图全是有限运算 => 无 NaN
-            #   · 单节点替换：同形状、同 dtype(bool)、不引入中间张量
-            x = n.input[0]
-            out = n.output[0]
-            new_nodes.append(helper.make_node("Less", [x, x], [out], name=(n.name or out + "_isnan") + "_less"))
-            counts["IsNaN"] = counts.get("IsNaN", 0) + 1
+            isnan_nodes.append(n.output[0])    # 记【输出名】而不是节点对象（重建后会失效 ✗）
+            continue
         elif n.op_type == "LessOrEqual" and (_want is None or "LessOrEqual" in _want):
             a, b, out = n.input[0], n.input[1], n.output[0]
             base = n.name or (out + "_le")
@@ -77,6 +114,10 @@ def lower_model(model: onnx.ModelProto, kinds=None) -> dict:
     if counts:
         del g.node[:]
         g.node.extend(new_nodes)
+
+    # ★统一处理 IsNaN★（§54/§55）
+    if isnan_nodes:
+        _handle_isnan(model, isnan_nodes, counts, new_inits)
 
     # ★NaN 保护消除★：Where(IsNaN(x), 0, x) → Identity(x)
     #   实测(§55)：OMG 唯一拒绝的算子就是 IsNaN ✗，而且"改写 IsNaN 节点"会让它解析崩 ✗
