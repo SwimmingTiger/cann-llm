@@ -3628,3 +3628,45 @@ q35_sp_L4.onnx（真实宽度前 4 层 · 0.92 GB · 单输入图）走 OMG：
 M-RoPE：同样把 (3, bs, pos) 的用法摊平成 3 维 ✓
 ⇒ 改完重新对拍（目标① 的判据不变 ✓）→ 重新 OMG + THIRDPARTY 转换 → 设备试建 ✓
 ```
+
+## 53. ★★★★★ 目标③ 的突破：真凶是【dynamo 导出器】—— OMG 的 pre-check 从 55 fail 变 0 fail ★★★★★
+
+### 53.1 决定性对照（同一台机器、同一套工具 ✓）
+
+```
+同一个"只有 Reshape"的小图：
+  ★旧 TorchScript 导出器（opset 14 / ir 7）★：pre-check total 2 · pass 2 · ★fail 0 ⇒ success★ ✓✓
+  ★新 dynamo 导出器（opset 18 / ir 10）★  ：pre-check total 1 · pass 0 · fail 1 ⇒ failed ✗✗
+⇒ ★dynamo 导出的 Reshape 节点 OMG 不认✗★（与张量维数无关 ✓ —— 1→3/3→4/4→3/3→2 各种组合都失败 ✗，
+  而"通过样例"的形状在最小图里照样失败 ✗）
+⇒ 这解释了 gemma4 当年 48 个 Reshape 为何全过 ✓：★当年用的就是旧导出器★ ✓
+```
+
+### 53.2 修完之后的成绩
+
+```
+① 用【旧导出器】重导 qwen3_5 的 L4 切片（0.92 GB ✓）
+② 图级 lowering（onnx_lower.py 扩展 ✓）：
+     LessOrEqual     → Not(Greater(a,b))        ✓（旧导出器带进来的 ✗）
+     ConstantOfShape → Expand(标量, shape)      ✓（它的 shape 输入不是常量 ⇒ 不能直接物化 ✗）
+     IsNaN           → Not(Equal(x,x))          ✓
+③ 形状修复 fix_static_shapes()：旧导出器把输出写成 `[0,0,2048]` ✗ ⇒ 用输入形状补齐 ✓
+     （并跑 shape inference 补中间张量 ✓）
+⇒ ★OMG pre-check：total 2829 · pass 2829 · ★fail 0 ⇒ success★ ✓✓✓
+   （此前 dynamo 版本：total 1280 · fail 55 ✗）
+```
+
+**顺带修掉的 tracer 坑**：`_solve_unit_lower` 里 `L.shape[-1]` 在旧导出器下是 **Tensor** ✗ ⇒
+`bit_length()` 报 AttributeError ✗ ⇒ 改为由调用方传 **Python int**（chunk 大小 ✓）。
+
+### 53.3 仍剩最后一步（下一步做）
+
+```
+OMG 的 pre-check 已全过 ✓，但"生成 omc"阶段仍报：
+  E: UpdateUserSetNodeNames :: "cannot find output tensor hidden_states"
+     （磁盘上的图确实是 hidden_states [1,128,2048] FP32 ✓ —— 名字/形状都对 ✓）
+     ⇒ 紧跟着是 ParseFromMemory FAIL ✗ ⇒ ★真正的错是它解析这张图失败★ ✗，
+       "找不到输出"只是连带现象 ✓
+怀疑点：图级 lowering 的产物（Expand 标量初始化器 / 结构）让 OMG 的 ONNX 解析器不适 ✗
+下一步：用 `--mode 1`（model → json）单独验解析 ✓；再逐项排查 lowering 产物 ✓
+```

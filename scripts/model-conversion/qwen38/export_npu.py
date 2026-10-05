@@ -137,6 +137,8 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--attn-mask", action="store_true", help="显式传全 1 attention_mask（绕开 mask→position_ids ✗）")
     ap.add_argument("--layers", type=int, default=0, help=">0 时用真实宽度但只保留这么多层（做单图验证 ✓）")
+    ap.add_argument("--legacy", action="store_true",
+                    help="★用旧 TorchScript 导出器（opset 14）★：dynamo 产的 Reshape 会被 OMG pre-check 拒收 ✗（§53）")
     ap.add_argument("--static-pos", action="store_true",
                     help="把 position_ids 烘成常量（S 固定 ✓ 单输入图 ⇒ 设备能建图 ✓）")
     ap.add_argument("--no-embed-head", action="store_true",
@@ -160,15 +162,16 @@ def main():
     #   "input Parameter_1 not found in graph" ✗（§51）；而 int64 输入转换正常 ✓
     ids = torch.arange(1, s + 1, dtype=torch.long).unsqueeze(0)
     pos = torch.arange(s, dtype=torch.long).unsqueeze(0)
-    print("③ 导出 ONNX（dynamo / opset18 / 固定 S=%d）…" % s, flush=True)
+    _kw = (dict(opset_version=14, dynamo=False) if args.legacy
+           else dict(opset_version=18, dynamo=True, do_constant_folding=True))
+    print("③ 导出 ONNX（%s / 固定 S=%d）…" % ("legacy opset14 ✓" if args.legacy else "dynamo opset18", s), flush=True)
     if args.static_pos:
         _tc = m.config.text_config if hasattr(m.config, "text_config") else m.config
         emb = torch.zeros(1, s, _tc.hidden_size, dtype=torch.float32)
         print("    ★position_ids 烘成常量（单输入图 ✓）", flush=True)
         torch.onnx.export(
             WrapBodyStaticPos(m, s, args.attn_mask), (emb,), out,
-            input_names=["inputs_embeds"], output_names=["hidden_states"],
-            dynamo=True, opset_version=18, do_constant_folding=True,
+            input_names=["inputs_embeds"], output_names=["hidden_states"], **_kw,
         )
     elif args.no_embed_head:
         _tc = m.config.text_config if hasattr(m.config, "text_config") else m.config
@@ -176,14 +179,12 @@ def main():
         emb = torch.zeros(1, s, hid, dtype=torch.float32)
         torch.onnx.export(
             WrapBody(m, args.attn_mask), (emb, pos), out,
-            input_names=["inputs_embeds", "position_ids"], output_names=["hidden_states"],
-            dynamo=True, opset_version=18, do_constant_folding=True,
+            input_names=["inputs_embeds", "position_ids"], output_names=["hidden_states"], **_kw,
         )
     else:
         torch.onnx.export(
             Wrap(m, args.attn_mask), (ids, pos), out,
-            input_names=["input_ids", "position_ids"], output_names=["logits"],
-            dynamo=True, opset_version=18, do_constant_folding=True,
+            input_names=["input_ids", "position_ids"], output_names=["logits"], **_kw,
         )
     sz = os.path.getsize(out) + (os.path.getsize(out + ".data") if os.path.exists(out + ".data") else 0)
     print("   产物 %.2f GB" % (sz / 1e9), flush=True)
@@ -196,6 +197,8 @@ def main():
     if _c:
         onnx.save(_m, out)
         print("   lowering 完成：%s" % _c, flush=True)
+    onnx_lower.fix_static_shapes(_m)
+    onnx.save(_m, out)
     g = onnx.load(out, load_external_data=False).graph
     ops = collections.Counter(n.op_type for n in g.node)
     print("④ 算子清点：节点 %d · %d 种" % (len(g.node), len(ops)), flush=True)

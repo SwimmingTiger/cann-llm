@@ -65,7 +65,7 @@ def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
 
 # ---------------------------------------------------------------- ⓪ 分块前代（数值稳定）
 
-def _solve_unit_lower(L: torch.Tensor, X: torch.Tensor, block: int = 16) -> torch.Tensor:
+def _solve_unit_lower(L: torch.Tensor, X: torch.Tensor, block: int = 16, c: int = 0) -> torch.Tensor:
     """解 `(I - L) Y = X`（L 严格下三角），只用一个常量块大小的 matmul ✓。
 
     ★为什么不用"整体平方-乘积"★：`(I−L)^-1 = Π(I+L^{2^k})` 数学上精确 ✓，
@@ -74,7 +74,9 @@ def _solve_unit_lower(L: torch.Tensor, X: torch.Tensor, block: int = 16) -> torc
     分块前代只在【16×16 小块】上用平方-乘积（块小 ⇒ 条件数低 ✓），
     块间用普通 matmul 传播 ✓ ⇒ 数值稳定 ✓，而且块数固定（C=64 ⇒ 4 块）⇒ 全部可展开 ✓。
     """
-    c = L.shape[-1]
+    # ★c 必须由调用方以 Python int 传入★：旧 TorchScript 导出器会把
+    #   `L.shape[-1]` 变成 Tensor，导致 `bit_length()` 报错 ✗（§53 实测 ✓）
+    c = c or int(L.shape[-1])
     nblk = (c + block - 1) // block
     ys = []
     for i in range(nblk):
@@ -154,88 +156,90 @@ def npu_chunk_gated_delta_rule(
     use_qk_l2norm_in_kernel: bool = False,
     **kwargs,
 ):
-    """`torch_chunk_gated_delta_rule` 的等价改写（只用支持算子 ✓）。
+    """`torch_chunk_gated_delta_rule` 的等价改写 —— ★全程只用 ≤3 维张量★ ✓。
+
+    ★为什么强调 3 维★：NPU-CL 对 ≥4 维支持很差 ✗（§30 的老结论 ✓）。
+    实测（§52）：5 维张量上那 49 个 `Reshape` 被 OMG 的 pre-check 直接判 fail ✗，
+    而同样这些数学用 3 维表达时全部 pass ✓。
+
+    做法：
+      · 把 (batch, head) 折成一维 ⇒ `[B*H, S, D]` ✓（一次 reshape ✓）
+      · ★不再构造 chunk 维★：逐 chunk 用【常量下标 Slice】切出来 ✓
+        （chunk 数是编译期常量 ⇒ 循环完全展开 ✓ 图里没有动态形状 ✓）
+      · 所有中间量：`[BH, C, D]` / `[BH, C, C]` / `[BH, Dk, Dv]` —— 全是 3 维 ✓
 
     形状约定与参考实现一致：
       query/key [B, S, Hk, Dk] · value [B, S, Hv, Dv] · g/beta [B, S, Hv]
       返回 (out [B, S, Hv, Dv], final_state [B, Hv, Dk, Dv] 或 None)
     """
     initial_dtype = query.dtype
-    batch_size, seq_len, _, k_head_dim = key.shape
+    batch_size, seq_len, hk, k_head_dim = key.shape
     num_v_heads, v_head_dim = value.shape[-2:]
-    recurrent_state_shape = (batch_size, num_v_heads, k_head_dim, v_head_dim)
+    if hk != num_v_heads:
+        raise ValueError("本实现要求 key/value 头数一致（参考实现的实际用法亦然 ✓）")
+    heads = hk
+    bh = batch_size * heads
 
-    decay = g
-    query, key, value, beta, decay = [
-        x.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format)
-        for x in (query, key, value, beta, decay)
-    ]
+    # 折 (B, H) ✓ —— 每次 reshape 都是 3 维目标 ✓
+    q = query.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format).reshape(bh, seq_len, k_head_dim)
+    k = key.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format).reshape(bh, seq_len, k_head_dim)
+    v = value.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format).reshape(bh, seq_len, v_head_dim)
+    b = beta.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format).reshape(bh, seq_len)
+    dec = g.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format).reshape(bh, seq_len)
+
     if use_qk_l2norm_in_kernel:
-        query = _l2norm(query, dim=-1, eps=1e-6)
-        key = _l2norm(key, dim=-1, eps=1e-6)
-    query = query * (query.shape[-1] ** -0.5)
+        q = _l2norm(q, dim=-1, eps=1e-6)
+        k = _l2norm(k, dim=-1, eps=1e-6)
+    q = q * (k_head_dim ** -0.5)
 
     pad_size = (chunk_size - seq_len % chunk_size) % chunk_size
     if pad_size:
-        query, key, value = (F.pad(x, (0, 0, 0, pad_size)) for x in (query, key, value))
-        beta, decay = (F.pad(x, (0, pad_size)) for x in (beta, decay))
+        q, k, v = (F.pad(x, (0, 0, 0, pad_size)) for x in (q, k, v))   # 3 维：补第 1 维 ✓
+        b, dec = (F.pad(x, (0, pad_size)) for x in (b, dec))           # 2 维：补最后一维 ✓
     total_len = seq_len + pad_size
     num_chunks = total_len // chunk_size
     c = chunk_size
 
-    v_beta = value * beta.unsqueeze(-1)
-    k_beta = key * beta.unsqueeze(-1)
-    query, key, k_beta, v_beta = [
-        x.reshape(x.shape[0], x.shape[1], num_chunks, c, x.shape[-1])
-        for x in (query, key, k_beta, v_beta)
-    ]
-    decay = decay.reshape(decay.shape[0], decay.shape[1], num_chunks, c)
-
-    # ★CumSum → 一次常量下三角矩阵乘法★
-    cum_decay = decay @ tril_ones(c, torch.float32, decay.device)          # [B,Hv,nc,C]
-
-    # ★triu 掩码 → 常量布尔掩码 + where★
-    pairwise = cum_decay.unsqueeze(4) - cum_decay.unsqueeze(3)             # [.., i, j]
-    up = strict_upper(c, pairwise.device)
-    pairwise = torch.where(up, torch.full((), float("-inf"), dtype=pairwise.dtype,
-                                          device=pairwise.device), pairwise)
-    pairwise = pairwise.exp()
-
-    ut = (k_beta @ key.transpose(-1, -2)) * pairwise                      # [B,Hv,nc,C,C]
-    intra = (query @ key.transpose(-1, -2)) * pairwise
-    decayed_k_beta = k_beta * cum_decay.exp().unsqueeze(-1)
-
-    # ★UT 变换：L 严格下三角 ⇒ 幂零 ⇒ (I−L)^-1 = (I+L)(I+L²)(I+L⁴)…★
-    #   参考实现写成 63 步逐行递推（还会引入 scatter）✗；这里 6 次 matmul ✓
-    zero = torch.zeros((), dtype=ut.dtype, device=ut.device)
-    lo = strict_lower(c, ut.device)
-    lower = torch.where(lo, -ut, zero)                 # = -(ut.tril(-1)) ✓（免 Trilu ✓）
-    # ★分块前代★（小块平方-乘积 + 块间 matmul ⇒ 数值稳定 ✓，块数常量 ⇒ 可展开 ✓）
-    new_values = _solve_unit_lower(lower, v_beta, block=16)
-    k_cumdecay = _solve_unit_lower(lower, decayed_k_beta, block=16)
+    cum_ones = tril_ones(c, torch.float32, q.device)        # 前缀和常量矩阵（triu(ones) ✓）
+    lo = strict_lower(c, q.device)
+    up = strict_upper(c, q.device)
+    eye = torch.eye(c, dtype=torch.float32, device=q.device)
+    zero = torch.zeros((), dtype=torch.float32, device=q.device)
+    neg_inf = torch.full((), float("-inf"), dtype=torch.float32, device=q.device)
 
     if initial_state is None:
-        state = torch.zeros(recurrent_state_shape, dtype=new_values.dtype, device=new_values.device)
+        state = torch.zeros(bh, k_head_dim, v_head_dim, dtype=torch.float32, device=q.device)
     else:
-        state = initial_state.to(new_values)
+        state = initial_state.to(torch.float32).reshape(bh, k_head_dim, v_head_dim)
 
-    query = query * cum_decay.exp().unsqueeze(-1)
-    key = key * (cum_decay[..., -1:] - cum_decay).exp().unsqueeze(-1)
-    chunk_decay = cum_decay[..., -1].exp()[..., None, None]
-
-    # ★分块顺序扫描：用列表 + cat 取代原实现的 in-place 切片赋值（免 Scatter ✓）★
     outs = []
-    for i in range(num_chunks):                        # num_chunks 是编译期常量 ⇒ 展开 ✓
-        v_new = new_values[:, :, i] - k_cumdecay[:, :, i] @ state
-        inter = query[:, :, i] @ state
-        outs.append(inter + intra[:, :, i] @ v_new)
-        state = state * chunk_decay[:, :, i] + key[:, :, i].transpose(-1, -2) @ v_new
+    for i in range(num_chunks):                             # 编译期常量次数 ⇒ 全展开 ✓
+        sl = slice(i * c, (i + 1) * c)                      # ★常量下标 Slice★ ✓
+        qi, ki, vi = q[:, sl, :], k[:, sl, :], v[:, sl, :]   # [BH, C, D] ✓ 3 维
+        bi, di = b[:, sl], dec[:, sl]                        # [BH, C] ✓ 2 维
+        cum = di @ cum_ones                                  # [BH, C] ✓ 前缀和（免 CumSum ✓）
+        pw = torch.where(up, neg_inf, cum.unsqueeze(2) - cum.unsqueeze(1)).exp()   # [BH,C,C] ✓
+        v_beta = vi * bi.unsqueeze(-1)
+        k_beta = ki * bi.unsqueeze(-1)
+        ut = (k_beta @ ki.transpose(-1, -2)) * pw            # [BH,C,C] ✓
+        intra = (qi @ ki.transpose(-1, -2)) * pw             # [BH,C,C] ✓
+        dkb = k_beta * cum.exp().unsqueeze(-1)               # [BH,C,D] ✓
+        lower = torch.where(lo, -ut, zero)                   # = -(ut.tril(-1)) ✓（免 Trilu ✓）
+        new_values = _solve_unit_lower(lower, v_beta, block=16, c=c)     # [BH,C,Dv] ✓
+        k_cumdecay = _solve_unit_lower(lower, dkb, block=16, c=c)        # [BH,C,Dk] ✓
+        qi2 = qi * cum.exp().unsqueeze(-1)
+        ki2 = ki * (cum[:, -1:] - cum).exp().unsqueeze(-1)
+        cdec = cum[:, -1].reshape(bh, 1, 1).exp()            # [BH,1,1] ✓
+        v_new = new_values - k_cumdecay @ state              # [BH,C,Dv] ✓
+        outs.append(qi2 @ state + intra @ v_new)             # [BH,C,Dv] ✓
+        state = state * cdec + ki2.transpose(-1, -2) @ v_new # [BH,Dk,Dv] ✓
 
-    core = torch.cat(outs, dim=2)                      # [B,Hv,total_len,Dv] ✓
-    core = core.reshape(batch_size, num_v_heads, total_len, v_head_dim)
-    core = core[:, :, :seq_len]
-    core = core.transpose(1, 2).to(initial_dtype, memory_format=torch.contiguous_format)
-    return core, (state if output_final_state else None)
+    core = torch.cat(outs, dim=1)                            # [BH, total, Dv] ✓ 3 维
+    core = core[:, :seq_len, :]
+    core = core.reshape(batch_size, heads, seq_len, v_head_dim).transpose(1, 2)
+    core = core.to(initial_dtype, memory_format=torch.contiguous_format)
+    final = state.reshape(batch_size, num_v_heads, k_head_dim, v_head_dim) if output_final_state else None
+    return core, final
 
 
 # ---------------------------------------------------------------- 安装 / 卸载
