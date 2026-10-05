@@ -7740,3 +7740,61 @@ OH_NNModel_GetAvailableOperations(model, deviceID, const bool **isSupported, uin
       NNRt 离线模型格式 ✓）—— 这已经是一份非常清晰的厂商问题单 ✓
    ③ 其它（重新审视 hiai LLM 引擎 + 官方 dopt 路线 ✗ 需动态 seq ✓ 与我们静态图冲突 ✗）
 ```
+
+## 142. ★★★决定性交叉验证：同一程序内只有 MATMUL 被 NNRt 接受✗ ⇒ NPU 路线判定完成★★★
+
+### 142.1 实验设计（★排除一切脚手架变量★）
+
+```
+程序：scripts/model-conversion/qwen38/nnrt_probe/two_ops.cpp ✓
+   · ★完全照 §127 能跑通的写法★：纯 main/函数内局部变量 ✓ 无表格 ✓ 无解析 ✓ 无 blob ✓
+   · 每次调用新建一个模型 ✓ 同样的 3 个张量（x / w / y ✓ 同形状 [1,64,64] ✓）
+   · 参数张量按其【正确 dtype】给出 ✓（MATMUL=BOOL ✓ ADD/MUL/SUB/DIV/PAD=INT32 ✓ POW=F32 ✓）
+   · 唯一变量 = 算子号 ✓
+★第一版还踩了一个坑✗★：我把 MATMUL 的 transpose 参数写成 INT32 ✗（应为 BOOL ✓）
+   ⇒ 导致连对照都失败 ✗ ⇒ 修正后才得到下面的有效结果 ✓（再次印证：参数 dtype 必须对 ✓）
+```
+
+### 142.2 结果（★决定性★）
+
+```
+  MATMUL       op=19  params=2 ⇒ AddOp=0 Finish=0 ★Build=0★ ★可用★
+  MATMUL-1p    op=19  params=1 ⇒ AddOp=0 Finish=0 ★Build=0★ ★可用★
+  MUL   op=22 (1参 / 0参)  ⇒ AddOp=2 ✗
+  ADD   op=1  (1参 / 0参)  ⇒ AddOp=2 ✗
+  SUB   op=38 (1参) ⇒ AddOp=2 ✗ · DIV op=11 (1参) ⇒ AddOp=2 ✗
+  SIGMOID op=28 (0参) ✗ · EXP op=60 (0参) ✗ · RELU op=47 (0参) ✗ · POW op=25 (2参) ✗
+  ★PAD op=24 (1参) ⇒ AddOp=0 ✓ Finish=0 ✓ ★Build=1 ✗★
+     ⇒ ★结构被接受 ✓ 但 NPU 编译失败 ✗ ⇒ 后端不支持该算子 ✓★
+⇒ ★★结论确定★：NNRt 的 NPU 后端（= hiai HCL 服务 ✓ §128 ✓）
+   只接受了 MATMUL（以及真实模型里结构合法的 POW/PAD 进入编译阶段 ✓）
+   而 transformer 必需的 ADD/MUL/SIGMOID/SQRT/… 全部在 AddOperation 阶段被拒 ✗★
+```
+
+### 142.3 ★三条 NPU 通路的最终判定★
+
+```
+① DDK hiai 直跑    ⇒ ModelManager::Init rc=1（≥2 层图 ✗ 不吐原因 ✗）—— §84~§120 ✓
+② NNRt 在线建图    ⇒ 绝大多数算子 AddOperation rc=2 ✗ —— §131~§142 ✓（本轮决定性 ✓）
+③ NNRt 离线模型    ⇒ omc / .om / mslite 厂商 .ms 全部 Build rc=1 ✗ —— §121~§129 ✓
+★三者共同的后端★ = ★hiai（HCL 服务）★ ⇒ 这是厂商栈的边界 ✗
+★设备上唯一被证明能跑 LLM 的 NPU 通路★ = 官方 hiai LLM 引擎 + 官方格式模型 ✓
+   （官方 Qwen3-8B 实测 12.8 tok/s ✓ 能聊天 ✓ —— 但那需要"动态 seq + 图内无 KV +
+     引擎自带 attention 算子" ✗ 与我们 qwen3_5 的"静态图 + 图内状态 + 混合线性注意力"冲突 ✗）
+
+### 142.4 结论
+
+```
+★"让 Qwen3.8 在设备 NPU 上跑通聊天" 这个目标★：
+   在我们的工具面内【三条 NPU 通路全部硬性不通】✗ ⇒ ★判定为彻底失败（本目标）★
+★可交付的替代★：
+   ① CPU/GGUF（能聊天 ✓ 不在 NPU ✗）—— 待用户确认 ✓
+   ② 厂商问题单（三份最小复现 ✓ 材料基本就绪 ✓）
+★本目标留下的可复用资产✓★：
+   · 完整的 3 维化改写 + 静态图导出（prefill/decode ✓ argmax 1.0000 ✓）
+   · OMG 官方形态产物（omc + SubGraph_0.weight ✓）
+   · ★通用 ONNX→NNRt 建图器★（读 ONNX ⇒ 表 ⇒ NNRt 在线建图 ✓ 含形状推断/常量物化/
+     算子映射自动抽取/PARAM 类型表 ✓）—— 换任何 NNRt 支持的模型都能直接用 ✓
+   · 一整套 NNRt 实测经验（API 坑 5 条 ✓ 参数必须是带 type 的秩0张量 ✓ 后端=HCL ✓ …）
+   · docs/maintainer-notes.md §1~§142 全部实测记录 ✓
+```
