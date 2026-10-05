@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.expanduser("~/q38"))
 import npu_layers                                                    # noqa: E402
 from transformers import AutoModelForCausalLM                        # noqa: E402
 
-B, S = 1, 8
+B, S = 1, 64          # ★与真实 prefill 图同形✓★
 model = AutoModelForCausalLM.from_pretrained("/home/hu60/q38", dtype=torch.float32,
                                              trust_remote_code=False).eval()
 model.requires_grad_(False)

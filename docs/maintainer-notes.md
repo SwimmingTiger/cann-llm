@@ -5548,3 +5548,52 @@ c) 补做 state2 / state8 探针（修掉我探针里的形状 bug ✓）⇒ 确
     （decode 图 S=1 时若 chunk=64 也会补齐 ✗ ⇒ 同样会产生空掩码 ✗
       —— 这正好是 §87 里"decode 用 chunk=1"那条注意事项的另一种表现 ✓）
 ```
+
+## 95. chunk_size 改为随 S 自适应 ✓（decode 图必需）· 整层 S=64 同形仍失败 ✗ ⇒ 直指"算子融合"
+
+### 95.1 修好的真 bug（对 decode 图是必需的 ✓）
+
+```python
+# npu_layers.py · linear_attention_layer
+# 旧：chunk_size=64 写死 ✗ ⇒ S<64 时补齐 ⇒ 三角掩码出现 0 维空张量 ✗
+chunk = 64 if s >= 64 else max(s, 1)
+core, new_rec = npu_chunk_gated_delta_rule(
+    query, key, value, g, beta, chunk_size=chunk, initial_state=rec_state, ...)
+```
+```
+⇒ decode 图（S=1）现在会用 chunk=1 ✓ ⇒ 退化为逐 token 递归更新 ✓ 且不补齐 ✓
+  （这正是 §87 里"decode 用 chunk=1"那条注意事项的落地 ✓）
+```
+
+### 95.2 整层探针改成 S=64 同形后：★仍然 OMG 失败✗★
+
+```
+nl_withnorm(S=64)：OMG成功=0 ✗ · nl_nonorm(S=64)：OMG成功=0 ✗
+⇒ ★padding 不是原因✗★（S=64 = 正好一块 ✓）
+⇒ ★gated RMSNorm 不是原因✗★（拿掉仍失败 ✓）
+报错（去掉噪声后）：
+  get opKernel of name FMK_CL failed! ×2   ← ★融合激活 kernel 取不到✗★
+  （其余是 strided_slice 的 advisory ✓ 非致命 ✓）
+试过 ★--use_origin_format=true★（默认会转 NCHW ✗）⇒ 仍失败 ✗
+```
+
+### 95.3 通过 vs 失败的对照（现在很清楚 ✓）
+
+```
+★单独通过（OMG ✓ + Init rc=0 ✓）★：proj ✓ · conv（深度可分离 ✓）✓ · l2norm ✓ · delta rule ✓
+★组合后失败（OMG ✗）★：conv + split/reshape + delta + norm + out_proj
+⇒ ★病灶在"组合"里 —— 最像是【算子融合】触发了一个 CL kernel 缺失✗★
+   （FMK_CL ✓ 名字里 FMK = Fusion 相关 ✓；且报错来自 activation_op_define.c ✓）
+```
+
+### 95.4 下一步（三条，都很便宜 ✓）
+
+```
+① ★逐件 skip 二分★（已给 linear_attention_layer 加了 skip 参数 ✓ 只差使用 ✓）：
+   variants = [full] [skip out] [skip norm,out] [skip delta] [skip conv,delta]
+   ⇒ 找出"加上哪一件后就编不过" ✓
+② ★把 silu / sigmoid 换成显式写法✗→✓★（避免融合 ✓）：
+   silu(x) = x * sigmoid(x) ✓ → x * (1/(1+exp(-x))) ✓ · sigmoid(x) = 1/(1+exp(-x)) ✓
+   —— 用 Exp/Add/Div 基本算子表达 ✓ ⇒ 融合模式可能就不匹配了 ✓
+③ 查 OMG 是否有禁用融合的隐藏参数 ✓（--help 里没有 ✓，可试 --soc_version 之外的环境变量 ✓）
+```

@@ -98,7 +98,8 @@ def full_attention_layer(layer, hidden, mask, cos, sin, past_key, past_value, kv
 
 # ---------------------------------------------------------------- 线性注意力层（卷积窗口 + 递归状态）
 def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads, hd, seq: int = 0,
-                           batch: int = 0, trace: list | None = None):
+                           batch: int = 0, trace: list | None = None, skip: tuple = ()):
+    """skip: 用于★探针二分★，可跳过 ('conv','delta','norm','out') 里的部件 ✓（生产路径不传 ✓）。"""
     la = layer.linear_attn
     # ★同样只用显式 int★（避免 legacy 追踪把 shape 变 Tensor ✗）
     b = batch or hidden.shape[0]
@@ -146,8 +147,13 @@ def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads
 
     if trace is not None:
         trace.extend([("query", query), ("key", key), ("value", value), ("g", g), ("beta", beta)])
+    # ★chunk_size 随 S 自适应✓★：写死 64 会在 S<64 时补齐 ✗
+    #   ⇒ 最后一块没有有效行 ⇒ 三角掩码产生 0 维空张量[0,S,0] ✗
+    #   ⇒ NPUCL 判 "dimCnt 2 != 3" ⇒ OMG 编译失败（§94 实测 ✓）
+    #   decode(S=1) 用 chunk=1 ⇒ 退化为逐 token 递归更新 ✓ 且不补齐 ✓
+    chunk = 64 if s >= 64 else max(s, 1)
     core, new_rec = npu_chunk_gated_delta_rule(
-        query, key, value, g, beta, chunk_size=64, initial_state=rec_state,
+        query, key, value, g, beta, chunk_size=chunk, initial_state=rec_state,
         output_final_state=True, use_qk_l2norm_in_kernel=True, seq_len=s, batch=b)
 
     # ★gated RMSNorm 要额外传 gate（z）★ ✓（类名形如 Qwen3_5RMSNormGated ⇒ 用 in 判断 ✓）
