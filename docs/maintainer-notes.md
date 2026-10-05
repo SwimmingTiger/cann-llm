@@ -4508,3 +4508,58 @@ scripts/model-conversion/qwen38/build_hiai_pkg.py ✓（新脚本 ✓）
 ③ 重新导出 → fp16 → OMG → 再次用引擎加载 ⇒ 逐步逼近 ★聊天★ ✓
 ★注意★：每次改图都要重走「导出 → lower → fp16 → OMG」四步 ✓（约 15 分钟一轮 ✓）
 ```
+
+## 72. 引擎加载：连过两关（激活 ✓ · 权重内存 ✓），卡在【输入缓冲尺寸】✗
+
+### 72.1 已解决：激活不兼容 ✓（§71 的猜测被证实 ✓）
+
+```
+做法：onnx_lower 加一条 lowering ✓
+   Softplus(x) → Log(Add(1, Exp(Min(x, 20))))      （x>20 时与真值差 < 2e-9 ✓）
+实测：18 个 Softplus 全部消除 ✓（图里剩 18 个 Log + 18 个 Min ✓）
+      ⇒ OMG 再次成功 ✓（rc=0 · 成功标志=1 · omc 2753.6 MB ✓）
+      ⇒ ★引擎侧 CPUCL 的 "activation.mode = 9 not support" 彻底消失 ✓✓★
+★顺带★：整个链条可以【不重导】就跑 ✓ —— 直接对已有的 q35_hiai_low.onnx 再做一次
+   lower（新 lowering 会命中 ✓ 老的已无对象 ✓）⇒ 省掉导出那一步 ✓
+```
+
+### 72.2 已解决：权重内存分配失败 ✓（就是 §38 的 securec 2 GiB 上限 ✓）
+
+```
+不加补丁时报：large_memory_ops.cpp "memcpy_s(dstBufferStartAddr, dstRestSize, …)" ✗
+             model_memory_manager.cpp AllocateWeightMemory(206)::"Allocate weight memory failed." ✗
+             dma_heap_alloc: systemHeapFd / tinyHeapFd / npuHugePageHeapFd open failed ✗
+⇒ 用 scripts/start_chat.sh --large-mem ✓（运行时把 securec 的 2 GiB 检查改成 nop ✓）
+⇒ ★该错误消失✓★（权重 2.75 GB > 2 GiB 正是它 ✓）
+```
+
+### 72.3 ★当前卡点★：CPUCL 图执行器 Prepare 失败（输入缓冲尺寸不符 ✗）
+
+```
+CPUCL: op_run_context.cpp operator()(45)::param["size"] is less than["dataSize"] ✗
+CPUCL: op_run_context.cpp UpdateDataAndWeight(98)::"update inputs failed" ✗
+CPUCL: cpu_graph_executor.cpp GenerateOp(153)::"Op:/Mul_1 opRunContext UpdateDataAndWeight failed" ✗
+CPUCL: cpu_graph_executor.cpp Prepare(104)::"GenerateOp failed" ✗
+AI_FMK: graph_op_execution.cpp Prepare(104)::… "op name:SubGraph_0, type:GraphOp" ✗
+
+⇒ ★引擎分配的输入缓冲【比模型要求的 dataSize 小】✗★（第一个出问题的是 /Mul_1 ✓）
+  最可能的原因：★每层状态张量的尺寸对不上★ ✗
+    引擎按官方约定给 past_key_in{i}/past_value_in{i} 分配【KV 形状】✓
+      （[kv_max, kv_heads, B, head_dim] = [2048,2,1,256] fp32 ≈ 4 MB ✓）
+    而我们的线性层需要 conv[1,6144,3]（72 KB ✓）+ rec[1,16,128,128]（1 MB ✓）
+      ⇒ 形状/大小完全不是一回事 ✗ ⇒ 缓冲不够 ✗
+  另外注意：引擎还抱怨 "hiai foundation not support extension config." ✓
+     与 "context is null or the bundleName is empty." ✓ —— 属于 shell 进程无 app 上下文 ✓（噪声 ✓）
+```
+
+### 72.4 下一步（两条路）
+
+```
+A. 看 src/cann_llm/backends/hiai.py 怎么声明/喂这些张量 ✓
+   —— 它是用引擎接口（模型自己声明 IO ✓）还是自己塞 buffer ✗；
+      若是后者 ⇒ 我们可以按自己的形状塞 ✓（那问题就在别处 ✓）
+B. ★无状态版图★（最稳 ✓）：把每层状态全部去掉 ✓ ——
+   图变成 input_embed[B,S,H] → hidden_states[B,S,H] 的纯 prefill 图 ✓（S 固定 ✓），
+   引擎按 prefill_len 喂整段 ✓ ⇒ 只要引擎支持"每步重喂全序列"就能生成 ✓
+   （慢 ✗ 但能先跑通聊天 ✓，之后再补状态 ✓）
+```

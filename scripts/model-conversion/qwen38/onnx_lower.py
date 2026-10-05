@@ -62,6 +62,44 @@ def _handle_isnan(model, isnan_outs, counts, new_inits):
     g.node.extend(rest)
 
 
+def _lower_softplus(g, counts):
+    """Softplus(x) → Log(Add(1, Exp(Min(x, 20)))) ✓（CPUCL 不认 Softplus 激活 ✗）。"""
+    if not any(n.op_type == "Softplus" for n in g.node):
+        return
+    used = {i.name for i in g.initializer}
+    for n in g.node:
+        used.update(n.output)
+    new_inits = []
+    nodes = []
+    k = 0
+    for n in g.node:
+        if n.op_type != "Softplus":
+            nodes.append(n)
+            continue
+        x = n.input[0]
+        base = n.name or (n.output[0] + "_sp")
+        names = []
+        for suf in ("_c20", "_min", "_exp", "_one", "_add", "_log"):
+            nm = base + suf
+            while nm in used:
+                nm += "_"
+            used.add(nm)
+            names.append(nm)
+        c20, mn, ex, one, add, lg = names
+        new_inits.append(numpy_helper.from_array(np.array(20.0, dtype=np.float32), c20))
+        new_inits.append(numpy_helper.from_array(np.array(1.0, dtype=np.float32), one))
+        nodes.append(helper.make_node("Min", [x, c20], [mn], name=base + "_min"))
+        nodes.append(helper.make_node("Exp", [mn], [ex], name=base + "_exp"))
+        nodes.append(helper.make_node("Add", [ex, one], [add], name=base + "_add"))
+        nodes.append(helper.make_node("Log", [add], [n.output[0]], name=base + "_log"))
+        counts["Softplus"] = counts.get("Softplus", 0) + 1
+        k += 1
+    if k:
+        del g.node[:]
+        g.node.extend(nodes)
+        g.initializer.extend(new_inits)
+
+
 def _shape_of(model: onnx.ModelProto, name: str):
     """从 input/output/value_info 查静态形状（拿不到返回 None）。"""
     g = model.graph
@@ -118,6 +156,9 @@ def lower_model(model: onnx.ModelProto, kinds=None) -> dict:
     # ★统一处理 IsNaN★（§54/§55）
     if isnan_nodes:
         _handle_isnan(model, isnan_nodes, counts, new_inits)
+
+    # ★Softplus → Log(1+Exp(Min(x,20)))★（§71：CPUCL 不认这个激活 ✗）
+    _lower_softplus(g, counts)
 
     # ★MatMul(标量, x) / MatMul(x, 标量) → Mul(x, 标量)★（§57）
     _init_shape = {}
