@@ -7458,3 +7458,47 @@ C 换路：CPU/GGUF（已跑通 ✓ 非 NPU ✗）
 ③ 打通 Build 后 ⇒ 加 Executor（SetInput/SetOutput/Run ✓）⇒ 前向出数 ✓
 ④ 然后才是解码循环 + lm_head + 采样 ⇒ ★设备上聊天★
 ```
+
+## 136. 真实模型（q35_chk.onnx 2 层）跑建图器：表生成成功 ✓ 暴露四个待修点 ✗
+
+### 136.1 实测数据
+
+```
+~/q38env/bin/python onnx_to_nnrt.py q35_chk.onnx real_graph.txt real_blob.bin
+   ⇒ ★张量 1060 个 · 节点行 537 条 · 权重 blob 470,526,236 B（470 MB）★ ✓
+   表头：IN 35 36 37 38 39 ✓ · OUT 1059 ✓
+★警告统计★：
+   398 × "跳过常量算子 Constant" ✗
+     2 × "跳过常量算子 ConstantOfShape" ✗
+     2 × "★不支持的算子 Softplus★" ✗（节点 /Softplus, /Softplus_1）
+   若干 × "输出形状未知/动态 ⇒ [0,6144,0]" ✗
+```
+
+### 136.2 四个待修点（都清楚了 ✓）
+
+```
+① ★Constant 必须"物化"而不是跳过✗★
+   · ONNX 里 398 个 Constant ⇒ 每个都产出一个常量张量 ✓
+   · 我现在的做法是跳过 ✗ ⇒ 它的输出既没数据也没生产者 ✗
+     ⇒ 引用它的节点会【丢输入】✗（生成器 `[i for i in n.input if i in idx_of]` 静默丢弃 ✗）
+   · 修法：把 Constant 的 tensor 值写进 blob ✓ 并登记为常量张量 ✓（与 initializer 同等对待 ✓）
+② ConstantOfShape 同理 ✓（按输入的形状张量 + value 属性算出常量 ✓）
+③ Softplus 不支持 ✗ ⇒ 用 we 已有的 onnx_lower._lower_softplus 展开 ✓（log(1+exp(x)) ✓）
+   · ★更好的做法★：直接拿【我们已经写好的 lowering】（onnx_lower.py / lower_hiai.py ✓）
+     先降级一遍 ✓ 再喂给本建图器 ✓ —— 它们本来就处理了 Softplus / ConstantOfShape /
+     mixed dtype / 各种改写 ✓
+④ 形状必须是【静态】✗（NNRt 不接受 -1 / 0 ✓）
+   · onnx.shape_inference 对 Slice/Split/Transpose 等推断不足 ✗ ⇒ 出现 [0,6144,0] ✗
+   · 修法：改用 onnxruntime.tools.symbolic_shape_infer.SymbolicShapeInference ✓
+     （传播能力强得多 ✓）或直接从我们 exporter 里导出的已知形状表来填 ✓
+```
+
+### 136.3 下一步（按顺序 ✓）
+
+```
+① 生成器：物化 Constant / ConstantOfShape ✓ + 输入缺失时【报错而不是静默丢弃】✓（重要 ✓）
+② 生成器：换 symbolic_shape_infer 拿静态形状 ✓（仍未知的 ⇒ 明确报出来 ✓）
+③ 生成器：不能映射的算子（Softplus 等）⇒ 先过一遍我们的 lowering ✓ 再生成 ✓
+④ 然后：nnrt_build 在 NPU 上 Build 真实模型 ⇒ 看首个报错 ⇒ 补 PARAM_TABLE ✓
+⑤ 通了再加 Executor（SetInput/SetOutput/Run ✓）⇒ 前向出数 ✓
+```
