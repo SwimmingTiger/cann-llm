@@ -4153,3 +4153,50 @@ scripts/model-conversion/qwen38/hiai_runner/hiai_runner.cpp（§62 ✓ 已能在
    导出 → OMG → 组装模型包 → 引擎加载 这条链跑通 ✓
 ③ 解码版（S=1 与 prefill 共存 ✗）再单独设计（可能要用两套图或动态形状 ✓）
 ```
+
+## 64. ★★★★★ hiai 接口版导出跑通（12 输入 / 9 输出 ✓）—— 数值待对齐 ✗
+
+### 64.1 跑通的证据
+
+```
+~/q38env/bin/python export_hiai_q35.py --hf /home/hu60/q38 --seq 64 --kv-len 256 \
+    --layers 4 --no-embed-head --legacy --out q35_hiai_L4.onnx
+  ⇒ 层型 ['linear_attention','linear_attention','linear_attention','full_attention'] ✓
+    heads=8 kv_heads=2 head_dim=256 hidden=2048
+    线性层状态：conv[1,6144,3] · rec[1,16,128,128] ✓
+  ★产物 915.7 MB ✓ 输入 12 个 · 输出 9 个 ✓★
+    输入：input_embed[B,S,H] · attention_mask[B,1,S,kv] · position_ids[3,B,S] ·
+          new_kv_cache_pos[S] + 每层 past_key_in{i}/past_value_in{i}
+    输出：hidden_states + 每层 past_key{i}/past_value{i}
+```
+
+### 64.2 一路修掉的 7 个具体 bug（都是实测踩出来的 ✓）
+
+```
+① tc.layer_types 必须是 list ✗（严格 dataclass 校验 ✓）
+② --no-embed-head 时第一路输入是 ★input_embed[B,S,H]★ ✗ 不是 input_ids ✗（官方 embedding_separate 约定 ✓）
+③ conv 状态形状 ★[B, conv_dim, K-1]★（conv_dim = 2*key_dim + value_dim = 6144 ✓）—— 我一开始猜错 ✓
+④ 卷积输出长度是 K-1+S ✗ ⇒ ★只取最后 S 个★（状态位的输出上一步已算过 ✓）；下标要用 Python int ✓（§53 的 tracer 坑 ✓）
+⑤ gated RMSNorm 要额外传 gate ✓（类名要 "rmsnormgated" in name 判断 ✗ 不是 startswith ✓）
+⑥ out_proj 前要把 [B,S,Hv,Dv] reshape 成 [B,S,Hv*Dv] ✓（参考实现也这么干 ✓）
+⑦ M-RoPE 的 position_ids 在模型内部是 [3,B,S] ✓ ⇒ 导出图里就是 3 维 ✓（喂数据时要注意 ✓）
+```
+
+### 64.3 当前数值状态（还没过 ✗）
+
+```
+ONNX Runtime vs ★未打补丁的 HF 参考实现★（缓存置零 ✓ mask 因果 ✓）：
+   最大绝对差 5.47e+00 | 参考量级 4.97 | 相对 1.10 ✗
+⇒ 层实现里有 bug ✓，正在逐层定位 ✓
+   定位脚本 dbg_layers.py 已写好 ✓，但参考层的调用还要对齐 mask 约定 ✗
+   （参考的 sdpa 通路要 bool/float mask ✓；我只喂了 long 的 all-ones ✓ ⇒ 报 dtype 错 ✗）
+```
+
+### 64.4 下一步
+
+```
+① 把 dbg_layers.py 的参考调用修好（喂参考通路能接受的因果 mask ✓ 或直接调 layer.linear_attn ✓）
+   ⇒ 逐层看出是哪一层、哪一步差 ✗
+② 怀疑顺序：卷积窗口的对齐 ✓ → delta rule 的 initial_state 语义 ✓ → 全注意力层的缓存/掩码 ✓
+③ 对齐后再走 OMG ⇒ omc ⇒ 组装模型包（§60 形态 ✓）⇒ 引擎加载 ✓
+```

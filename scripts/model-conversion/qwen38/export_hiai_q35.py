@@ -52,7 +52,7 @@ def main() -> int:
     tc = cfg.text_config if hasattr(cfg, "text_config") else cfg
     if args.layers:
         tc.num_hidden_layers = args.layers
-        tc.layer_types = tuple(tc.layer_types)[: args.layers]
+        tc.layer_types = list(tc.layer_types)[: args.layers]
     tc.kv_cache_max_len = args.kv_len
     model = Qwen3_5ForCausalLM(tc).eval()
 
@@ -74,22 +74,27 @@ def main() -> int:
             super().__init__()
             self.body = m.model
 
-        def forward(self, input_ids, attention_mask, position_ids, new_kv_cache_pos, *states):
+        def forward(self, first, attention_mask, position_ids, new_kv_cache_pos, *states):
             """states 按层给出：每层两个张量（第 i 层的 key 槽 / value 槽 ✓）。"""
-            inputs_embeds = self.body.embed_tokens(input_ids) if not args.no_embed_head else input_ids
+            inputs_embeds = first if args.no_embed_head else self.body.embed_tokens(first)
+            # ★M-RoPE 的 position_ids 是 [3,B,S]★ ✓（官方接口给 [B,S] ⇒ 这里展开 ✓）
+            pos3 = position_ids
+            if pos3.dim() == 2:
+                pos3 = pos3.unsqueeze(0).expand(3, -1, -1)
+            cos, sin = self.body.rotary_emb(inputs_embeds, pos3)
             hidden = inputs_embeds
             outs = []
             st = list(states)
             for idx, layer in enumerate(self.body.layers):
                 k_slot, v_slot = st[2 * idx], st[2 * idx + 1]
-                hidden, new_k, new_v = call_layer(layer, hidden, attention_mask, position_ids,
-                                                  new_kv_cache_pos, k_slot, v_slot, idx)
+                hidden, new_k, new_v = call_layer(layer, hidden, attention_mask, cos, sin,
+                                                  k_slot, v_slot, idx)
                 outs.extend([new_k, new_v])
             hidden = self.body.norm(hidden)
             logits = self.body.embed_tokens.weight.new_zeros(1)  # 占位；--no-embed-head 时不用 ✓
             return (hidden, *outs) if args.no_embed_head else (logits, *outs)
 
-    def call_layer(layer, hidden, mask, pos, pos_new, k_slot, v_slot, idx):
+    def call_layer(layer, hidden, mask, cos, sin, k_slot, v_slot, idx):
         """调用一层的★我们自己的 3 维实现★ ✓（带状态进出 ✓）。
 
         全注意力层：k_slot/v_slot = KV 缓存 [kv, kv_heads, B, hd] ✓
@@ -97,28 +102,38 @@ def main() -> int:
         """
         import npu_layers
 
-        return npu_layers.layer_forward(layer, hidden, mask, pos, pos_new, k_slot, v_slot,
-                                        idx, layer_types[idx], kv, heads, kv_heads, hd)
+        return npu_layers.layer_forward(layer, hidden, mask, cos, sin, k_slot, v_slot,
+                                        idx, layer_types[idx], kv, heads, kv_heads, hd, args.seq)
 
     # 例化输入 ✓
-    input_ids = torch.ones(b, s, dtype=torch.int64)
+    if args.no_embed_head:
+        # ★官方 embedding_separate 约定：第一路输入是 input_embed [B,S,H]★ ✓（不是 input_ids ✗）
+        first = torch.zeros(b, s, tc.hidden_size, dtype=torch.float32)
+        first_name = "input_embed"
+    else:
+        first = torch.ones(b, s, dtype=torch.int64)
+        first_name = "input_ids"
     attention_mask = torch.ones(b, 1, s, kv, dtype=torch.float32)
     position_ids = torch.arange(s).unsqueeze(0).expand(3, b, s)
     pos_new = torch.arange(s, dtype=torch.int64)
-    inputs = [input_ids, attention_mask, position_ids, pos_new]
-    in_names = ["input_ids", "attention_mask", "position_ids", "new_kv_cache_pos"]
+    inputs = [first, attention_mask, position_ids, pos_new]
+    in_names = [first_name, "attention_mask", "position_ids", "new_kv_cache_pos"]
     out_names = ["lm_logits"]
     for i, lt in enumerate(layer_types):
         if lt == "full_attention":
             inputs.append(torch.zeros(kv, kv_heads, b, hd))
             inputs.append(torch.zeros(kv, kv_heads, b, hd))
         else:
-            conv_dim = getattr(tc, "linear_conv_kernel_dim", 4)
+            ksize = getattr(tc, "linear_conv_kernel_dim", 4)
+            n_k = getattr(tc, "linear_num_key_heads", heads)
             n_v = getattr(tc, "linear_num_value_heads", heads)
             d_k = getattr(tc, "linear_key_head_dim", hd)
             d_v = getattr(tc, "linear_value_head_dim", hd)
-            inputs.append(torch.zeros(b, conv_dim * n_v, conv_dim))       # 卷积窗口 ✓
+            conv_dim = 2 * n_k * d_k + n_v * d_v                          # = 2*key_dim + value_dim ✓
+            # ★卷积窗口是 [B, conv_dim, K-1]★（conv 输入的最近 K-1 个 ✓，§63）
+            inputs.append(torch.zeros(b, conv_dim, max(ksize - 1, 0)))
             inputs.append(torch.zeros(b, n_v, d_k, d_v))                  # 递归状态 ✓
+            print("  线性层状态：conv[%d,%d,%d] · rec[%d,%d,%d,%d]" % (b, conv_dim, max(ksize-1,0), b, n_v, d_k, d_v))
         in_names.extend([f"past_key_in{i}", f"past_value_in{i}"])
         out_names.extend([f"past_key{i}", f"past_value{i}"])
 

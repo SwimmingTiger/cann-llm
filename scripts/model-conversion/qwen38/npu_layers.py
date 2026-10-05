@@ -1,0 +1,138 @@
+"""带状态的层实现（hiai 接口用 ✓）：全注意力层走 KV 缓存 ✓、线性注意力层走卷积窗口+递归状态 ✓。
+
+设计见 maintainer-notes §63：
+  · 两种层的状态都塞进同一对 past_key_in{i}/past_value_in{i} 槽位 ✓
+  · 全注意力：key 槽 = K 缓存、value 槽 = V 缓存（官方布局 [kv_max, kv_heads, B, head_dim] ✓）
+  · 线性注意力：key 槽 = 因果卷积窗口 [B, conv_dim, K-1] ✓
+                value 槽 = gated delta rule 递归状态 [B, H, Dk, Dv] ✓
+  · ★不写 ScatterND✗★：缓存更新一律用【静态切片 + Concat 位移】✓
+  · 掩码用官方给的 attention_mask [B,1,S,kv] ✓（引擎负责算 ✓，我们不自己造 ✓）
+
+对内一律 ≤3 维（§57：NPU 内核只吃 ≤3 维 ✗），只在【缓存边界】做必要的 4 维转置 ✓。
+"""
+from __future__ import annotations
+
+import torch
+
+import npu_attention as A
+from npu_gated_delta import npu_causal_conv1d_fn, npu_chunk_gated_delta_rule
+
+
+def _to_heads(x: torch.Tensor, b: int, s: int, n_head: int, hd: int) -> torch.Tensor:
+    """[B, S, Nh*D] ➜ [B*Nh, S, D] ✓（常量索引 Gather 换序 ✓，见 npu_attention §58）。"""
+    x = x.reshape(b, s * n_head, hd)
+    perm = A._perm_indices(s, n_head, x.device)
+    return torch.index_select(x, 1, perm).reshape(b * n_head, s, hd)
+
+
+def _from_heads(x: torch.Tensor, b: int, s: int, n_head: int, hd: int) -> torch.Tensor:
+    """逆运算 ✓。"""
+    x = x.reshape(b, n_head * s, hd)
+    inv = A._unperm_tensor(s, n_head, x.device)
+    return torch.index_select(x, 1, inv).reshape(b, s, n_head * hd)
+
+
+# ---------------------------------------------------------------- 全注意力层（带 KV 缓存）
+def full_attention_layer(layer, hidden, mask, cos, sin, past_key, past_value, kv_max, heads, kv_heads, hd):
+    att = layer.self_attn
+    b, s, _ = hidden.shape
+    scale = att.scaling
+
+    qg = att.q_proj(hidden).reshape(b, s * heads, 2 * hd)      # 每 head 的 [q|gate] 块 ✓
+    q = _to_heads(qg[..., :hd], b, s, heads, hd)
+    gate = qg[..., hd:].reshape(b, s, heads * hd)              # gate 无需换序 ✓（§59）
+    k = _to_heads(att.k_proj(hidden), b, s, kv_heads, hd)
+    v = _to_heads(att.v_proj(hidden), b, s, kv_heads, hd)
+    q = att.q_norm(q)
+    k = att.k_norm(k)
+    q, k = A._apply_rope_3d(q, k, cos, sin)                    # partial rope 0.25 ✓
+
+    # 缓存边界：官方布局 [kv_max, kv_heads, B, hd] ➜ 3 维 [B*kv_heads, kv_max, hd] ✓
+    ck = past_key.permute(2, 1, 0, 3).reshape(b * kv_heads, kv_max, hd)
+    cv = past_value.permute(2, 1, 0, 3).reshape(b * kv_heads, kv_max, hd)
+
+    if kv_heads != heads:                                      # GQA ✓
+        rep = heads // kv_heads
+        ck = ck.repeat_interleave(rep, dim=0)
+        cv = cv.repeat_interleave(rep, dim=0)
+
+    scores = (q @ ck.transpose(-1, -2)) * scale                # [B*H, S, kv_max] ✓ 3 维
+    if mask is not None:
+        m = mask.reshape(b, s, kv_max)                         # [B,S,kv] ✓
+        scores = scores + m
+    probs = torch.softmax(scores, dim=-1)
+    out = probs @ cv                                            # [B*H, S, hd] ✓
+    out = _from_heads(out, b, s, heads, hd)
+    out = att.o_proj(out * torch.sigmoid(gate))
+
+    # ★缓存更新：静态 slice + Concat★（新 token 放前面 ✓ 位移式 ✓，免 ScatterND ✓）
+    new_k = torch.cat([k.reshape(b, kv_heads, s, hd).permute(2, 1, 0, 3), past_key[s:]], dim=0)
+    new_v = torch.cat([v.reshape(b, kv_heads, s, hd).permute(2, 1, 0, 3), past_value[s:]], dim=0)
+    return out, new_k, new_v
+
+
+# ---------------------------------------------------------------- 线性注意力层（卷积窗口 + 递归状态）
+def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads, hd, seq: int = 0):
+    la = layer.linear_attn
+    b, s, _ = hidden.shape
+    k_heads = getattr(la, "num_k_heads", getattr(la, "num_key_heads", heads))
+    v_heads = getattr(la, "num_v_heads", getattr(la, "num_value_heads", heads))
+    k_dim = getattr(la, "head_k_dim", getattr(la, "key_head_dim", hd))
+    v_dim = getattr(la, "head_v_dim", getattr(la, "value_head_dim", hd))
+    ksize = la.conv_kernel_size if hasattr(la, "conv_kernel_size") else la.conv1d.weight.shape[-1]
+
+    mixed = la.in_proj_qkv(hidden).transpose(1, 2)             # [B, conv_dim, S] ✓
+    z = la.in_proj_z(hidden).reshape(b, s, v_heads, v_dim)     # [B,S,Hv,Dv] ✓
+    beta = la.in_proj_b(hidden).sigmoid()
+    g = -la.A_log.float().exp() * torch.nn.functional.softplus(la.in_proj_a(hidden).float() + la.dt_bias)
+
+    # ★卷积：把缓存窗口拼在序列前面★ ⇒ 新窗口 = 拼接后的最后 K-1 个 ✓（全静态切片 ✓）
+    x = torch.cat([conv_state, mixed], dim=2)                  # [B, conv_dim, K-1+S] ✓
+    y = npu_causal_conv1d_fn(x, la.conv1d.weight.squeeze(1), la.conv1d.bias,
+                             activation=getattr(la, "activation", None))
+    new_conv = x[:, :, -(ksize - 1):] if ksize > 1 else x[:, :, :0]
+    # ★只取【新 token】对应的输出★：状态那 K-1 个位置的卷积结果在上一步已经算过 ✓
+    #   （下标用 Python int ✓ 避免旧 tracer 把 shape 变成 Tensor ✗，§53）
+    y = y[:, :, -(seq if seq else y.shape[-1] - (ksize - 1)):]
+    y = y.transpose(1, 2)                                      # [B, S, conv_dim] ✓
+
+    kd = k_heads * k_dim
+    vd = v_heads * v_dim
+    query, key, value = torch.split(y, [kd, kd, vd], dim=-1)
+    query = query.reshape(b, s, k_heads, k_dim)
+    key = key.reshape(b, s, k_heads, k_dim)
+    value = value.reshape(b, s, v_heads, v_dim)
+    if v_heads // k_heads > 1:
+        rep = v_heads // k_heads
+        query = query.repeat_interleave(rep, dim=2)
+        key = key.repeat_interleave(rep, dim=2)
+
+    core, new_rec = npu_chunk_gated_delta_rule(
+        query, key, value, g, beta, chunk_size=64, initial_state=rec_state,
+        output_final_state=True, use_qk_l2norm_in_kernel=True)
+
+    # ★gated RMSNorm 要额外传 gate（z）★ ✓（类名形如 Qwen3_5RMSNormGated ⇒ 用 in 判断 ✓）
+    if "rmsnormgated" in type(la.norm).__name__.lower():
+        core = la.norm(core, z)
+    else:
+        core = la.norm(core)
+    # ★out_proj 要 [B,S,Hv*Dv]★ ✓（delta rule 给的是 [B,S,Hv,Dv] ✓，参考实现也 reshape ✓）
+    core = core.reshape(b, s, v_heads * v_dim)
+    return la.out_proj(core), new_conv, new_rec
+
+
+# ---------------------------------------------------------------- 统一入口（给导出脚本用）
+def layer_forward(layer, hidden, mask, cos, sin, k_slot, v_slot, idx, layer_type,
+                  kv_max, heads, kv_heads, hd, seq: int = 0):
+    """返回 (hidden_out, 新 key 槽, 新 value 槽) ✓。"""
+    residual = hidden
+    h = layer.input_layernorm(hidden)
+    if layer_type == "full_attention":
+        h, nk, nv = full_attention_layer(layer, h, mask, cos, sin, k_slot, v_slot,
+                                         kv_max, heads, kv_heads, hd)
+    else:
+        h, nk, nv = linear_attention_layer(layer, h, k_slot, v_slot, heads, kv_heads, hd, seq)
+    hidden = residual + h
+    residual = hidden
+    hidden = residual + layer.mlp(layer.post_attention_layernorm(hidden))
+    return hidden, nk, nv
