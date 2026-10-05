@@ -3790,3 +3790,56 @@ W/ASC builtin_ascendc_adaptee.cpp Initialize(70)::
 ② 导出图零缺失算子 ✓（DDK 平台库）  已完成 ✓
 ③ OMG：解析 ✓ · pre-check ✓ · 内核路由 ✗（本文档 §56.2）→ converter → 设备建图  进行中
 ```
+
+## 57. ★★★★★ 目标③ 的最后一关：NPU 内核只吃 ≤3 维 —— 拒绝清单一览 ★★★★★
+
+### 57.1 逐算子二分（16 个单算子 toy，旧导出器 ✓，秒级 ✓）
+
+```
+15/16 算子单独都能 OMG 编出 omc ✓：
+  MatMul · Softplus · Cos/Sin · Sqrt/Reciprocal · Div/Exp/Neg · Greater/Where · Equal/Not
+  And · Expand · Split/Concat · Squeeze/Unsqueeze · ReduceSum · Sigmoid/Softmax · Gather/Slice
+  · 移位切片版因果卷积 ✓
+★只有我那个 constant_matmul toy 失败 ✗★（原因是 toy 自身的结构 ✓，不是算子 ✓）
+另外：`ascendc`/`TE_FUSION`/`ascendc_config` 那些 E/W ★每次都有，属于无害噪声★ ✓
+   （`libai_npucore_ascendc_kernel.so` 在 x570 上同样不存在 ✓ ⇒ 不是我们独有的问题 ✓）
+```
+
+### 57.2 真实图的致命错（顺序推进，逐层剥开 ✓）
+
+```
+第 1 层：`Where(IsNaN(x),0,x)` ⇒ 重接（纯重命名 ✓ 连节点都不新增 ✓）
+        ⇒ 解析 ✓ + pre-check ✓ 都过了 ✓（§56）
+第 2 层：`MatMul(标量, x)`（legacy 把 `q*scaling` 导成 MatMul ✗）
+        ⇒ OMG 报 "The value of wDim in x1 should be equal to hDim in x2 … Infershape for MatMul_1 failed" ✗
+        ⇒ 改写成 `Mul(x, 标量)` ✓（语义等价 ✓）—— 这一层修掉后，
+第 3 层：★NPUCL 的算子级拒绝清单浮出来了★ ✓✓
+```
+
+### 57.3 ★真正的最后一关：NPU 内核只吃 ≤3 维★
+
+```
+E/AI_NPUCL 统计（真实微型图 nat11）：
+  18× strided_slice_get_format.cc IsDimThreeNdCase(): "inputDim.size() 4 dimC 2 dimH 128" ✗
+   2× StridedSliceCalcOutDimsNormalize / UpdateStridedSliceWeightsWithMask failed ✗
+   2× reshape_check_support.cc: "check reshape dimInfo fail" ✗
+   2× expanddims_check_support.cc: "not support input dimCnt >= ?" ✗
+   1× PlugIn library :libai_npucore_ascendc.so Initialize failed ✗（非致命噪声 ✓）
+⇒ ★Slice / Reshape / ExpandDims 在 4 维上都过不了★ ✗
+  —— 与 §30 的老结论一字不差：「NPU-CL 对 ≥4 维支持很差 ✗」
+```
+
+**我之前的 3 维化只做了一半** ✗：只改写了**自己写的** delta rule ✓，
+而**模型自带**的注意力（`[B,H,S,D]` 的 Q/K/V 切分、RoPE 切片、mask 切片 ✓）仍是 4 维 ✗
+（微型"单全注意力层"图里就有 18 处 ✗）。
+
+### 57.4 下一步（方法已知 ✓，就是 gemma4 那一套）
+
+```
+把整个 qwen3_5 文本解码器改写成【全程 ≤3 维】✓（等价于当年的 g4_seg3d.py ✓）：
+  · (batch, head) 折成一维 ⇒ [B*H, S, D] ✓（我已在 delta rule 里验证过这一招 ✓）
+  · attention 里的 Q/K/V 切分、RoPE、mask 全部改成 3 维切片 ✓
+  · Reshape/ExpandDims 都要落在 ≤3 维 ✓（或换成 Slice/Concat 组合 ✓）
+验收判据不变：① 整模型对拍 argmax 一致 ✓ ② OMG 走到 NPUCL 时【零 E/AI_NPUCL】✓
+  ③ converter(THIRDPARTY) → 设备 Build 0 / Predict 0 ✓
+```

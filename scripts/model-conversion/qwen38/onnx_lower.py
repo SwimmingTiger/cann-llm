@@ -119,6 +119,34 @@ def lower_model(model: onnx.ModelProto, kinds=None) -> dict:
     if isnan_nodes:
         _handle_isnan(model, isnan_nodes, counts, new_inits)
 
+    # ★MatMul(标量, x) / MatMul(x, 标量) → Mul(x, 标量)★（§57）
+    _init_shape = {}
+    for i in g.initializer:
+        _init_shape[i.name] = list(i.dims)
+    for _n in g.node:                       # ★Constant 节点也算★（legacy 导出器很爱用它 ✗）
+        if _n.op_type == "Constant":
+            for _a in _n.attribute:
+                if _a.name == "value":
+                    _init_shape[_n.output[0]] = list(_a.t.dims)
+                    break
+    new_nodes = []
+    for n in g.node:
+        if n.op_type == "MatMul" and len(n.input) == 2:
+            a, bb = n.input[0], n.input[1]
+            sa, sb = _init_shape.get(a), _init_shape.get(bb)
+            if sa is not None and (len(sa) == 0 or (len(sa) == 1 and sa[0] == 1)):
+                new_nodes.append(helper.make_node("Mul", [bb, a], [n.output[0]], name=n.name + "_mul"))
+                counts["MatMul(标量)"] = counts.get("MatMul(标量)", 0) + 1
+                continue
+            if sb is not None and (len(sb) == 0 or (len(sb) == 1 and sb[0] == 1)):
+                new_nodes.append(helper.make_node("Mul", [a, bb], [n.output[0]], name=n.name + "_mul"))
+                counts["MatMul(标量)"] = counts.get("MatMul(标量)", 0) + 1
+                continue
+        new_nodes.append(n)
+    if counts.get("MatMul(标量)"):
+        del g.node[:]
+        g.node.extend(new_nodes)
+
     # ★NaN 保护消除★：Where(IsNaN(x), 0, x) → Identity(x)
     #   实测(§55)：OMG 唯一拒绝的算子就是 IsNaN ✗，而且"改写 IsNaN 节点"会让它解析崩 ✗
     #   ⇒ 直接把整个模式换成 Identity（支持算子 ✓）并删掉 IsNaN ✓
