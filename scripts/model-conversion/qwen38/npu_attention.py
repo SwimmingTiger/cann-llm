@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -27,38 +28,43 @@ _PATCHED = {}
 
 
 # ---------------------------------------------------------------- 常量索引（head ↔ seq 换序）
-def _perm_indices(batch: int, seq: int, heads: int, device) -> torch.Tensor:
-    """`[B, S*H, D]` ➜ `[B, H*S, D]` 的行置换索引 ✓。
-
-    原布局：行 = s*H + h ✓；目标布局：行 = h*S + s ✓
-    """
-    idx = torch.empty(seq * heads, dtype=torch.long, device=device)
-    for h in range(heads):
-        for s in range(seq):
-            idx[h * seq + s] = s * heads + h
-    return idx
-
-
-def _unperm_tensor(batch: int, seq: int, heads: int, device) -> torch.Tensor:
-    """上式的逆置换 ✓。"""
-    return torch.argsort(_perm_indices(batch, seq, heads, device))
-
-
-# ---------------------------------------------------------------- RoPE（3 维版）
+_PERM_CACHE: dict = {}
 _CAUSAL_CACHE: dict = {}
 
 
-def _causal_bias(seq: int, device, dtype=torch.float32) -> torch.Tensor:
-    """常量因果掩码 ✓（上三角为 -inf ✓）—— 全 3 维 ✓、无 CumSum/Trilu ✓。
+def _perm_indices(seq: int, heads: int, device) -> torch.Tensor:
+    """`[B, S*H, D]` ➜ `[B, H*S, D]` 的行置换索引（★纯 numpy 常量★）。
 
-    参考实现会把我们传的全 1 mask 变成因果 mask ✓（§57 实测：漏了它 argmax 只有 0.875 ✓）
+    原布局行 = s*H + h；目标行 = h*S + s。
+    ★必须用 numpy 造好再 from_numpy★：用 Python 循环造张量会让旧导出器把它
+      展开成一堆算子（图爆炸到 Constant 18576 ✗，§59 实测）
+    """
+    key = (seq, heads, str(device))
+    if key not in _PERM_CACHE:
+        idx = np.arange(seq * heads, dtype=np.int64).reshape(seq, heads).T.reshape(-1)
+        _PERM_CACHE[key] = torch.from_numpy(idx.copy()).to(device)
+    return _PERM_CACHE[key]
+
+
+def _unperm_tensor(seq: int, heads: int, device) -> torch.Tensor:
+    """上式的逆置换 ✓（同样纯 numpy）。"""
+    key = ("inv", seq, heads, str(device))
+    if key not in _PERM_CACHE:
+        base = np.arange(seq * heads, dtype=np.int64).reshape(seq, heads).T.reshape(-1)
+        _PERM_CACHE[key] = torch.from_numpy(np.argsort(base).astype(np.int64).copy()).to(device)
+    return _PERM_CACHE[key]
+
+
+def _causal_bias(seq: int, device, dtype=torch.float32) -> torch.Tensor:
+    """常量因果掩码（上三角 -inf）—— ★numpy 造，只产出一个 Constant 节点★。
+
+    torch.triu / torch.where 会让旧导出器产出 Trilu / ScatterND ✗（DDK 缺这两个 ✗）
     """
     key = (seq, str(device), str(dtype))
     if key not in _CAUSAL_CACHE:
-        up = torch.triu(torch.ones(seq, seq, dtype=torch.bool, device=device), diagonal=1)
-        m = torch.zeros(seq, seq, dtype=dtype, device=device)
-        m = torch.where(up, torch.full((), float("-inf"), dtype=dtype, device=device), m)
-        _CAUSAL_CACHE[key] = m
+        m = np.zeros((seq, seq), dtype=np.float32)
+        m[np.triu_indices(seq, k=1)] = -np.inf
+        _CAUSAL_CACHE[key] = torch.from_numpy(m).to(device=device, dtype=dtype)
     return _CAUSAL_CACHE[key]
 
 
@@ -116,14 +122,14 @@ def npu_attention_forward(
     def to_heads(x: torch.Tensor, n_head: int) -> torch.Tensor:
         """[B, S, Nh*D] ➜ [B*Nh, S, D] ✓（★全 3 维★：reshape + 常量索引 Gather ✓）。"""
         x = x.reshape(b, s * n_head, hd)                 # [B, S*Nh, D] ✓
-        perm = _perm_indices(b, s, n_head, x.device)
+        perm = _perm_indices(s, n_head, x.device)
         x = torch.index_select(x, 1, perm)               # [B, Nh*S, D] ✓
         return x.reshape(b * n_head, s, hd)              # [B*Nh, S, D] ✓
 
     def from_heads(x: torch.Tensor, n_head: int) -> torch.Tensor:
         """[B*Nh, S, D] ➜ [B, S, Nh*D] ✓（逆置换 ✓）。"""
         x = x.reshape(b, n_head * s, hd)                 # [B, Nh*S, D] ✓
-        inv = _unperm_tensor(b, s, n_head, x.device)
+        inv = _unperm_tensor(s, n_head, x.device)
         x = torch.index_select(x, 1, inv)                # [B, S*Nh, D] ✓
         return x.reshape(b, s, n_head * hd)              # [B, S, Nh*D] ✓
 
@@ -151,7 +157,9 @@ def npu_attention_forward(
 
     # ⑤ 复原布局 ✓ → gate ✓ → o_proj ✓
     out = from_heads(out, heads)                         # [B, S, H*D] ✓
-    gate = from_heads(gate_flat, heads)                  # [B, S, H*D] ✓（同样逆置换回来 ✓）
+    # ★gate 不需要换序★：它本来就是 [B, S*H, D] 布局 ✓
+    #   直接 reshape 就是 [B, S, H*D] ✓（对它做置换反而会把内存解释乱 ✗ —— §59 实测 ✓）
+    gate = gate_flat.reshape(b, s, heads * hd)           # [B, S, H*D] ✓
     out = out * torch.sigmoid(gate)
     return self.o_proj(out), None
 

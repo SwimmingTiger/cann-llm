@@ -8,6 +8,7 @@ import torch
 from transformers import AutoModelForCausalLM
 from transformers.models.qwen3_5 import modeling_qwen3_5 as M
 import npu_gated_delta as N
+import npu_attention as AP
 
 torch.set_grad_enabled(False)
 MODEL = os.path.expanduser("~/q38")
@@ -30,6 +31,7 @@ def main():
 
     print("② 打补丁（NPU 友好改写）…", flush=True)
     N.install(M)
+    AP.install(M)
     # 命中计数：确认层的调用真的走到了补丁 ✓
     import numpy as _np
     hits = {"chunk": 0, "conv": 0, "rec": 0}

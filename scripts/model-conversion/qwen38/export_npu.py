@@ -156,6 +156,8 @@ def main():
     import npu_gated_delta as N
     from transformers.models.qwen3_5 import modeling_qwen3_5 as M
     N.install(M)
+    import npu_attention as _AP
+    _AP.install(M)
 
     s = args.seq
     # ★dummy 用 int64★：实测 converter_lite 对 int32 图输入会报

@@ -3880,3 +3880,57 @@ E/AI_NPUCL 统计（真实微型图 nat11）：
 ★下一步★：对 attention 内部【逐步数值对拍】（q / k / v / rope 后 / 概率 / 输出 ✓），
    把剩下那一处差异钉死 ✓（怀疑：GQA 头顺序、或 mask 的具体形式、或 cos/sin 的广播维度）
 ```
+
+## 59. ★★★★★ 路线校正：不该转 .ms 走 NNRt —— 应该直接用 OMG 的 .omc 走 hiai 引擎 ★★★★★
+
+（用户指出的 ✓：本机既有 hiai 后端，也有现成的 hiai 模型包形态 ✓）
+
+### 59.1 事实（固件镜像为准 ✓，别再凭一次 `find` 下结论 ✗）
+
+```
+固件解包：ssh hu60tx:/home/hu60/work/hmos/firmware/unpack_result_010554/system/system/lib64/
+  有：★ndk/libhiai_foundation.so★ ✓ · ★libhiai_llm_engine.so★ ✓ · libmindspore_lite_ndk.so ✓
+      libhiai_nn_proxy_*.z.so · libhiai_aiv_proxy_*.z.so · libhiai_llm_engine.so …
+  没有：libhiai_hcl_model_runtime.so ✗ · libhiai_ir_infershape.so ✗
+⇒ ★设备内建的 LLM 通路是 hiai 引擎（libhiai_llm_engine.so）+ 模型包★ ✓，
+  而 NNRt 的 `OH_AI_ModelBuildFromFile` 需要 HCL runtime ✗（设备日志原文：
+  "dlopen libhiai_hcl_model_runtime.so fail" / "no runtime support the Model" ✗）
+⇒ ★我们花了大力气产出的 .omc 本来就是 hiai 的离线模型 ✓，根本不该再转 .ms ✗★
+```
+
+### 59.2 应用它需要的东西（全都有了 ✓）
+
+```
+① ★图★：OMG 产出的 .omc ✓ —— 本轮已攻克 ✓（rc=0 ✓ 927 MB（4 层）✓ 零缺失算子 ✓）
+② ★外置权重★：SubGraph_0.weight ✓（OMG 对大模型自动外置 ✓，§46）
+③ ★后端代码★：src/cann_llm/backends/hiai.py ✓（仓库自带 ✓）
+   —— 它按【目录】加载 ✓：<name>.omc + <name>.json（同名 ✓）+ api_config.json + tokenizer.json ✓
+④ ★可对照的成品包★：models/model_qwen2_1p5b_w4_2048/ ✓
+     SubGraph_0.weight 3104 MB · qwen2_1p5b_w4.omc 3.0 MB · <name>.json 1086 B
+     · api_config.json · executor.json · context.json
+     · <name>_64_2048.embedding_weights 233 MB(int8) + .embedding_dequant_scale
+     · tokenizer.json 7 MB      ★与官方 models/Qwen3-8B 完全同形态 ✓★
+⑤ ★组装工具★：scripts/import_omc_package.py（官方 OMC 包 → cann-llm 目录 ✓）
+
+### 59.3 本轮另外两个实打实的进展（无论走哪条后端都用得上 ✓）
+
+```
+· ★3 维化注意力对拍通过★：npu_attention.py（常量索引 Gather 换序 / per-head 切分 /
+  partial RoPE(0.25) / numpy 常量因果掩码）⇒ 单层 rel 1.3e-07 · argmax 1.0000 ✓
+  整模型（含 delta rule）argmax 1.0000 ✓（§58/§59）
+· ★OMG 通了★：用【旧导出器】+ 三项 lowering + numpy 常量 ⇒ 图不再爆炸
+  （Constant 18576→1164 · Shape 10270→29 ✓）⇒ ★rc=0 · omc 927 MB ✓★
+  且 converter(THIRDPARTY) 也成功产出 .ms 927 MB ✓（只是 NNRt 这条路走不通 ✗）
+```
+
+### 59.4 下一步（转向 hiai 模型包）
+
+```
+① 导出+OMG 出【全 24 层】的 onnx→omc ✓
+   注意：fp32 全模型 onnx ≈5.5 GB ✗ > OMG 单文件门槛 ✗
+   ⇒ 需要先量化（W4/int8 ✓ 仓库有 set_quant_strategy.py / onnx_weights_to_fp16.py ✓）
+      —— 这也正是 §47 官方链路（dopt W4）的做法 ✓
+② 按 §47 的形态组装目录：omc + SubGraph_0.weight + embedding_weights(+scale) + tokenizer.json
+   + <name>.json / api_config.json（照 W4 包改维度 ✓）
+③ 用 src/cann_llm/backends/hiai.py 在设备上加载 ⇒ 聊天 ✓（目标③ 直接闭环 ✓）
+```
