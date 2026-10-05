@@ -7046,3 +7046,59 @@ core 库里的字符串（直出 ✓）：
      ⇒ 那就必须攻下 mslite 厂商插件的 third_party_model 配置（或找其它厂商转换器 ✓）
 ★注意★：小模型不会触发认证 ✓（未超 RAM 上限 ✓）⇒ 是最干净的验证 ✓
 ```
+
+## 127. ★★★★★ NNRt + NPU 完整执行链路打通（在线建图 → NPU 编译 → 执行 → 数值正确）★★★★★
+
+### 127.1 实测输出（`scripts/model-conversion/qwen38/nnrt_probe/nnrt_online.cpp` ✓）
+
+```
+GetAllDevicesID rc=0 count=1
+  [0] id=5337627887595434492 name=NPU_ohos.boot.hardware.KirinX90_v2_0     ★NPU 暴露✓★
+选用 device id=5337627887595434492
+AddTensor x=0 w=0 y=0            （0=OH_NN_SUCCESS ✓）
+SetTensorData(w)=0 ✓
+AddTensor pa=0 pb=0 ✓            （MatMul 的 transposeA/B 参数张量 ✓）
+SetTensorData(pa)=0 pb=0 ✓
+AddOperation(MATMUL)=0 ✓
+SpecifyInputsAndOutputs=0 ✓
+Finish=0 ✓
+Compilation=0x… SetDevice=0 ✓
+★Build=0 ✓★                      ★NPU 编译成功✓★
+Executor=0x… ✓ · in=1 out=1 ✓ · SetInput=0 ✓ · SetOutput=0 ✓
+★Run=0 ✓★
+★NPU y[0]=-0.000410  参考=-0.000410  差=7.990e-08✓★   ★数值正确✓★
+```
+
+### 127.2 一路上踩到的 API 坑（都记下来 ✓ 后面写正式加载器要用）
+
+```
+① AddOperation(MATMUL) 必须传★参数张量★（transposeA/transposeB ✓ 类型 OH_NN_BOOL ✓
+   type = OH_NN_MATMUL_TRANSPOSE_A / _TRANSPOSE_B ✓，并在 AddTensor 后用 SetTensorData 设值 ✓）
+   ⇒ 传 nullptr 会得到 INVALID_PARAMETER(2) ✗
+② ★Finish 之前必须调 OH_NNModel_SpecifyInputsAndOutputs(model, &ins, &outs)★ ✓
+   ⇒ 否则 Finish 返回 OPERATION_FORBIDDEN(4) ✗，进而 Build 得到 INVALID_PARAMETER(2) ✗
+③ OH_NNModel_* 在 ★neural_network_runtime.h★ ✓、OH_NNCompilation_*/OH_NNExecutor_* 在
+   ★neural_network_core.h★ ✓ ⇒ ★两个都要 include ✓★
+④ 计数参数是 ★size_t★ ✗（不是 uint32_t ✓）：OH_NNDevice_GetAllDevicesID 的 count 是 uint32_t ✓
+   而 OH_NNExecutor_GetInputCount/GetOutputCount 的是 size_t ✗ ⇒ 混用会编译失败 ✓
+⑤ 运行需要 LD_PRELOAD=libuname.so ✓（OHOS 库兼容 ✓，与 DDK 路线相同 ✓）
+```
+
+### 127.3 这个里程碑的意义（★路线判定的关键依据✓★）
+
+```
+★证明了★：NNRt 能在这台设备上【编译并执行 NPU 算子】✓ 且【数值正确✓】★
+   ⇒ ★"NNRt 路线可行"这个判断成立✓★（与 DDK 的 ModelManager 完全不同：
+      NNRt 的在线建图路径是我们自己拼图 ✓ 不经过任何不透明的模型约束 ✓）
+★剩下的缺口很明确★：
+   · 我们的 Qwen3.8 图【不可能】在线逐个算子拼出来 ✗（几百个算子 ✓）
+   · ⇒ 必须走【离线模型】路径 ✓（OH_NNCompilation_ConstructWithOfflineModelFile ✓）
+   · 而离线模型必须是【厂商转换器】产物 ✓（头文件注释 ✓）
+     ★实测：我们的 omc 与旧 .ms 都 Build rc=1 ✗★
+   · ⇒ ★唯一缺口 = 用 mslite 的厂商插件（libmslite_converter_plugin.so ✓）正确转换★
+     （卡在 [third_party_model] 配置写法 ✓ 已知键名 input_shapes/output_shapes ✓）
+★另一条可能的捷径（值得试✓）★：用 NNRt 的 ★ConstructWithOfflineModelBuffer★ 或
+   OH_NNCompilation_ConstructForCache/ExportCacheToBuffer ✓ ——
+   即"先用在线建图在设备上编一次 ✓ 把编译缓存导出 ✓ 之后直接用缓存 ✓"
+   ⇒ 对【小图】可行 ✓ 对我们整模型不现实 ✗
+```
