@@ -7502,3 +7502,47 @@ C 换路：CPU/GGUF（已跑通 ✓ 非 NPU ✗）
 ④ 然后：nnrt_build 在 NPU 上 Build 真实模型 ⇒ 看首个报错 ⇒ 补 PARAM_TABLE ✓
 ⑤ 通了再加 Executor（SetInput/SetOutput/Run ✓）⇒ 前向出数 ✓
 ```
+
+## 137. ★真实 2 层模型送到 NNRt：Finish=0 ✓（图结构合法 ✓）· AddOperation 失败 381/543 ✗ · Build=1 ✗
+
+### 137.1 本轮修掉的生成器问题（四个 ✓ 都已解决 ✓）
+
+```
+① ★算子号映射全错✗★ ⇒ ★改为从表头自动抽取✓★（§137 教训：不要手写枚举值 ✗）
+   实测修正：Mul 13→★22★ · Sub 9→★38★ · Concat 18→★7★ · Reshape 66→★45★ ·
+   Transpose 88→★41★ · Slice 74→★29★ · Unsqueeze 90→★55★ · Gather 34→★16★ ·
+   Pad 55→★24★ · Split 75→★32★ · Where 100→★62(SELECT)★ · 新增 Log=80 Pow=25 等 ✓
+② ★Softplus 展开✓★（⇒ Exp/Add/Log ✓）· ★Constant/ConstantOfShape 物化✓★（400 个 ✓）
+③ ★缺输入 ⇒ 报错而非静默丢弃✓★（改后能立刻定位问题 ✓）
+④ ★symbolic_shape_infer✓★（形状推断成功 ✓ 张量形状如 1×64×2048 / 1×64×6144 都对 ✓）
+★结果★：真实 2 层模型 ⇒ ★1576 张量 · 543 节点 · 470 MB blob · 缺输入 0 · 不支持算子 0★ ✓
+```
+
+### 137.2 送 NPU 的结果
+
+```
+   AddTensor 失败 0 个 ✓
+   ★AddOperation 失败 381 个 ✗★（543 个里 ✓）
+   ★Specify=0 ✓ · ★Finish=0 ✓★（⇒ ★图结构合法✓★ 这是很大的好消息 ✓）
+   ★★Build=1 ✗★★（因为图不完整 ✓）
+★失败模式（很整齐 ✓）★：
+   op=22(MUL)  ✗  —— 1 个参数（OH_NN_MUL_ACTIVATION_TYPE=41 ✓）
+   op=1 (ADD)  ✗  —— 1 个参数（OH_NN_ADD_ACTIVATIONTYPE=1 ✓）
+   op=28(SIGMOID) ✗ —— ★0 个参数★
+   op=19(MATMUL) ✓ —— ★2 个参数★（TRANSPOSE_A=33 / _B=34 ✓）
+   op=25(POW)   ✓ —— ★2 个参数★（SCALE=107 / SHIFT=108 ✓）
+⇒ ★模式：0 或 1 个参数失败 ✗，2 个参数成功 ✓ —— 这个规律很可疑✗★
+★另一个可疑点★：T[7] = body.layers.1.post_attention_layernorm.weight 形状 ★[1,2048]★
+   与 [1,64,2048] 相乘 ⇒ ★秩不同（广播）✗★ ⇒ NNRt 可能要求同秩 ✓
+```
+
+### 137.3 下一步（★两件事，都很便宜✓★）
+
+```
+① ★测"参数个数"假说★：用已证明可用的 cov.cpp 骨架 ✓
+   测 MUL：0 个参数 / 1 个参数 / 2 个参数（伪造第二个）⇒ 看哪个过 ✓
+   测 SIGMOID：0 个参数 ✗ vs 给它一个假参数 ✓
+② ★测"广播/秩"假说★：测 [1,64,2048] × [1,2048]（不同秩 ✓）vs [1,64,2048] × [1,1,2048]（同秩 ✓）
+③ 定位后 ⇒ 在生成器里补对应处理（如给每个参数补齐个数 ✓ / 把权重 reshape 成同秩 ✓）
+   —— 我们的 exporter 本来就是三维化的 ✓ 改起来不难 ✓
+```

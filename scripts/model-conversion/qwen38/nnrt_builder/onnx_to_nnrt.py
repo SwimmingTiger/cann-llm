@@ -28,27 +28,33 @@ DT = {TensorProto.FLOAT: "F32", TensorProto.FLOAT16: "F16", TensorProto.INT32: "
 NN_DT = {"F32": 11, "F16": 0, "I32": 4, "I64": 7, "B": 12, "I8": 3, "U8": 6, "F64": 13}
 
 # ★算子 → NNRt op 号★（数值取自 neural_network_runtime_type.h 的 OH_NN_OPS_* ✓）
-OP = {"MatMul": 19, "Add": 1, "Sub": 9, "Mul": 13, "Div": 11, "Exp": 60, "Sqrt": 33,
-      "Rsqrt": 21, "Pow": 60, "Sigmoid": 28, "Neg": 84, "Concat": 18, "Reshape": 66,
-      "Transpose": 88, "Slice": 74, "Unsqueeze": 90, "Squeeze": 73, "Cast": 6,
-      "Where": 100, "Gather": 34, "Pad": 55, "ReduceMean": 42, "ReduceSum": 44,
-      "Split": 75, "Softplus": -1, "Constant": -1, "ConstantOfShape": 20}
-
-# ★每个算子需要的参数张量：名字 → (参数枚举名, 类型, 取值)★
-#   类型/取值先按最常见约定给 ✓ 跑不通再逐个修（这就是"表"的好处：改一处即可 ✓）
+OP = {  # ★算子号一律从 neural_network_runtime_type.h 的 OH_NN_OPS_* 自动抽取✓★（§137 修正 ✗ 之前手写的几乎全错）
+    "Add": 1, "Cast": 6, "Concat": 7, "ConstantOfShape": 68, "Div": 11, "Exp": 60,
+    "Gather": 16, "Log": 80, "MatMul": 19, "Mul": 22, "Neg": 84, "Pad": 24, "Pow": 25,
+    "ReduceMean": 42, "ReduceSum": 101, "Reshape": 45, "Rsqrt": 44, "Sigmoid": 28,
+    "Slice": 29, "Softmax": 30, "Split": 32, "Sqrt": 33, "Squeeze": 35, "Sub": 38,
+    "Tanh": 39, "Transpose": 41, "Unsqueeze": 55, "Where": 62,   # Where ⇒ NNRt 的 SELECT ✓
+    "Tile": 40, "Maximum": 20, "Minimum": 97, "Greater": 71, "Less": 61, "Equal": 70,
+    "Softplus": -1, "Constant": -1,
+}
+# ★每个算子需要的参数张量：参数枚举名 → (类型, 取值)，取值 None 表示从 ONNX 属性取✓★
 PARAM_TABLE = {
     "MatMul":   [("OH_NN_MATMUL_TRANSPOSE_A", "B", 0), ("OH_NN_MATMUL_TRANSPOSE_B", "B", 0)],
     "Add":      [("OH_NN_ADD_ACTIVATIONTYPE", "I32", 0)],
     "Sub":      [("OH_NN_SUB_ACTIVATIONTYPE", "I32", 0)],
     "Mul":      [("OH_NN_MUL_ACTIVATION_TYPE", "I32", 0)],
     "Div":      [("OH_NN_DIV_ACTIVATIONTYPE", "I32", 0)],
-    "Concat":   [("OH_NN_CONCAT_AXIS", "I32", None)],          # 取值来自 ONNX 的 axis 属性 ✓
+    "Concat":   [("OH_NN_CONCAT_AXIS", "I32", None)],
     "ReduceMean": [("OH_NN_REDUCE_MEAN_KEEP_DIMS", "B", 1)],
+    "ReduceSum":  [("OH_NN_REDUCE_SUM_KEEP_DIMS", "B", 1)],
     "Unsqueeze": [("OH_NN_UNSQUEEZE_AXIS", "I32", None)],
     "Squeeze":  [("OH_NN_SQUEEZE_AXIS", "I32", None)],
     "Pad":      [("OH_NN_PAD_PADDING_MODE", "I32", 0)],
     "Split":    [("OH_NN_SPLIT_AXIS", "I32", None), ("OH_NN_SPLIT_OUTPUT_NUM", "I32", None)],
+    "Pow":      [("OH_NN_POW_SCALE", "F32", 1.0), ("OH_NN_POW_SHIFT", "F32", 0.0)],
+    "Slice":    [("OH_NN_SLICE_AXES", "I32", None)],
 }
+
 PARAM_ENUM = {
     "OH_NN_MATMUL_TRANSPOSE_A": 33,
     "OH_NN_MATMUL_TRANSPOSE_B": 34,
@@ -78,14 +84,81 @@ PARAM_ENUM = {
 # NNRt 参数枚举的字面名 → 我们输出给 C++ 的整数（C++ 里用同名常量 ✓ 所以直接写字面名 ✓）
 
 
+def pre_lower(m):
+    """把 NNRt 没有的算子就地展开 ✓（目前：Softplus = Log(1 + Exp(x)) ✓）"""
+    from onnx import helper, TensorProto
+    g = m.graph
+    new_nodes = []
+    extra = []
+    n_low = 0
+    for n in g.node:
+        if n.op_type == "Softplus":
+            x, y = n.input[0], n.output[0]
+            one = y + "_one"
+            ex = y + "_exp"
+            ad = y + "_add"
+            extra.append(numpy_helper.from_array(np.array(1.0, dtype=np.float32), one))
+            new_nodes.append(helper.make_node("Exp", [x], [ex], name=n.name + "_exp"))
+            new_nodes.append(helper.make_node("Add", [ex, one], [ad], name=n.name + "_add"))
+            new_nodes.append(helper.make_node("Log", [ad], [y], name=n.name + "_log"))
+            n_low += 1
+        else:
+            new_nodes.append(n)
+    if n_low:
+        del g.node[:]
+        g.node.extend(new_nodes)
+        g.initializer.extend(extra)
+        print("  ✓ 展开了 %d 个 Softplus（⇒ Exp/Add/Log ✓）" % n_low)
+    return m
+
+
+def materialize_constants(m):
+    """★把 Constant / ConstantOfShape 物化成 initializer✓★（否则它们的输出没有生产者 ✗）"""
+    from onnx import helper, TensorProto
+    g = m.graph
+    kept, made, failed = [], 0, []
+    for n in g.node:
+        if n.op_type == "Constant":
+            val = next((a for a in n.attribute if a.name == "value"), None)
+            if val is None:
+                failed.append(n.name or "Constant"); continue
+            g.initializer.append(numpy_helper.from_array(numpy_helper.to_array(val.t), n.output[0]))
+            made += 1
+        elif n.op_type == "ConstantOfShape":
+            shp = next((i for i in n.input), None)
+            if shp is None or shp not in {t.name: t for t in g.initializer}:
+                failed.append(n.name or "ConstantOfShape"); continue
+            want = numpy_helper.to_array({t.name: t for t in g.initializer}[shp]).astype(np.int64)
+            val = next((a for a in n.attribute if a.name == "value"), None)
+            fill = numpy_helper.to_array(val.t).flatten()[0] if val is not None else 0.0
+            g.initializer.append(numpy_helper.from_array(
+                np.full([int(v) for v in want], fill, dtype=np.float32), n.output[0]))
+            made += 1
+        else:
+            kept.append(n)
+    if made or failed:
+        del g.node[:]
+        g.node.extend(kept)
+        print("  ✓ 物化常量 %d 个 ✓" % made + ("  ✗ 失败 %d 个：%s" % (len(failed), failed[:3]) if failed else ""))
+    return m
+
+
 def main(onnx_path, out_path, weights_path):
     m = onnx.load(onnx_path)                     # 连外置权重一起读入 ✓
+    m = pre_lower(m)                             # ★先展开 NNRt 没有的算子✓★
+    m = materialize_constants(m)                 # ★再物化常量✓★
     # ★做形状推断✓★：NNRt 要求静态形状（不能有 -1 ✗ §123 ✓），必须把每个张量的真实形状填对 ✓
     try:
-        from onnx import shape_inference
-        m = shape_inference.infer_shapes(m)
+        from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
+        m = SymbolicShapeInference.infer_shapes(m, auto_merge=True, guess_output_rank=True, verbose=0)
+        print("  ✓ 用 symbolic_shape_infer 推断形状 ✓")
     except Exception as e:
-        print("  ⚠ 形状推断失败：%s" % str(e)[:80])
+        print("  ⚠ symbolic_shape_infer 不可用（%s）⇒ 退回 onnx.shape_inference" % str(e)[:60])
+        try:
+            from onnx import shape_inference
+            m = shape_inference.infer_shapes(m)
+        except Exception as e2:
+            print("  ⚠ 形状推断失败：%s" % str(e2)[:80])
     g = m.graph
     SHAPE = {}
     for vi in list(g.value_info) + list(g.input) + list(g.output):
@@ -145,17 +218,24 @@ def main(onnx_path, out_path, weights_path):
                 av = next((a for a in n.attribute if a.name in ("axis", "num_outputs")), None)
                 pval = int(av.i) if av is not None else 0
             tid = add_tensor("__p_%s_%s_%d" % (n.name or n.op_type, pname, len(params)),
-                             np.dtype("int32") if ptype == "I32" else np.dtype("bool"),
+                             {"I32": np.dtype("int32"), "B": np.dtype("bool"),
+                              "F32": np.dtype("float32")}.get(ptype, np.dtype("int32")),
                              [], PARAM_ENUM.get(pname, 0))          # ★带参数枚举值✓★
             # 参数张量是常量 ⇒ 写进 blob ✓
-            arr = np.array(pval, dtype=np.int32 if ptype == "I32" else np.bool_)
+            npdt = {"I32": np.int32, "B": np.bool_, "F32": np.float32}.get(ptype, np.int32)
+            arr = np.array(pval, dtype=npdt)
             blob = open(weights_path, "ab")
             off = os.path.getsize(weights_path)
             blob.write(np.ascontiguousarray(arr).tobytes())
             blob.close()
             lines.append("I %d %s %d %d" % (tid, os.path.basename(weights_path), off, arr.nbytes))
             params.append(tid)
-        ins = [idx_of[i] for i in n.input if i in idx_of]
+        missing = [i for i in n.input if i and i not in idx_of]
+        if missing:
+            print("  ★✗ 节点 %s(%s) 缺少输入张量：%s ⇒ 跳过该节点（请修生成器 ✓）"
+                  % (n.op_type, n.name, missing[:2]))
+            continue
+        ins = [idx_of[i] for i in n.input if i]
         outs = []
         for o in n.output:
             shp = SHAPE.get(o)
