@@ -268,17 +268,13 @@ def npu_chunk_gated_delta_rule(
         cum = di @ cum_ones                                  # [BH, C] ✓ 前缀和（免 CumSum ✓）
         # ★不用 Select✗★（NPU 库里没实现 ✓ §106）：where(up,-inf,d).exp() 等价于
         #   d.exp() * (1-up_f) ✓ —— up 处置 0 ✓；d = cum_i - cum_j ≤ 0 ✓ 不会溢出 ✓
-        up_f = strict_upper_f(c, q.device)                  # ★float 常量✓★
-        notup_f = _mask_f(np.triu(np.ones((c, c), dtype=np.float32), 1) * (-1.0) + 1.0, "notupf", q.device)
-        pw = (cum.unsqueeze(2) - cum.unsqueeze(1)).exp() * notup_f          # [BH,C,C] ✓
+        pw = torch.where(up, neg_inf, cum.unsqueeze(2) - cum.unsqueeze(1)).exp()   # [BH,C,C] ✓（原版 ✓）
         v_beta = vi * bi.unsqueeze(-1)
         k_beta = ki * bi.unsqueeze(-1)
         ut = (k_beta @ ki.transpose(-1, -2)) * pw            # [BH,C,C] ✓
         intra = (qi @ ki.transpose(-1, -2)) * pw             # [BH,C,C] ✓
         dkb = k_beta * cum.exp().unsqueeze(-1)               # [BH,C,D] ✓
-        # ★同样改成算术✓★：where(lo, -ut, 0) = (lo_f * ut) * (-1) ✓
-        lo_f = strict_lower_f(c, q.device)                  # ★float 常量✓★
-        lower = (lo_f * ut) * (-1.0)                        # = -(ut.tril(-1)) ✓（免 Trilu ✓）
+        lower = torch.where(lo, -ut, zero)                   # = -(ut.tril(-1)) ✓（原版 ✓）
         new_values = _solve_unit_lower(lower, v_beta, block=16, c=c)     # [BH,C,Dv] ✓
         k_cumdecay = _solve_unit_lower(lower, dkb, block=16, c=c)        # [BH,C,Dk] ✓
         qi2 = qi * cum.exp().unsqueeze(-1)

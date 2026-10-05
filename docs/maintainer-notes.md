@@ -6209,3 +6209,52 @@ D 先把已完成成果归档（3 维化 + 数值对拍 + OMG 官方形态 + 单
 ② ★重新验证三件事★：argmax 1.0000 ✓ / OMG 编译 ✓ / ★model 子图数是否下降★ ✓
 ③ 若子图数下降且 ORT 数值正确 ⇒ 用 runner 试 Init ✓ ⇒ 这是最强的一次冲刺 ✓
 ```
+
+## 109. ★★★ 修复"非法 ONNX"的根因：ConstantOfShape 降级把 int64 强制成 float32 ★★★ · 对拍脚本配置错配也修了 ✓
+
+### 109.1 二分结论（★真凶不是我的 where 改写 ✗★）
+
+```
+· 只回退 my where 改写、保留"类型修复" ⇒ 对拍仍差 15.2 ✗ ⇒ 说明是"类型修复"改坏语义 ✓
+· 反推：被 Cast 的那个 int64 是【原意】✗ ⇒ ★是我们的降级把它变成 float 的✗★★
+★真凶（onnx_lower.py 的 ConstantOfShape → Expand 降级）★：
+    旧：val = float(numpy_helper.to_array(attr.t).reshape(-1)[0])   # ★强转 float ✗★
+        np.array([val], dtype=np.float32)                           # ★强制 float32 ✗★
+    新：val_arr = numpy_helper.to_array(attr.t).reshape(-1)         # ★保留原 dtype ✓★
+        numpy_helper.from_array(val_arr.astype(val_arr.dtype), cname)
+⇒ ★原本是 int64 的常量（形状/索引类 ✓）被改成 float32 ✗
+   ⇒ 与同为 int64 的伙伴做 Concat ⇒ 图【非法】✗（ORT 直接拒收 ✓）
+   ⇒ 且 int64(8B) → float32(4B) 尺寸变化 ⇒ ★DDK 的 "param[size] is less than[dataSize]"
+      正是这么来的✗✓★★ —— 这解释了十几轮追的那个错 ✓
+修后实测：★类型修正 0 处（图自洽 ✓）· ONNXRuntime 能加载并执行 ✓★
+（fix_mixed_dtypes 保留为守卫 ✓ 现在不再需要插 Cast ✓）
+```
+
+### 109.2 对拍脚本本身有两处错配（一起修了 ✓）
+
+```
+check_hiai_parity.py：
+  · 参考端硬编码 ★num_hidden_layers=4 · layer_types[:4] · S=64, KV=256★ ✓
+    ⇒ 所以必须用 ★--layers 4 --kv-len 256★ 导出才对得上 ✓
+      （我先前用 --layers 2 --kv-len 2048 对拍 ⇒ 数字无意义 ✗）
+  · 输入喂法也与我们的图不符 ✗：
+      position_ids 喂成 ★3 维★（np.tile(..., (3,1,1)) ✗ —— 那是 M-RoPE 三段的老写法 ✓）
+        而我们导的是 ★2 维★ ✓（§69 ✓）⇒ ORT 报 "Invalid rank … Got 3 Expected 2" ✗
+      dtype 喂 int64 ✗ 而我们的图声明 ★INT32★ ✓ ⇒ 报 "Actual int64, expected int32" ✗
+    已修：position_ids → np.arange(S, dtype=np.int32)[None, :] ✓
+          并在喂之前把 position_ids / new_kv_cache_pos 统一转 int32 ✓
+```
+
+### 109.3 现在的状态与下一步
+
+```
+★已能真正跑起来的对拍★（--layers 4 --kv-len 256 ✓）：
+   参考 (1,64,2048) | ORT (1,64,2048) ⇒ ★最大绝对差 1.61e+01 · 相对 3.57 ✗★
+   ⇒ 图能跑了 ✓ 但数值不对 ✗ ⇒ 需要定位 ✓
+★下一步（二分）★：
+   · ★先用【未 lower】的图跑同一个对拍★ ⇒ 若它能过 ✓ ⇒ 说明问题在 lower 的某一步 ✓
+     （lower 现在只做 Softplus / ConstantOfShape 两种 ✓ 很好二分 ✓）
+   · 若未 lower 也不过 ✗ ⇒ 说明是 4 层组合下的真实数值问题 ✓ ⇒ 回到逐层对拍工具 ✓
+★注★：§65~§67 当年的 argmax 1.0000 是在【逐层 / 不同配置】下验的 ✓
+   ⇒ 这次是把"4 层 + KV=256 + 2 维 position"整条链第一次真正跑通 ORT ✓，发现差异是正常的 ✓
+```

@@ -41,9 +41,9 @@ for n in names:
         mm[0, 0, :, :S] = np.triu(np.full((S, S), -1e9, dtype=np.float32), 1)   # 因果 ✓
         feeds[n] = mm
     elif n == "position_ids":
-        feeds[n] = np.tile(np.arange(S, dtype=np.int64), (3, 1, 1))
+        feeds[n] = np.arange(S, dtype=np.int32)[None, :]        # ★2 维✓★（§69 我们导的是 2 维 ✓）
     elif n == "new_kv_cache_pos":
-        feeds[n] = np.arange(S, dtype=np.int64)
+        feeds[n] = np.arange(S, dtype=np.int32)[None, :]   # ★2 维 int32✓★
     elif n.startswith("past_key_in") or n.startswith("past_value_in"):
         idx = int(n.split("in")[-1])
         lt = tc.layer_types[idx]
@@ -55,6 +55,10 @@ for n in names:
             feeds[n] = np.zeros((1, 16, 128, 128), dtype=np.float32)
     else:
         raise SystemExit("未知输入 %s" % n)
+# ★按图的声明转换输入 dtype★（我们的图把 position_ids / new_kv_cache_pos 设成 INT32 ✓ §87）
+for _k in ("position_ids", "new_kv_cache_pos"):
+    if _k in feeds:
+        feeds[_k] = np.asarray(feeds[_k], dtype=np.int32)
 outs = sess.run(None, feeds)
 got = outs[0]
 print("  参考 %s | ORT %s" % (tuple(ref.shape), got.shape))

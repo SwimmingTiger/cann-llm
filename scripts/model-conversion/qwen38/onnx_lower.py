@@ -226,15 +226,23 @@ def lower_model(model: onnx.ModelProto, kinds=None) -> dict:
     for n in g.node:
         if n.op_type == "ConstantOfShape" and (_want is None or "ConstantOfShape" in _want):
             _cog_outs.append(n.output[0])
-            val = 0.0
+            # ★★ 必须保留原始 dtype ★★（§109 实证 ✓）
+            #   旧写法 `val = float(...)` + `dtype=np.float32` ✗ 把原本是 int64 的
+            #   ConstantOfShape（形状/索引类常量 ✓）改成了 float32 ✗
+            #   ⇒ 它与其他 int64 张量做 Concat 时类型冲突 ✗（图直接非法 ✗ ORT 拒收 ✓）
+            #   ⇒ 而且 int64(8B)→float32(4B) 尺寸变化 ⇒
+            #      DDK 的 "param[size] is less than[dataSize]" 正是这么来的 ✗✓
+            val_arr = None
             for attr in n.attribute:
                 if attr.name == "value":
-                    val = float(numpy_helper.to_array(attr.t).reshape(-1)[0])
+                    val_arr = numpy_helper.to_array(attr.t).reshape(-1)
+            if val_arr is None:
+                val_arr = np.zeros(1, dtype=np.float32)
             cname = (n.name or n.output[0]) + "_scalar"
             while cname in used2:
                 cname += "_"
             used2.add(cname)
-            new_inits.append(numpy_helper.from_array(np.array([val], dtype=np.float32), cname))
+            new_inits.append(numpy_helper.from_array(val_arr.astype(val_arr.dtype), cname))
             new_nodes.append(helper.make_node("Expand", [cname, n.input[0]], [n.output[0]],
                                               name=(n.name or n.output[0]) + "_expand"))
             counts["ConstantOfShape"] = counts.get("ConstantOfShape", 0) + 1
