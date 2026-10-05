@@ -5013,3 +5013,46 @@ OMG fp32（q35_hiai_low.onnx ✓ 5.49 GB 权重）+ --save_weights_as_external_d
    · 或者 KV/状态的形状与引擎的分配不一致 ✗（§73 改过一次 ✗ 但方向可能反了 ✓）
 ③ 最直接的做法：★把官方 omc 的 IO 打印出来 ✓，照它改我们的导出边界✓★
 ```
+
+## 83. ★我们的 omc 其实能被 DDK 装载（rc=0 · 兼容 ✓）★ —— 引擎失败另有原因
+
+### 83.1 关键实验（用 §62 写的 C++ runner 直接读 omc ✓）
+
+```
+① 用【绝对路径】加载我们的 omc ✗ ⇒ RestoreFromFile rc=1（找不到 SubGraph_0.weight ✓ 它按 cwd 解析 ✓）
+② 在【包目录里用相对路径】加载 ★⇒ rc=0 · CheckCompatibility: 兼容 ✓★
+   ⇒ ★我们的 omc 是合法的 IMOD built model✓★，文件头与官方完全一致（都是 49 4d 4f 44 = "IMOD" ✓）
+③ 同一 runner 读官方 omc（models/Qwen3-8B/qwen3_8b_ceval_g256.omc 6.8 MB ✓）：
+   rc=0 ✓ · CheckCompatibility: ★不兼容✗★（有意思：官方包反而"不兼容" ✓ 但那不影响它跑通 ✓）
+   输入[0] dims=[1,1,64,4096] dtype=4（FP16 ✓）
+④ 我们的 omc md5 = omg_f16io 版（6fa001cd… ✓ FP16 IO 版 ✓）
+```
+
+### 83.2 目前能确定与不能确定的
+
+```
+确定 ✓：
+  · 引擎/环境/脚本/官方包 → 全链路正常（§82 官方 Qwen3-8B 跑通 12.8 tok/s ✓）
+  · 我们的 omc 是合法可装载的 IMOD built model ✓（DDK loader rc=0 ✓）
+  · 两个 omc 图部分体积相当（6.1 / 6.8 MB ✓），权重都在外置 SubGraph_0.weight ✓
+  · 引擎报的 /input_layernorm/Mul_1 "param[size] < dataSize" 稳定复现 ✗
+未能确定 ✗：
+  · 两个 omc 的 ★IO 清单★（名字/形状/类型）到底差在哪 ——
+    runner 的 Dump 只打印了 [0] 就段错误 ✗
+    ★原因已知★：NDTensorDesc 是 C++ 结构（内含 std::vector ✓），
+    我用 ctypes/或遍历方式读它本身就不安全 ✗ ⇒ 要在【C++ 里】小心遍历 ✓
+```
+
+### 83.3 下一步
+
+```
+① 修 hiai_runner.cpp 的 Dump：先取 descs.size() ✓ 再逐个打印 ✓（加 try/catch ✓）
+   ⇒ 拿到两个 omc 的完整 IO 清单 ✓ 逐项对比 ✓
+② 重点怀疑方向（按可能性）：
+   a) ★每层状态张量的形状/语义与引擎分配不一致✗★
+      —— 我们的图有 24 层 × 2 个状态输入 ✓，官方 qwen3 的导出脚本也是 past_key_in{i} ✓
+         但官方【跑通的那个包】未必是同一个导出脚本产的 ✓（它带了 lora 文件 ✓ 是官方发布包 ✓）
+   b) attention_mask 的 dtype/形状（官方 [1,1,64,4096] FP16 ✓ vs 我们 [1,1,64,2048] ✓）
+   c) api_config.json 的 tokenizerType 应为 6 ✓（qwen3 系列 ✓ 我们暂用 4 ✓）
+③ 若 IO 清单对齐后仍失败 ⇒ 考虑【砍掉状态输入】的无状态 prefill 图 ✗（先跑通再优化 ✓）
+```
