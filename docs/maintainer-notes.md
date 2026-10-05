@@ -5809,3 +5809,45 @@ liveh    ★rc=1✗★   串联 + 保持对 h 的引用（o0 + h*0 ✓，数值�
 ③ 若①无效 ⇒ 换思路：★把状态张量从图里彻底去掉★（做一张"无状态"的图：
    把每层的状态【当作普通中间张量】，只在图内用 ✓ ⇒ 但那会改变语义 ✗ hmm）
 ```
+
+## 101. `--hiai_version` 死路 ✗ · `.om` 里只有 1 个 graph（子图切分在编译期 ✗）⇒ 转向"★消除不被支持的算子★"
+
+### 101.1 本轮两个实验结果
+
+```
+① --hiai_version IR / v310 / v300：★三个都编不过✗★（OMG成功=0 ✓）
+   ⇒ 那些版本需要不同的工具链 ✓ ⇒ 此线索作废 ✗
+② 想数"真实子图数"：先用 --target=om 生成 seg.om ✓（两个都成功 ✓），
+   再 omg --mode 1 --om seg.om --json seg.json ✓ ⇒ ★JSON 里只有 1 个 graph✗★
+   （SubGraph 键=0 ✓ graph 键=1 ✓）
+   ⇒ ★子图切分发生在 om → omc 的编译期✗★，从 .om 里数不出来 ✓
+```
+
+### 101.2 ★回到错误信息本身的指引★（这是更有希望的方向 ✓）
+
+```
+回顾 §94 / §99 里 OMG 的原话：
+  ★"CheckSupported: the op name [/Sub] type [Sub] is not supported in npucl store [elementary_lib]"✗★
+  ★"get opKernel of name FMK_CL failed!"✗★
+⇒ 意思是：我们图里的某些算子【在 NPU 的 kernel 库里没有实现】✗
+   ⇒ OMG 会把它们【回退到 CPU 子图】✓ ⇒ ★每个回退点很可能就是一个子图✗★
+   ⇒ 这就解释了两条相关性：
+        · 串联图 13 个子图 ✗（回退点多 ✓）vs 并联图 7 个 ✓
+        · 官方图很可能只有 1 个子图 ✓（它的算子全在 NPU 库里有实现 ✓）
+   ⇒ ★且 DDK 的 ModelManager 可能对子图数有上限 ✗★（7 能过 ✓ 13 不能 ✓）
+```
+
+### 101.3 下一步（★针对性改写：把不被支持的算子换成支持的等价写法★）
+
+```
+★Sub★（错误信息点名 ✗）：x - y ⇒ ★x + (-1)*y★ 或 x + neg(y) ✓
+   我们的 delta rule 里有 ★(I - tril(...))★ 这类构造 ✓ 正是 /Sub 的来源 ✓
+★Pow★：x**2 ⇒ x*x ✓（乘法肯定支持 ✓）
+★ReduceSum★：sum(-1) ⇒ 也可试 MatMul 一个全 1 向量 ✓
+★Transpose/Reshape/Slice/Concat/Constant/Cast/Exp★：这些大概率支持 ✓ 先不动 ✓
+★做法★：
+  ① 在 npu_gated_delta.py / npu_layers.py 里把这些算子改成等价写法 ✓
+  ② 重编【两层探针】✓ 看 weight 文件数是否从 13 降下来 ✓（这是子图数的代理指标 ✓）
+  ③ 只要降到 ≤7 ✓ ⇒ runner Init rc 应该就翻成 0 ✓ ⇒ 再上 24 层 ✓
+★注意★：改写后要重跑数值对拍 ✓（argmax 必须保持 1.0000 ✓）
+```
