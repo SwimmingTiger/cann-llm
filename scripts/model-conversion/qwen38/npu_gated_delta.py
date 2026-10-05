@@ -37,7 +37,7 @@ import torch.nn.functional as F
 __all__ = [
     "npu_causal_conv1d_fn", "npu_chunk_gated_delta_rule",
     "install", "uninstall", "tril_ones", "strict_lower", "strict_upper",
-    "strict_lower_f", "strict_upper_f",
+    "strict_lower_f", "strict_upper_f", "_sum_last",
 ]
 
 # ---------------------------------------------------------------- 常量（编译期固定 ✓）
@@ -102,7 +102,7 @@ def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
     # ★不用除法✗★：OMG 日志明确说 RealDiv 在我们的 NPU kernel 库里没有实现
     #   （"op name [/Div] type [RealDiv] is not supported in npucl store" ✗ §103/§104 ✓）
     #   ⇒ 改成 ★x * (·)^(-0.5)★ ✓：Pow 在支持列表里 ✓（不出现于 unsupported 清单 ✓）
-    return x * (x.pow(2).sum(dim=dim, keepdim=True) + eps).pow(-0.5)
+    return x * (_sum_last(x.pow(2)) + eps).pow(-0.5)   # ★MatMul 版求和✓★（§117 ✓）
 
 
 # ---------------------------------------------------------------- ⓪ 分块前代（数值稳定）
@@ -163,6 +163,29 @@ def npu_recomposition_frequencies(self, freq):
 
 
 # ---------------------------------------------------------------- ① 因果深度卷积
+
+
+def _ones_col(d: int, dtype, device) -> torch.Tensor:
+    """[D,1] 全 1 常量列 ✓（给 _sum_last 用 ✓）。"""
+    key = ("onescol", d, str(device), str(dtype))
+    if key not in _MASK_CACHE:
+        _MASK_CACHE[key] = torch.ones(d, 1, dtype=dtype, device=device)
+    return _MASK_CACHE[key]
+
+
+def _sum_last(x: torch.Tensor) -> torch.Tensor:
+    """★对最后一维求和，但用 MatMul 实现✓★（§117 ✓）。
+
+    为什么不能用 `x.sum(-1, keepdim=True)` ✗：
+      OMG 日志明确 "type [ReduceSum] is not supported" ✗ ⇒ 回退 CPU 子图 ✗
+      ⇒ ★实测每出现一次 ReduceSum ⇒ 子图数 +2✗★（干净底座：1 → 3 ✓）
+      ⇒ 而子图数超过约 9~13 ⇒ DDK ModelManager::Init 直接失败 ✗
+      ⇒ l2norm 每层要调 2 次（q/k ✓）⇒ 光这一项就吃掉 4 个子图/层 ✗✗
+    等价写法：sum(-1, keepdim=True) ≡ x @ ones([D,1]) ✓（MatMul 是支持的 ✓）
+    """
+    d = x.shape[-1]
+    return x @ _ones_col(d, x.dtype, x.device)
+
 
 def npu_causal_conv1d_fn(hidden_states, weight, bias=None, activation=None, **kwargs):
     """`causal_conv1d_fn` 的等价改写：depthwise 因果卷积（左侧补 k-1）。

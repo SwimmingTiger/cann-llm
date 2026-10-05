@@ -6561,3 +6561,53 @@ norm 里还剩三个可怀疑的特性 ✗→✓：
    ⇒ 找出"从 1 跳到 9"的那几批算子 ✗ ⇒ 针对它们改写/替代 ✓
    —— 这是唯一能真正解释并降低子图数的路径 ✓
 ```
+
+## 117. ★★精确归因：ReduceSum 不被支持 ⇒ 干净底座上 +2 子图/次 ★★（但换成 MatMul 后 k 系列计数未变 ✗）
+
+### 117.1 路线甲（干净底座 + 逐批加算子 ✓）—— 本轮最干净的一组数据
+
+```
+底座：input[1,64,64] → MatMul 串联 → out（与 k2_delta 同类拓扑 ✓）
+   批次                                           OMG   ★model★
+   b0_base  纯 MatMul 串联                         ✓     1 ✓
+   b1_elem  + Add / Mul                            ✓     1 ✓
+   b2_shape + Reshape / Transpose                  ✓     1 ✓
+   b3_slice + Slice / Concat                       ✓     1 ✓
+   ★b4_math + Exp / Pow / ReduceSum / Sigmoid★      ✓     ★3★ ← 就在这批跳
+   b5_where + Where(Select)                        ✓     3
+   b6_sub   + Sub                                  ✓     3
+   b7_cast  + Cast                                 ✓     3
+⇒ 再细分 b4_math（每个算子单独一个小模型 ✓）：
+   m0_base     1 ✓   m1_exp       1 ✓   m2_pow        1 ✓
+   ★m3_reducesum  3★ ← ★日志明说 "type [ReduceSum] is not supported"✗★
+   m4_sigmoid  1 ✓   m5_exp_pow   1 ✓
+⇒ ★★每出现一次 ReduceSum ⇒ 子图数 +2✗（1 → 3）★★ —— 这是"子图从哪来"的第一个硬证据 ✓
+```
+
+### 117.2 于是把代码里所有 `sum(-1)` 换成 MatMul 版 ✓（改对了 ✓ 但计数没动 ✗）
+
+```
+代码里只有两处求和 ✓：
+   npu_gated_delta.py:105  l2norm: x.pow(2).sum(dim=dim, keepdim=True)   ← ★每层调 2 次（q/k ✗）★
+   npu_layers.py:110       显式 norm: (x*x).sum(-1, keepdim=True)        ← §115 我引入的 ✗
+新增 _sum_last(x) = x @ ones([D,1]) ✓（MatMul 支持的 ✓，等价于 sum(-1,keepdim=True) ✓）
+⇒ 实测：k2_delta/k3_norm/k4_full 的日志里 ★ReduceSum 报错全部归零 ✓★（改对了 ✓）
+⇒ ★但 model 计数完全没变 ✗（仍 9 / 13 / 13）★
+   ⇒ ★说明这些图的子图数【不是由 ReduceSum 主导】✗★ —— 计数不是简单可加的 ✓
+   ⇒ 也就是说：k2/k3 里还有【别的】切分点 ✗，且数量更大 ✓
+```
+
+### 117.3 下一步
+
+```
+① ★把"干净底座法"用到【我们真实的算子序列】上★：
+   底座仍是纯 MatMul 串联 ✓（model=1 ✓ 能过 ✓）
+   ⇒ 按【线性注意力层真实的算子顺序】一批批加：
+      卷积窗口拼接（Slice+Concat+乘加，K=4 展开 ✓）→ 分组卷积（用 MatMul 实现 ✓）
+      → split/reshape（[B,S,Hv,Dv] ✓）→ delta rule 的各步（含常量掩码乘 ✓）
+      → 显式 norm ✓ → out_proj ✓
+   ⇒ 每加一批测 model 计数 ✓ ⇒ 找出每个"+N"的来源 ✓
+② ★同时用 Init rc 当判据★：只要 model 计数降到 ≤9 且 Init 通过 ✓，就说明门槛被跨过 ✓
+③ 注意：§117.2 的 MatMul 版求和虽然没降计数 ✓，但它是【必要的卫生改动】✓
+   （ReduceSum 在 NPU 上确实不支持 ✗，留着只会增加 CPU 回退 ✓）
+```

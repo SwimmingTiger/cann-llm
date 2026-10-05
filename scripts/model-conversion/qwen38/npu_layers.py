@@ -16,7 +16,7 @@ import os
 import torch
 
 import npu_attention as A
-from npu_gated_delta import npu_causal_conv1d_fn, npu_chunk_gated_delta_rule
+from npu_gated_delta import npu_causal_conv1d_fn, npu_chunk_gated_delta_rule, _sum_last
 
 
 def rope_cos_sin(position_ids, inv_freq, dtype=torch.float32):
@@ -119,7 +119,7 @@ def _expl_gated_rmsnorm(nrm, x, gate):
     mode = os.environ.get("NPU_NORM_MODE", "full")
     d = x.shape[-1]
     if mode != "gateonly":
-        v = (x * x).sum(-1, keepdim=True) * (1.0 / float(d))    # ReduceSum ✓
+        v = _sum_last(x * x) * (1.0 / float(d))                # ★MatMul 版✓★（§117 ✓）
         x = x * (v + nrm.variance_epsilon).pow(-0.5)            # Pow(-0.5) ✓
         w = nrm.weight
         if mode == "w4d":
