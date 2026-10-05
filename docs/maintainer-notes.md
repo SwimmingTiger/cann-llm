@@ -6611,3 +6611,55 @@ norm 里还剩三个可怀疑的特性 ✗→✓：
 ③ 注意：§117.2 的 MatMul 版求和虽然没降计数 ✓，但它是【必要的卫生改动】✓
    （ReduceSum 在 NPU 上确实不支持 ✗，留着只会增加 CPU 回退 ✓）
 ```
+
+## 118. ★★算子子图成本表（干净底座逐个测）★★ + 全部 RMSNorm 改写为 NPU 友好实现 ✓
+
+### 118.1 ★成本表（本节是最可复用的产物 ✓）★
+
+```
+方法：底座 = input[1,64,64] → MatMul → MatMul → out（model=1 ✓）⇒ 单独加一个算子 ⇒ 测 model 计数
+
+★成本 1（免费 ✓）★：
+   base · add · mul · sub · div · where(Select) · cast · exp · pow · sigmoid · softplus
+   reshape · transpose · slice · gather · split · conv(分组卷积 ✓) · matmul
+★成本 3（每次 +2 子图 ✗）★：
+   ★ReduceSum ✗ · ReduceMean ✗ · Sqrt ✗（rsqrt 也走 Sqrt ✗）★
+   —— 日志原文："type [ReduceSum] is not supported" / "[ReduceMean] is not supported" /
+                "[Sqrt] is not supported"
+⇒ ★指导意义★：任何"求和/求均值/开方"都要用 ★MatMul 版求和 ✓ + Pow(±0.5) ✓★ 替代 ✓
+```
+
+### 118.2 据此把【所有】RMSNorm 改成 NPU 友好实现 ✓
+
+```
+我们每层有 3 个 RMSNorm ✗（原实现都用 ReduceMean✗ + Sqrt/rsqrt✗）：
+   ① linear_attention 的 gated RMSNorm（Qwen3_5RMSNormGated ✓）
+   ② layer.input_layernorm ✓        ③ layer.post_attention_layernorm ✓
+   ④ 以及模型最后的 body.norm ✓
+新增 npu_layers._expl_rmsnorm(nrm, x) ✓：
+   v = _sum_last(x*x) * (1/D)          # ★MatMul 版求和✓★（免费 ✓）
+   return x * (v + eps).pow(-0.5) * weight   # ★Pow(-0.5)✓★（免费 ✓）
+替换点：npu_layers.py 的 ①②③ ✓ + export_hiai_q35.py 的 ④ ✓
+★实测（2 层链条 k2/k3/k4）★：
+   残余 "ReduceMean/ReduceSum/Sqrt 不支持" 报错 ⇒ ★全部清零 ✓★
+   ★但 model 计数完全没变 ✗（仍 9 / 13 / 13）★
+   ⇒ ★说明这些图的子图数【不由"不支持算子"主导】✗★
+     （成本表是"孤立算子"的真实代价 ✓，但不能线性预测复杂图的计数 ✓）
+★顺带修掉一个真错误✓★：Qwen3_5RMSNorm 没有 variance_epsilon ✗（标准版用 eps ✓）
+   ⇒ _expl_rmsnorm 改成 getattr 兼容 ✓；hu60tx 真实导出已验证 ✓（470.7 MB · 8进/5出 ✓）
+```
+
+### 118.3 结论与下一步
+
+```
+★两条硬结论★：
+   ① 求和/均值/开方 这三类在 NPU 上都不支持 ✗ ⇒ 必须用 MatMul + Pow 替代 ✓（已全局完成 ✓）
+   ② 但把它们全换掉后，我们图的子图数【纹丝不动】✗
+      ⇒ 子图切分还有别的、更大的机制 ✗（很可能与我们【展开的循环/大量分支】的
+        图拓扑有关 ✓ —— 例如 npu_causal_conv1d_fn 里 K=4 的手工展开 ✓、
+        delta rule 里前向代入的展开 ✓、常量掩码的大量乘加 ✓）
+★下一步（唯一还没走完的路径）★：
+   干净底座法 + ★我们真实的算子序列★：按层内真实顺序一批批加 ✓ 定位每个 "+N" ✓
+   —— 但这需要在同一张图上增量建图 ✓ 工作量较大 ✓
+   ⇒ 或者：接受 DDK 路线的限制，转 CPU/GGUF（已跑通 ✓）或找厂商确认 ✓
+```
