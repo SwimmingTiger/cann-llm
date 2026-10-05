@@ -7595,3 +7595,51 @@ C 换路：CPU/GGUF（已跑通 ✓ 非 NPU ✗）
 ② 头文件里每个算子都有详细注释（输入个数、参数 ✓）⇒ 用脚本抽取成表 ✓ 再人工核对 ✓
 ③ 逐个修复后重跑 ⇒ 目标：AddOperation 失败 0 ⇒ Finish=0 + ★Build=0★
 ```
+
+## 139. ★头文件注释的读法（在枚举值【之前】✓）+ 权威算子约定 + 通过率规律★
+
+### 139.1 ★重要发现：算子的说明注释在枚举值【之前】，不是在之后★
+
+```
+我一开始 awk 取了 OH_NN_OPS_X = n 之后的内容 ✗ ⇒ 全错位了 ✗
+   （例如 "SLICE = 29" 后面那段其实是 Softmax(30) 的说明 ✗）
+★正确读法★：文档块紧接在 `OH_NN_OPS_X = n,` 这一行的【上面】✓
+⇒ 用正确的读法拿到的权威约定（本轮实测 ✓）：
+   ★TRANSPOSE★ 输入 = [input, permutation] ✓（★perm 必须是张量输入✗ 不能只放属性 ✓★）
+   ★RESHAPE★   输入 = [input, InputShape] ✓（形状张量 ✓）
+   ★SLICE★     输入 = [input, begin, size] ✓ + 参数 axes ✓
+                （★与 ONNX 的 starts/ends/axes/steps 完全不同✗ ⇒ 必须换算✓★）
+   ★CAST★      输入 = [input, type] ✓（★目标类型是【张量输入】✗ 不是属性 ✓★）
+   ★MUL/ADD★   输入 = [input1, input2] ✓ + 参数 activationType（OH_NN_FuseType 的整数常量 ✓）
+```
+
+### 139.2 通过率规律（真实 2 层模型 ✓ 543 节点 ✓）
+
+```
+★通过✓★：MATMUL 143/143 · POW 17/17 · PAD 2/2（★全部是"≥2 个输入"的算子✓★）
+★失败✗★：ADD 93 · SLICE 72 · MUL 66 · RESHAPE 32 · CAST 30 · TRANSPOSE 22 · EXP 12 ·
+   CONCAT 10 · UNSQUEEZE 10 · SIGMOID 8 · SUB 6 · WHERE 4 · NEG 4 · DIV/GATHER/SPLIT/
+   SQRT/REDUCE_MEAN/LOG 各 2
+★形状一致性已核查✓★：失败首节点 MUL [1,64,2048]×[1,64,2048] ⇒ [1,64,2048]（完全一致 ✓ 却失败 ✗）
+   通过节点 MATMUL [1,64,2048]×[2048,1] ⇒ [1,64,1]（一致 ✓ 通过 ✓）
+⇒ ★所以不是形状问题 ✗★
+★已排除的假说✗★（都用【纯表实验】验证过 ✓ 很便宜 ✓）：
+   ① 参数个数 0/1 vs 2 ✗（删参数后失败数不变 ✓）
+   ② 不同秩广播 ✗（升秩后失败数不变 ✓）
+   ③ 参数声明成 INT32 vs F32 ✗（改后 381→383 ✓ 不是原因 ✓）
+```
+
+### 139.3 下一步（★用权威约定写 INPUT_MAP★）
+
+```
+① 按 §139.1 的约定，为每个失败的算子写"输入构造器" ✓：
+   · TRANSPOSE ⇒ 把 perm 属性变成张量输入 ✓（perm 是 I32 还是 I64 要试 ✓）
+   · RESHAPE   ⇒ 形状张量的 dtype（ONNX 是 INT64 ✗ NNRt 可能要 INT32 ✓）
+   · SLICE     ⇒ ★starts/ends/steps ⇒ begin/size 的换算✓★（需要实现 ✓）
+   · CAST      ⇒ 目标类型做成张量输入 ✓
+   · CONCAT/SPLIT/UNSQUEEZE/REDUCE_MEAN ⇒ 参数取值来源核对 ✓
+   · SIGMOID/EXP/SQRT/NEG/LOG ⇒ "单输入"为何失败 ✗ 需要单独查 ✓
+     （最小表实验也失败了 ✗ ⇒ 但我的最小表里有游离张量 ✗ ⇒ 重做时要保证无游离张量 ✓）
+② 目标：AddOperation 失败 0 ⇒ ★Finish=0 + Build=0★
+③ 之后：Executor（SetInput/SetOutput/Run ✓）⇒ 前向出数 ⇒ 解码循环 ⇒ 设备上聊天 ✓
+```
