@@ -5471,3 +5471,41 @@ c) 补做 state2 / state8 探针（修掉我探针里的形状 bug ✓）⇒ 确
 另一条并行的便宜活 ✓：
   · 修好 §91 的 conv1d 探针（groups=conv_dim 的深度卷积 ✓）单独验一次 ✓
 ```
+
+## 93. ★线性注意力层分块探针：深卷积 ✓ / l2norm ✓ / chunked delta rule ✓ 全部 Init rc=0★
+
+### 93.1 结果（同一流水线 ✓ 全部用 runner 的 Init rc 判定 ✓）
+
+```
+分块探针                                  OMG   Init rc
+  conv   深度可分离 Conv1d(CD,CD,4,groups=CD) + silu ✓   ✓    ★rc=0★
+  l2     q/k 的 l2norm（x*rsqrt(Σx²+eps)）✓             ✓    ★rc=0★
+  ★delta 我们的 npu_chunk_gated_delta_rule ✓★           ✓    ★rc=0★
+         （B=1,S=8,H=16,D=128 ✓ 167 节点 ✓
+           算子分布：Constant72 MatMul15 Slice11 Reshape9 Mul9 Transpose8 Add8 Cast7 Exp4 Pow3 Sub3 Concat3 ReduceSum2 ✓
+           ★OMG 把它拆成 7 个子图（SubGraph_0..6.weight ✓）也照样 Init rc=0 ✓★）
+⇒ ★线性注意力层的"重活"全部无罪✗★
+```
+
+### 93.2 踩到并修好的探针细节（对以后有用 ✓）
+
+```
+· delta rule 的布局是 ★[B,S,H,D]★ ✓（不是我一开始写的 [B,H,S,D] ✗）——
+  见 npu_layers.py 里 key.reshape(b, s, k_heads, k_dim) ✓
+· 常量掩码会触发 _MASK_CACHE 的构建警告 ✓ 无害 ✓
+```
+
+### 93.3 单层里【还没验】的剩余部分（下一步）
+
+```
+① ★gated RMSNorm（Qwen3_5RMSNormGated ✓）★ —— 带【额外 gate 输入 z】的归一化 ✓
+   （npu_layers 里：if "rmsnormgated" in type(la.norm).__name__.lower(): core = la.norm(core, z) ✓）
+   它是一个【自定义组合】（silu(z) * rmsnorm(core) ✓）⇒ ★最可疑✗★
+② in_proj_qkv / in_proj_z / in_proj_b / in_proj_a 的切分 ✓（Slice/ Split ✓）
+③ out_proj 前的 reshape（core.reshape(b, s, v_heads * v_dim) ✓）
+④ ★整层探针★：直接对 model.layers[0] 调 linear_attention_layer ✓ 小 S ✓ ⇒ 导出
+   —— 这等价于 §90 的"1 层版"（它 OMG 就失败 ✗ FMK_CL kernel ✗）✓
+   ⇒ 所以 1 层版与 2 层版的差别值得再确认 ✓：
+     1 层 = OMG ✗（kernel 选择失败 ✓）· 2 层 = OMG ✓ 但 Init ✗
+★下一步先做 ① 和 ④★：① 多半就是 Init 的元凶 ✓；④ 能解释 FMK_CL ✓
+```
