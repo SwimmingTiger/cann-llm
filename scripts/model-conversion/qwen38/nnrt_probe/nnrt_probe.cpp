@@ -31,6 +31,10 @@ int main(int argc, char **argv) {
                 OH_NN_ReturnCode rc2 = OH_NNCompilation_SetCache(c, cache);
                 printf("   SetCache(%s) rc=%d\n", cache, (int)rc2);
             }
+            // ★试编译选项（性能模式/优先级 ✓）
+            OH_NN_ReturnCode rp = OH_NNCompilation_SetPerformanceMode(c, OH_NN_PERFORMANCE_HIGH);
+            OH_NN_ReturnCode rr = OH_NNCompilation_SetPriority(c, OH_NN_PRIORITY_HIGH);
+            printf("   SetPerformanceMode(HIGH)=%d SetPriority(HIGH)=%d\n", (int)rp, (int)rr);
             OH_NN_ReturnCode r = OH_NNCompilation_Build(c);
             printf("   Build rc=%d %s\n", (int)r, r == OH_NN_SUCCESS ? "★BUILD OK★" : "✗");
             OH_NNCompilation_Destroy(&c);

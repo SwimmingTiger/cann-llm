@@ -7102,3 +7102,63 @@ Executor=0x… ✓ · in=1 out=1 ✓ · SetInput=0 ✓ · SetOutput=0 ✓
    即"先用在线建图在设备上编一次 ✓ 把编译缓存导出 ✓ 之后直接用缓存 ✓"
    ⇒ 对【小图】可行 ✓ 对我们整模型不现实 ✗
 ```
+
+## 128. ★★破解 mslite 厂商插件的配置（能产出 .ms 了 ✓）★★ · 但 NNRt Build 仍 rc=1 ✗ · 且查明 NPU 后端就是 hiai HCL
+
+### 128.1 ★正确的厂商离线模型转换配置（本轮最重要的产出 ✓）★
+
+```ini
+[third_party_model]
+input_shapes=1,64,2048          ; ★纯逗号数字列表 —— 不能带张量名✗（带名字会报
+                                ;   "Found error when convert shape string to integer" ✓）★
+output_shapes=1,64,2048
+input_dtypes=float32            ; ★小写全称 —— FP32/float/0 都不行✗★
+output_dtypes=float32
+```
+```
+命令：
+  converter_lite --fmk=ONNX --modelFile=x.onnx --outputFile=y --configFile=cfg.ini
+实测：★成功产出 16.78 MB 的 .ms ✓★（tiny.onnx ✓）
+一路排错记录（都很有用 ✓）：
+  · 段名必须是 ★[third_party_model]★（[third_party] ✗ 会报 "Only support fixed shapes" ✓）
+  · 键名必须是 ★input_shapes / output_shapes / input_dtypes / output_dtypes★
+    （input_shape ✗ / input_data_types ✗ / model_type ✗ 都会报 "INPUT ILLEGAL: … is not supported" ✓）
+  · 形状值 ★纯数字逗号列表★（含张量名 ✗ / 空格分隔 ✗ / 括号 ✗ / 分号 ✗ 都会失败 ✓）
+  · dtype 值 ★小写 float32★（FP32 ✗ / float ✗ / 0 ✗ 都会失败 ✓）
+  · 依赖：LD_LIBRARY_PATH 要含 tools/converter/lib + runtime/lib + libpython3.11 ✓（§121 ✓）
+```
+
+### 128.2 但 NNRt 对这个 .ms 仍 Build rc=1 ✗（与我们的 omc、旧 .ms 一样）
+
+```
+nnrt_probe ./tiny_vendor.ms ⇒ Construct 非空 ✓ · SetDevice rc=0 ✓ · ★Build rc=1 ✗★
+```
+
+### 128.3 ★查明 NNRt 的 NPU 后端：就是 hiai 的 HCL 服务✗★
+
+```
+strings /system/lib64/libhiai_nn_proxy_1.0.z.so：
+   IHiaiHclGet / IHiaiHclGetInstance / IHiaiHclRelease / hiai_hcl_proxy / hiai_hcl_service
+   ★ohos.hdi.hiai.nn_model.v1_0.IHiaiHcl★
+strings /system/lib64/platformsdk/libnnrt_proxy_1.0.z.so：
+   ★PrepareModel_ / PrepareModelFromModelCache_ / ExportModelCache_ / IsModelCacheSupported_★
+   ModelBlockMarshalling / ModelBlockUnmarshalling / nnrt_device_proxy / nnrt_device_service
+⇒ ★NNRt 的 NPU 路线最终把模型交给【hiai HCL 服务】去 PrepareModel✗★
+   —— 而 hiai HCL 正是我们 DDK 路线里那个后端（§105 "DDK pipe is HCL" ✓）✗
+   ⇒ ★所以两条路的 NPU 后端是同一个✗★ ⇒ 模型接受度可能受同一套约束限制 ✗
+★但 NNRt 仍有两个明确优势✓★：
+   ① 在线建图路径【已被我们证明能在 NPU 上跑通且数值正确】✓（§127 ✓）
+   ② 它是标准 OHOS NDK 接口 ✓，有 model cache（编译缓存）机制 ✓
+```
+
+### 128.4 下一步
+
+```
+① ★把 nnrt_probe 的 SetCache 修对（3 参数 ✓ 我第二次忘了改回来 ⇒ 编译失败 ⇒ 那次测试无效 ✗）★
+   并把 SetPerformanceMode/SetPriority/SetCache 都试一遍 ✓
+② ★试 NNRt 的"编译缓存"路径★：OH_NNCompilation_ConstructForCache /
+   ExportCacheToBuffer / ImportCacheFromBuffer / PrepareModelFromModelCache ✓
+   ⇒ 若能"在线建图编译一次 ⇒ 导出缓存 ⇒ 之后直接用缓存" ✓ 那就是一条可用通路 ✓
+③ ★查 hiai HCL 服务接受的模型形态★：既然后端是 HCL ✓
+   ⇒ 我们的 omc 是否需要用某种"认证/签名"或特定包装 ✗（§123 的 Authentication 机制 ✓）
+```
