@@ -4096,3 +4096,60 @@ ModelBuildOptions 字段（model_builder_types.h ✓）：
 ③ 若 DDK C++ 这条需要 app 沙箱/权限 ✗ ⇒ 回到【LLM 引擎 + 模型包】那条（§47 已跑通 6.0 tok/s ✓），
    它的模型包形态我们全都有 ✓（§60 ✓）
 ```
+
+## 63. hiai 引擎接口的★状态设计★（qwen3_5 混合架构怎么接）+ 导出脚本骨架
+
+### 63.1 官方接口（抄自 cannkit `export_model_single_qwen3.py` ✓ 已逐行核对）
+
+```
+输入  input_ids [B,S] int64 · attention_mask [B,1,S,kv] · position_ids [B,S]
+      past_key_in{i} / past_value_in{i}   [kv_max, kv_heads, B, head_dim] ★kv 维在前★
+      new_kv_cache_pos [S] int64
+输出  lm_logits [B,S,V] · past_key{i} / past_value{i}
+（官方 wrapper 就是逐层调用 decoder_layer 并收集每层返回的 (k,v) ✓
+  位于 npu_tuned_model/qwen3/export_model_wrapper.py ✓）
+```
+
+### 63.2 ★qwen3_5 的难点与我们的解法★
+
+```
+层型实测：★线性注意力层 18 个（idx 0,1,2,4,…）· 全注意力层 6 个（idx 3,7,11,15,19,23）★
+模块结构：
+  全注意力层 → self_attn{q_proj,k_proj,v_proj,o_proj,q_norm,k_norm}
+  线性注意力层 → linear_attn{conv1d,norm,out_proj,in_proj_qkv,in_proj_z,in_proj_b,in_proj_a}
+  线性超参：linear_conv_kernel_dim=4 · 16 个 value head · key/value head_dim=128
+
+★解法：把两种层的"状态"都塞进同一对 past_key_in{i}/past_value_in{i} 槽位★ ✓
+  · 全注意力层：key 槽 = K 缓存 ✓、value 槽 = V 缓存 ✓（形状照官方 ✓）
+  · 线性注意力层：key 槽 = ★因果卷积窗口★（最近 kernel-1 个输入 ✓）
+                  value 槽 = ★gated delta rule 的递归状态★ [B,H,Dk,Dv] ✓
+    —— 引擎把这些张量当【不透明的每层缓存】透传 ✓（这正是它驱动任意结构模型的方式 ✓）
+★不用 ScatterND 写缓存✗★（DDK 没有 ✗）：改用【静态切片的 Concat 移位】✓
+    new_cache = cat([k_new, past[:, :, S:]], dim=2)   ← 位移式缓存 ✓ 全静态 ✓
+  掩码不自己算 ✓：官方接口本来就给了 attention_mask [B,1,S,kv] ✓（引擎负责 ✓）
+    ⇒ 3 维化后 reshape 成 [B,S,kv] ✓ 直接加到分数上 ✓
+```
+
+### 63.3 本轮产出的脚本骨架
+
+```
+scripts/model-conversion/qwen38/export_hiai_q35.py
+  · 按官方 IO 命名导出（input_ids/attention_mask/position_ids/new_kv_cache_pos
+    + 每层 past_key_in{i}/past_value_in{i} → lm_logits + 每层两路输出 ✓）
+  · 每层的状态形状按层型给出（全注意力=KV ✓；线性=卷积窗口+递归状态 ✓）
+  · 旧导出器 opset14 ✓ / 支持 --layers 切片调试 ✓ / --no-embed-head ✓
+  · 计算部分委托给【待写】的 npu_layers.layer_forward（带状态的层实现 ✓）
+
+scripts/model-conversion/qwen38/hiai_runner/hiai_runner.cpp（§62 ✓ 已能在设备上编译运行 ✓）
+```
+
+### 63.4 下一步
+
+```
+① 写 npu_layers.py：带状态的层实现 ✓
+   · 全注意力层：3 维注意力（复用 npu_attention 的 to_heads/rope ✓）+ 位移式 KV 缓存 ✓
+   · 线性注意力层：卷积窗口 + 递归状态进出 ✓（我们的 delta rule 本来就支持 initial_state ✓）
+② ★先做 prefill 版（固定 S=64 ✓，解码后面再补）★——先把
+   导出 → OMG → 组装模型包 → 引擎加载 这条链跑通 ✓
+③ 解码版（S=1 与 prefill 共存 ✗）再单独设计（可能要用两套图或动态形状 ✓）
+```
