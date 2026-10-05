@@ -5509,3 +5509,42 @@ c) 补做 state2 / state8 探针（修掉我探针里的形状 bug ✓）⇒ 确
      1 层 = OMG ✗（kernel 选择失败 ✓）· 2 层 = OMG ✓ 但 Init ✗
 ★下一步先做 ① 和 ④★：① 多半就是 Init 的元凶 ✓；④ 能解释 FMK_CL ✓
 ```
+
+## 94. ★抓到一个 0 维张量（chunk 补齐产生的空掩码）★ —— 但那是【我探针 S=8 不忠实】造成的 ✗
+
+### 94.1 本轮的有效发现
+
+```
+① 整层探针（用真函数 linear_attention_layer ✓ S=8）：★OMG 失败✗★ —— 复现了 §90 的"1 层版 OMG 失败" ✓
+   报错：get opKernel of name FMK_CL failed!（activation_op_define.c ✓）
+        CheckSupported: op [/Sub] type [Sub] is not supported in npucl store [elementary_lib] ✗
+        SelectCheckDimension::"check dimCnt failed, 2 != 3" ✗
+② 把 gated RMSNorm 换成恒等 ⇒ ★仍然失败✗★ ⇒ 不是 norm（Qwen3_5RMSNormGated ✓）✓
+③ ★用 onnx.shape_inference 对比 Sub 节点的真实形状★：
+   delta 探针（通过 ✓）：/Sub_1 ← Slice [16,1] ✓ · /Sub_2 ← Concat [16,8,128] ✓
+   ★整层（失败 ✗）：/Sub_1 ← Concat ★[0, 64, 0]★ ✗✗★ —— 出现 0 维张量 ✗
+   ⇒ NPUCL 把它判成 "dimCnt 2 != 3" ✗ ⇒ kernel 选择失败 ✗
+```
+
+### 94.2 为什么会出现 0 维张量（★重要✓★）
+
+```
+★chunk 补齐★：npu_layers 里 delta rule 的 chunk_size ★写死 64★ ✓，
+   而我的探针用 S=8 ✗ ⇒ 会补齐到 64 ✓ ⇒ ★最后一块没有有效行✗★
+   ⇒ 我们为"三角掩码"构造的 Slice/Concat 在那块上产生 ★[0, 64, 0]★ 之类空张量 ✗
+★真实模型是 S=64 ✓ = 正好一块 ✓ ⇒ 不会出现空掩码 ✓★
+⇒ 所以：这条线索是【我探针 S=8 不忠实】造成的 ✗，不是真实模型的病灶 ✓
+```
+
+### 94.3 教训与下一步
+
+```
+★教训★：探针必须与真实图【同形】（S 要与 chunk_size 一致 ✓，或 chunk_size 要随 S 变 ✓）
+下一步：
+ a) ★把整层探针改成 S=64（与真实模型一致 ✓）★ 再跑 ⇒ 若 OMG 通过 ✓ 则整层无罪 ✓，
+    真凶在别处（多层的拼接/全局部分 ✓）
+ b) 若 S=64 时整层仍失败 ✗ ⇒ 真凶就在整层图里 ✓ ⇒ 继续拆（in_proj 切分 / out_proj / reshape ✓）
+ c) 顺带：★检查 npu_layers 里 chunk_size 是否应该随 S 自适应★ ✓
+    （decode 图 S=1 时若 chunk=64 也会补齐 ✗ ⇒ 同样会产生空掩码 ✗
+      —— 这正好是 §87 里"decode 用 chunk=1"那条注意事项的另一种表现 ✓）
+```
