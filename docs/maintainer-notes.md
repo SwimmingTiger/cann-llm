@@ -5292,3 +5292,46 @@ embed_scales:1,-1,1                ← ★官方图有这个输入✗★（我�
 ※ 注意：我们的 delta rule 是【静态 S】✗ ⇒ 真要动态得改算法 ✓；
   但如果 Init 只要求"声明了动态维度"而不实际跑动态 ✓，那就值得一试 ✓
 ```
+
+## 89. ★★★ 决定性实验：极简模型同流水线 Init rc=0 ✓ ⇒ 问题 100% 在我们的图内容 ★★★
+
+### 89.1 实验设计与结果（本轮 ✓）
+
+```
+实验 1（§88 计划 ✓）：torch 造 input[1,64,2048] → 单层 MatMul → hidden[1,64,2048] ✓
+  导出（legacy opset14 ✓）→ OMG（与我们【完全相同】的 flags ✓：--weight_data_type FP16
+  + --save_weights_as_external_data=true + --platform=kirinx90 --target=omc ✓）
+  ★tiny/static：Load rc=0 ✓ · CheckCompatibility 兼容 ✓ · 1 输入/1 输出 · ★Init rc=0 ✓★
+  ★tiny/dyn   ：（input_shape 用 1,-1,2048 + --dynamic_dims=1,1;64,64 ✓）
+                 Load rc=0 ✓ · 1 输入/1 输出 · ★Init rc=0 ✓★
+⇒ ★★我们的 OMG 流水线、静态形状、外置权重、INT32/FP16 声明——统统没问题✓★★
+⇒ ★★问题 100% 在【我们图的内容 / 结构】✗★★
+（顺带澄清：静态也能 Init ✓ ⇒ "必须有动态维度"的假设也不成立 ✗）
+```
+
+### 89.2 继续二分：1 层版（纯线性注意力）连 OMG 都编不过 ✗
+
+```
+导出 ✓ 242.6 MB · 输入 6 个 / 输出 3 个 ✓ ⇒ lower ✓ ⇒ ★OMG rc=1 ✗★
+日志里只有 NPUCL 的 advisory（非致命 ✓）：
+  strided_slice_get_format IsDimThreeNdCase "inputDim.size() 1 dimC 1048576 dimH 0" ✗
+  … "inputDim.size() 2 dimC 16 dimH 64" ✗ … "inputDim.size() 3 dimC 1 dimH 6144" ✗
+  ⇒ ★指向 1 维/2 维切片✗★ —— 正是 §73 为迁就【引擎】而做的
+    "线性层状态改用 KV 形状缓冲 ✓ + 拉平成 1 维再切片 ✗" 那一步的产物 ✓
+（4 层与 24 层版当时能编过 ✓，但都 Init rc=1 ✗）
+```
+
+### 89.3 下一步
+
+```
+★回退 §73 的"状态用 KV 形状缓冲"改动✓★
+  · 那是为了迁就 hiai 引擎的固定 IO ✓ —— 而引擎路线已被放弃（§84/§86 ✓）
+  · 回退后状态回到自然形状：conv[B, conv_dim, K-1] ✓ · rec[B, n_v, d_k, d_v] ✓
+    ⇒ 消除 1 维/2 维切片 ✗（NPUCL 一直在提示的那批 ✓），图更干净 ✓
+  · 然后用 runner 的 ★Init rc 做快速判据★（无需走完整引擎 ✓，几秒钟出结果 ✓）
+    ⇒ 逐项加回复杂度（先 1 层 ✓ → 4 层 ✓ → 24 层 ✓），把导致 Init rc=1 的那个构造找出来 ✓
+★候选构造（回退后再逐个验）★：
+   a) 每层两路状态输入（KV 形状或自然形状 ✓）
+   b) 我们 3 维化改写引入的算子组合（Gather 换序 ✓ / 常量掩码 ✓ / Log+Min 的 Softplus ✓）
+   c) 24 层里的 full_attention 部分（4 维转置+缓存移位 ✓）
+```
