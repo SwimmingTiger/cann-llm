@@ -15,7 +15,7 @@ from __future__ import annotations
 import torch
 
 import npu_attention as A
-from npu_gated_delta import npu_causal_conv1d_fn, npu_chunk_gated_delta_rule
+from npu_gated_delta import _expl_sigmoid, _expl_silu, npu_causal_conv1d_fn, npu_chunk_gated_delta_rule
 
 
 def rope_cos_sin(position_ids, inv_freq, dtype=torch.float32):
@@ -91,7 +91,7 @@ def full_attention_layer(layer, hidden, mask, cos, sin, past_key, past_value, kv
     probs = torch.softmax(scores, dim=-1)
     out = probs @ cv_att.transpose(-1, -2)                  # [BH, S, hd] ✓
     out = _from_heads(out, b, s, heads, hd)
-    out = att.o_proj(out * torch.sigmoid(gate))
+    out = att.o_proj(out * _expl_sigmoid(gate))          # ★显式✓★（避开融合 ✗）
 
     return out, out_k, out_v
 
@@ -114,7 +114,7 @@ def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads
     if trace is not None:
         trace.append(("mixed", mixed))
     z = la.in_proj_z(hidden).reshape(b, s, v_heads, v_dim)     # [B,S,Hv,Dv] ✓
-    beta = la.in_proj_b(hidden).sigmoid()
+    beta = _expl_sigmoid(la.in_proj_b(hidden))           # ★显式✓★（避开融合 ✗）
     g = -la.A_log.float().exp() * torch.nn.functional.softplus(la.in_proj_a(hidden).float() + la.dt_bias)
 
     # ★卷积：把缓存窗口拼在序列前面★ ⇒ 新窗口 = 拼接后的最后 K-1 个 ✓（全静态切片 ✓）

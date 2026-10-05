@@ -5597,3 +5597,38 @@ nl_withnorm(S=64)：OMG成功=0 ✗ · nl_nonorm(S=64)：OMG成功=0 ✗
    —— 用 Exp/Add/Div 基本算子表达 ✓ ⇒ 融合模式可能就不匹配了 ✓
 ③ 查 OMG 是否有禁用融合的隐藏参数 ✓（--help 里没有 ✓，可试 --soc_version 之外的环境变量 ✓）
 ```
+
+## 96. 显式激活也无效 ✗ ⇒ 重新聚焦【真正的问题】：2~24 层"OMG ✓ 但 Init rc=1 ✗"
+
+### 96.1 本轮试过的（都无效 ✗）
+
+```
+① ★silu / sigmoid 全部显式化★（npu_gated_delta.py 加 _expl_sigmoid/_expl_silu ✓；
+   npu_layers 的两处 sigmoid ✓ + 卷积的 silu 激活 ✓ 都改成 1/(1+exp(-x)) 形式 ✓）
+   ⇒ 整层探针(S=64) ★仍然 OMG 成功=0 ✗★
+   ⇒ ★"算子融合"这个假设也没被证实✗★（但显式激活本身是好事 ✓ 保留 ✓
+      —— §45 的 activation.mode=9 not support 说明设备运行时对激活也敏感 ✓）
+```
+
+### 96.2 ★重要澄清：现在的问题被分成了两个，且只有一个是真障碍★
+
+```
+问题 A（1 层版 OMG 失败 ✗）：★单层是退化情形✗★
+   · 现象：1 层 → OMG ✗（FMK_CL）· 2 层 → OMG ✓
+   · 我的整层探针（直接调 linear_attention_layer ✓）也落在这一类 ✗
+   ⇒ ★它对目标不重要✗★ —— 我们要的 24 层图【编译是通过的】✓
+问题 B（2/3/4/24 层：OMG ✓ 但 ★Init rc=1✗★）：★这才是唯一的真障碍★
+```
+
+### 96.3 下一步（判据要换：★OMG rc 不够，必须用 Init rc★）
+
+```
+★关键缺口★：本轮之前我只对 v_proj / v_conv / delta 探针测了 ★OMG rc ✗★，
+   没有测它们的 ★Init rc✗★ —— 而 §91 那批 1 进 1 出的 tiny 探针全部 Init ✓
+   ⇒ 说明"1 进 1 出"太简单 ✓，判别力不足 ✓
+★做法★：把【已经导出并过了 OMG 的】变体逐个补测 Init rc ✓：
+   v_proj（只有 in_proj_qkv ✓）· v_conv（+ 卷积 + silu ✓）· delta 探针 ✓
+   ⇒ 若这些都 Init ✓ ⇒ 继续"每次加一件"（conv → split/reshape → delta → norm → out_proj ✓）
+     直到 Init 翻成 rc=1 ✗ ⇒ ★那就是元凶✓★
+⇒ 这套二分用 runner Init rc 判定 ✓ 每步几十秒 ✓ 非常快 ✓
+```
