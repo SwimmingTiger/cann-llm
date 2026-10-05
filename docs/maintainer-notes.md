@@ -3417,3 +3417,58 @@ Vulkan （-ngl 99）: 乱码/空 ✗  4.01 tok/s（快 2.3×，但结果不可�
    预期：若通，10~20 tok/s 级 ✓（参照 Qwen3-8B 的 12.8 ✓）；但成功率低 ✗
 ③ 官方 dopt+OMG+hiai ✗ 不通：官方流程只支持 qwen2/qwen3/glm ✗（§47）⇒ qwen3_5 走不了 ✓
 ```
+
+## 49. ★★★★★ Qwen3.8（`qwen3_5`）上 NPU 的判决：现成工具链不通 ✗（缺 4 个关键算子）★★★★★
+
+路线：自己导出 ONNX（transformers 5.18 已认 `Qwen3_5` ✓）→ 喂 OMG/converter_lite → hiai/nnrt。
+
+### 49.1 关键路径都打通了 ✓
+
+```
+· transformers 升级到 5.18.0 后有 Qwen3_5Config/Qwen3_5ForCausalLM/Qwen3_5Model ✓
+· empero-ai/Qwen3.8-2B-Distill（safetensors 4.5 GB）★AutoModelForCausalLM 载入成功★ ✓
+    → 类 Qwen3_5ForCausalLM，1.88 B 参数；text_config: 24 层 / hidden 2048 / 8 头 / head_dim 256 / vocab 248320
+· 导出 ONNX：必须用 dynamo 导出器 ✓，且★要包一层只返回 logits★
+    （transformers 5.x 的输出里带 DynamicCache ⇒ dynamo 报 "not a known type" ✗）
+· 架构核心 = causal_conv1d + ★chunk_gated_delta_rule★（Gated DeltaNet 的分块递推）
+    —— 转换机上两者都退回参考 PyTorch 实现（没装 causal-conv1d / flash-linear-attention）✓ 不影响导出 ✓
+```
+
+### 49.2 判决：★4 个算子 DDK 没有 ✗★
+
+用微型同构 config 模型（2 层）秒级导出拿到算子集 ✓，再逐个对 DDK 平台库核验：
+
+```
+qwen3_5 的 ONNX：节点 2016 · 27 种算子
+  Transpose×397 Slice×382 Unsqueeze×262 Mul×174 Add×147 Gather×135 ReduceSum×130
+  ★ScatterElements×128★ ★ScatterND×126★ MatMul×31 Reshape×24 Sqrt×11 Reciprocal×11
+  Pad×10 Sigmoid×8 Pow×7 ReduceMean×7 Where×4 Sub×4 Exp×4 Conv×2 Split×2
+  Softplus×2 Greater×2 ★CumSum×2★ ★Trilu×2★ Neg×2
+
+DDK 平台库（libai_npucore_*）：
+  ✓ 有 23 个
+  ★缺 4 个：ScatterElements · ScatterND · CumSum · Trilu★
+  —— 而这 4 个正是 Gated DeltaNet 递推的核心 ✗（线性注意力的状态更新）
+⇒ ★现成工具链无法把 qwen3_5 转上 NPU★ ✗
+```
+
+### 49.3 还有没有救？—— 有，但要重写线性注意力
+
+| 缺的算子 | 能不能 lowering | 方法 |
+|---|---|---|
+| `Trilu` | ✓ 容易 | 常量三角掩码（`Where` + 常量 mask ✓ 我们在 gemma4 里就用过同类手法）|
+| `CumSum` | ✓ 容易 | ★常量下三角矩阵乘法★（cumsum = tril(ones) @ x ✓ —— 与 gemma4 rotate_half 用常量矩阵替代 StridedSlice 是同一招 ✓）|
+| `ScatterElements`/`ScatterND` | ✗ 难 | 分块递推里的**状态写入** ✗ ⇒ 要**固定 shape 重写**：把 chunk 内的 scatter 变成静态 `Reshape`+`MatMul`+`Add` ✓（相当于手写一个 NPU 友好的 Gated DeltaNet ✓）|
+
+⇒ **可行性**：不是理论不可能 ✓，而是"**要手写 NPU 版线性注意力**" ✗（参照 gemma4 的 3D 重写经验 ✓，量级 1~3 天 ✗）；
+   一旦写成，**所有 qwen3_5 系模型都能复用** ✓（含将来官方的小尺寸包 ✓）。
+⇒ **若成功**：2B 在 NPU 上可达 10~20 tok/s 级 ✓（参照 Qwen3-8B 的 12.8 ✓）。
+
+### 49.4 现实建议（三条并行不冲突）
+
+```
+① llama.cpp CPU 调优 ✓ 便宜：当前 1.70 tok/s ✗；README 记"比同类 ARM 核慢约一个数量级"✗
+   ⇒ 试带 ARM 最优 kernel（i8mm/dotprod/SVE）重编译，预期 3~10× ⇒ 5~17 tok/s ✓ 立刻可用
+② 手写 NPU 版 Gated DeltaNet（固定 shape + 常量三角矩阵 + matmul-only）✗ 1~3 天，收益最大 ✓
+③ 等官方/DDK 支持 qwen3_5 ✗ 时间不可控
+```
