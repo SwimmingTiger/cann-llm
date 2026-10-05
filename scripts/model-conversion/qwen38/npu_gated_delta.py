@@ -142,19 +142,6 @@ def npu_recomposition_frequencies(self, freq):
 
 # ---------------------------------------------------------------- ① 因果深度卷积
 
-# ---------------------------------------------------------------- ★显式激活（避开算子融合）★
-# 为什么：OMG 在整层图上报 "get opKernel of name FMK_CL failed" ✗（融合激活 kernel 取不到 ✓），
-#   而 silu/sigmoid 单独探针都能过 ✓ ⇒ 怀疑是【融合模式】在特定形状下选了缺失的 CL kernel ✗。
-#   改用 Exp/Add/Div 基本算子显式表达 ✓ —— 图变长一点 ✓ 但绕开融合 ✓。
-#   （§45 也显示激活算子在设备运行时不稳 ✗：activation.mode=9 not support ✓）
-def _expl_sigmoid(x):
-    return 1.0 / (1.0 + torch.exp(-x))
-
-
-def _expl_silu(x):
-    return x * (1.0 / (1.0 + torch.exp(-x)))
-
-
 def npu_causal_conv1d_fn(hidden_states, weight, bias=None, activation=None, **kwargs):
     """`causal_conv1d_fn` 的等价改写：depthwise 因果卷积（左侧补 k-1）。
 
@@ -175,7 +162,7 @@ def npu_causal_conv1d_fn(hidden_states, weight, bias=None, activation=None, **kw
     if bias is not None:
         out = out + bias.reshape(1, h, 1)
     if activation is not None:
-        out = _expl_silu(out)                         # ★显式✓★ Sigmoid + Mul ✓（避开融合 ✗）
+        out = F.silu(out)                              # Sigmoid + Mul ✓
     return out.to(hidden_states.dtype)
 
 
