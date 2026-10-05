@@ -123,8 +123,10 @@ def main() -> int:
         first = torch.ones(b, s, dtype=torch.int64)
         first_name = "input_ids"
     attention_mask = torch.ones(b, 1, s, kv, dtype=torch.float32)
-    position_ids = torch.arange(s).unsqueeze(0).expand(b, s)      # ★2 维✓★（文本 M-RoPE 三段相同 ✓）
-    pos_new = torch.arange(s, dtype=torch.int64)
+    position_ids = torch.arange(s, dtype=torch.int32).unsqueeze(0).expand(b, s)   # ★INT32✓★
+    # ★INT32★：官方 omg_convert.py 注释明确"position_ids 是 INT32" ✓
+    #   （用 INT64 时引擎/DDK 报 "param[size] < dataSize" ✗ —— 8B vs 4B ✓ §87 假设 A）
+    pos_new = torch.arange(s, dtype=torch.int32)
     inputs = [first, attention_mask, position_ids, pos_new]
     in_names = [first_name, "attention_mask", "position_ids", "new_kv_cache_pos"]
     out_names = ["hidden_states" if args.no_embed_head else "lm_logits"]   # ★名字要对上★ ✓
@@ -133,12 +135,18 @@ def main() -> int:
             inputs.append(torch.zeros(kv, kv_heads, b, hd))
             inputs.append(torch.zeros(kv, kv_heads, b, hd))
         else:
-            # ★线性层的状态也用【官方 KV 形状】的缓冲★ ✗✗（§73）
-            #   原因：引擎按官方约定给每层分配 [kv_max, kv_heads, B, head_dim] ✓，
-            #   尺寸对不上就会 CPUCL 报 "param[size] is less than[dataSize]" ✗（§72）
-            #   内部只用到缓冲的前一小段 ✓（1 维切片存取 ✓）
-            inputs.append(torch.zeros(kv, kv_heads, b, hd))
-            inputs.append(torch.zeros(kv, kv_heads, b, hd))
+            # ★回退 §73：线性层用【自然形状】的状态✓★
+            #   （§89 已证 hiai 引擎路线走不通 ⇒ 当初为迁就引擎的 KV 形状缓冲只剩副作用 ✗：
+            #    它引入了 1 维/2 维切片 ✗，NPUCL 一直在提示，1 层版甚至编不过 ✓）
+            ksize = getattr(tc, "linear_conv_kernel_dim", 4)
+            n_k = getattr(tc, "linear_num_key_heads", heads)
+            n_v = getattr(tc, "linear_num_value_heads", heads)
+            d_k = getattr(tc, "linear_key_head_dim", hd)
+            d_v = getattr(tc, "linear_value_head_dim", hd)
+            conv_dim = 2 * n_k * d_k + n_v * d_v
+            inputs.append(torch.zeros(b, conv_dim, max(ksize - 1, 0)))     # 卷积窗口 ✓
+            inputs.append(torch.zeros(b, n_v, d_k, d_v))                   # 递归状态 ✓
+            print("  线性层状态：conv[%d,%d,%d] · rec[%d,%d,%d,%d]" % (b, conv_dim, max(ksize - 1, 0), b, n_v, d_k, d_v))
         in_names.extend([f"past_key_in{i}", f"past_value_in{i}"])
         out_names.extend([f"past_key{i}", f"past_value{i}"])
 

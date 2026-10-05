@@ -5335,3 +5335,55 @@ embed_scales:1,-1,1                ← ★官方图有这个输入✗★（我�
    b) 我们 3 维化改写引入的算子组合（Gather 换序 ✓ / 常量掩码 ✓ / Log+Min 的 Softplus ✓）
    c) 24 层里的 full_attention 部分（4 维转置+缓存移位 ✓）
 ```
+
+## 90. §73 回退完成 ✓ 但 1 层版仍编不过 ✗ —— 排除了"KV 形状缓冲"这个嫌疑 ✓，只剩算子层面
+
+### 90.1 回退内容（精确 ✓ 只回退状态形状 ✓ 保留其它）
+
+```
+① export_hiai_q35.py：线性层状态回到【自然形状】✓
+     旧（§73 ✗）：inputs.append(torch.zeros(kv, kv_heads, b, hd)) ×2（KV 形状缓冲 ✗）
+     新（回退 ✓）：conv = zeros(b, conv_dim, K-1) ✓ · rec = zeros(b, n_v, d_k, d_v) ✓
+     实测打印：★线性层状态：conv[1,6144,3] · rec[1,16,128,128] ✓★
+② npu_layers.py：删掉"从 KV 缓冲解包"与"打包回 KV 缓冲"两块 ✓
+     恢复 return out, new_conv, new_rec ✓（grep 确认无 flat_k / new_k_slot 残留 ✓）
+（§73 的其它产物保留：run_cycle.sh ✓ · _patch_statekv.py 留着做记录 ✓）
+```
+
+### 90.2 结果：1 层版仍 ★OMG rc=1 ✗★
+
+```
+导出 ✓ 235.3 MB · 输入 6 / 输出 3 ✓ · lower ✓
+⇒ ★OMG rc=1 ✗★（与回退前一样 ✓）⇒ "KV 形状缓冲导致"这个嫌疑被排除 ✗
+日志里唯一【非环境噪声】的错误线索：
+  W/AI_FMK: parseModuleNotFoundError: No module named 'te_fusion'
+  dlerror: libcustom_op.so … ✗
+  E/AI_INFRA omg.cpp BuildOfflineCompiledModel(114)::"ret == ge::SUCCESS" "false, return FAIL." ✗
+  ★"get opKernel of name FMK_CL failed!"✗★  ← 关键：某个算子拿不到 CL kernel ✗
+  （另外 librl_search.so / libai_npucore_generated.so 的 dlopen 失败是【环境噪声】✗
+    —— §89 的 tiny 模型在同一环境编译成功 ✓ 可证 ✓）
+  check_result.json 没有生成 ✗ ⇒ 失败发生在 pre-check 之前 ✓
+```
+
+### 90.3 现在有两个【不同】的问题（要分开打）
+
+```
+问题 A（1 层版 ✗）：OMG 编译就失败 ✗（FMK_CL kernel ✗）—— 24 层/4 层版反而能编过 ✓
+   ⇒ 说明是【单个线性层图里的某个构造】✗，与规模无关 ✓
+问题 B（4 层 / 24 层 ✗）：OMG 成功 ✓ 但 ★Init rc=1✗★ —— 需要找出哪个构造让 ModelManager 拒绝 ✓
+★判据工具已就位★：OMG rc（分钟级 ✓）+ runner Init rc（秒级 ✓）✓
+```
+
+### 90.4 下一步：★用 tiny 模型逐个验算子★（每个几秒 ✓ 极快 ✓）
+
+```
+把 1 层线性注意力图里的可疑算子树逐个做成 tiny 模型 ✓ 走同一流水线 ✓ 看 OMG rc：
+  ① Log + Min（我们 Softplus 的 lowering ✓）
+  ② Expand（ConstantOfShape 的 lowering ✓）
+  ③ Gather（3 维化改写的换序 ✓）
+  ④ Slice（1 维/3 维切片 ✓）
+  ⑤ Concat（缓存/窗口拼接 ✓）
+  ⑥ Conv1d 的等价实现（我们的卷积窗口拼接 ✓）
+  ⑦ 4 维张量上的乘加（rec 状态 ✓）
+⇒ 一旦定位到"哪个算子让 OMG 失败 ✗ / 哪个让 Init 失败 ✗"，就能在导出里绕开它 ✓
+```
