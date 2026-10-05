@@ -3843,3 +3843,40 @@ E/AI_NPUCL 统计（真实微型图 nat11）：
 验收判据不变：① 整模型对拍 argmax 一致 ✓ ② OMG 走到 NPUCL 时【零 E/AI_NPUCL】✓
   ③ converter(THIRDPARTY) → 设备 Build 0 / Predict 0 ✓
 ```
+
+## 58. 目标③ 收尾工程（1）：★全程 3 维的注意力★已写出，接近对拍
+
+### 58.1 为什么要重写注意力
+
+§57 实测：NPUCL 对 **4 维** 的 Slice/Reshape/ExpandDims 一律拒绝 ✗，而 qwen3_5 的注意力
+原本走 `[B,S,H,D] → transpose(1,2) → [B,H,S,D]` ✗ 全程 4 维 ✓（真实图里 18 处 4 维 Slice ✗）。
+
+### 58.2 新文件 `scripts/model-conversion/qwen38/npu_attention.py`（3 维版 ✓）
+
+```
+[batch, seq, H*D]  --reshape-->  [B, S*H, D]  --★常量索引 Gather★-->  [B, H*S, D]
+                   --reshape-->  [B*H, S, D]      （★等价于 4 维 transpose 的结果✓★）
+注意力：q @ kᵀ → [BH,S,S] ✓ → softmax ✓ → @ v → [BH,S,D] ✓ —— 全 3 维 ✓
+回来：逆索引 Gather 复原 ✓
+```
+**关键点**（都是实测踩出来的 ✓）：
+```
+① ★换序用常量索引的 Gather★：绕开 4 维 transpose/reshape ✓（Gather 单算子 toy 已验证可编 ✓）
+② ★q_proj 的输出布局是 [B,S,H,2*D]★ ⇒ 必须【在每个 head 的 2*D 块内部】切 Q/gate ✓
+   （直接切整段的前一半会得到完全不同的排布 ✗ —— 第一次就踩了这个 ✓ argmax 只有 0.875）
+③ ★partial_rotary_factor = 0.25★：只对 head_dim 的前 64 维做 RoPE ✓，其余原样透传 ✓
+   （rope = cat([rot*cos + rotate_half(rot)*sin, pass], -1) ✓ 全 3 维 ✓；与参考实现逐行一致 ✓）
+④ ★因果掩码不能漏★：我们导出时传的是全 1 mask ✓，参考实现内部会把它变成因果 mask ✓
+   ⇒ 3 维版必须自己加【常量上三角 -inf】✓（加了之后 argmax 0.875 → 0.9583 ✓）
+⑤ q_norm/k_norm 是【逐 head】的 ✓ ⇒ 必须在 split 之后套 ✓
+```
+
+### 58.3 当前对拍状态（还没过 ✗，但已很近）
+
+```
+单层全注意力微型模型（hidden 256 / 4 头 / kv 2 头 / seq 24）：
+   最大绝对差 3.047e-02 | 相对 1.689e-02 | ★argmax 一致率 0.9583（23/24）★
+   演进：0.8750（漏因果掩码 ✗）→ 0.9583（补上后 ✓）
+★下一步★：对 attention 内部【逐步数值对拍】（q / k / v / rope 后 / 概率 / 输出 ✓），
+   把剩下那一处差异钉死 ✓（怀疑：GQA 头顺序、或 mask 的具体形式、或 cos/sin 的广播维度）
+```
