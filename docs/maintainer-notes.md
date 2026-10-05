@@ -6161,3 +6161,51 @@ D 先把已完成成果归档（3 维化 + 数值对拍 + OMG 官方形态 + 单
    · ★重新 OMG 并数 model 关键字★ ✓ ⇒ 看子图数是否下降 ✓
 ③ 若 ORT 能过而 model 数下降 ⇒ 再用 runner 试 Init ✓ ⇒ 这大概率就是那条主线 ✓
 ```
+
+## 108. ★★★ 我们的图曾经是【非法 ONNX】★★★ —— 修好后 ONNXRuntime 第一次能加载 ✓（数值 nan 待修 ✗）
+
+### 108.1 一路挖出的类型问题（逐个修 ✓）
+
+```
+① onnx_lower.py 的 ConstantOfShape → Expand 降级：
+     val = float(...)                 # 强转 float32 ✓
+   ★但原输出的 value_info 仍声明 int64 ✗ ⇒ 图自相矛盾✗★
+   ⇒ 第一处：ONNXRuntime 报 "Type (int64) of output arg (/ConstantOfShape_output_0) … ≠ float" ✗
+② 修掉后暴露第二处：★Concat 混合类型✗★
+     "Type parameter (T) of Optype (Concat) bound to different types
+      (tensor(int64) and tensor(float)) in node (/Concat_1)" ✗
+   ⇒ 查图确认：`/Concat_1 ← Constant_2(INT64) + ConstantOfShape_output_0(FP32)` ✗
+                `/Concat_6 ← Constant_186(INT64) + ConstantOfShape_1_output_0(FP32)` ✗
+③ 于是新增 ★fix_mixed_dtypes★ pass（onnx_lower.py ✓，并在 lower_hiai.py 里调用 ✓）：
+     · 自己做一遍【类型传播】（initializer ✓ / Constant 的 value 属性 ✓ / Cast 的 to ✓ /
+       Expand·Reshape·Transpose 等一元/搬运算子继承输入 ✓ / 二元算子当输入同型时继承 ✓）
+       —— ★必须自己做✗★：因为①的清理把 value_info 删掉了 ✓ 光读它会得 0 ✓
+     · 对 Concat/Add/Mul/... 里"既有浮点又有整型"的，把整型输入接 Cast→FP32 ✓
+     · ★并【清空所有 value_info】✓★ —— 任何陈旧类型声明都会自相矛盾 ✗
+       （ONNX 允许没有 value_info ✓，ORT/OMG 都会自己推断 ✓）
+⇒ 实测：类型修正 2 处 ✓ ⇒ ★★ONNXRuntime 终于能加载了✓✓★★（此前一直直接拒收 ✗）
+★这条线索的意义★：图里长期存在【非法构造】✗ —— 而 OMG 一直容忍 ✓（所以能编过 ✓）
+   ⇒ ★DDK 的 ModelManager 按【声明类型】分配内存 ⇒ 与实际数据不符 ⇒
+      "param[size] is less than[dataSize]" ✗ —— 这正是我们追了十几轮的那个错✓★
+```
+
+### 108.2 但数值对拍出现 nan ✗（我引入的 ✓ 待修）
+
+```
+参考 (1,64,2048) | ORT (1,64,2048) ⇒ ★最大绝对差 nan✗★ · 参考量级 4.356
+最可能来源：我把 torch.where(up, -inf, d).exp() 改成 d.exp() * notup_f 时，
+   ★nan 来自 inf*0✗★（若 d 在 up 区域为正很大 ⇒ exp(d)=inf ⇒ inf*0=nan ✓）
+修法（保持等价且无 Select ✓）：
+   pw = (d - up_f * 1e4).exp()      # up 区域 ⇒ exp(-1e4)=0 ✓；非 up 区域 ⇒ 减 0 ⇒ exp(d) ✓
+   —— 用有限大数代替 -inf ✓ 既能置零又不会 inf*0 ✗
+★但也要先排除★：是不是 fix_mixed_dtypes 插入的 Cast、或我改的 lower 那里引入的 ✓
+   ⇒ 二分：只回退 where 改写（保留类型修复 ✓）⇒ 看 nan 是否消失 ✓
+```
+
+### 108.3 下一步
+
+```
+① 修 nan：先试 (d - up_f*1e4).exp() ✓；若仍有 ⇒ 二分回退我改的两处 where ✓
+② ★重新验证三件事★：argmax 1.0000 ✓ / OMG 编译 ✓ / ★model 子图数是否下降★ ✓
+③ 若子图数下降且 ORT 数值正确 ⇒ 用 runner 试 Init ✓ ⇒ 这是最强的一次冲刺 ✓
+```

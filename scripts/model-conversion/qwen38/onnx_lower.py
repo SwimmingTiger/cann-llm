@@ -222,8 +222,10 @@ def lower_model(model: onnx.ModelProto, kinds=None) -> dict:
     used2 = used | {i.name for i in g.initializer}
     new_nodes = []
     k = 0
+    _cog_outs = []                       # ★被替换掉的输出名（要清理它们的 value_info ✓）★
     for n in g.node:
         if n.op_type == "ConstantOfShape" and (_want is None or "ConstantOfShape" in _want):
+            _cog_outs.append(n.output[0])
             val = 0.0
             for attr in n.attribute:
                 if attr.name == "value":
@@ -243,7 +245,96 @@ def lower_model(model: onnx.ModelProto, kinds=None) -> dict:
         del g.node[:]
         g.node.extend(new_nodes)
         g.initializer.extend(new_inits)
+        # ★★ 同步清理被替换输出的 value_info ★★
+        #   为什么必须做：原 ConstantOfShape 的输出在 value_info 里可能声明为 int64 ✗，
+        #   而我们换成的 Expand（标量是 float32 ✓）输出是 float32 ✓ ⇒ 图里类型自相矛盾 ✗
+        #   ⇒ ONNXRuntime 直接拒收 ✗、DDK 会按错误声明分配内存 ⇒
+        #      "param[size] is less than[dataSize]" ✗（§107 实证 ✓）
+        stale = set(_cog_outs)
+        keep_vi = [vi for vi in g.value_info if vi.name not in stale]
+        del g.value_info[:]
+        g.value_info.extend(keep_vi)
     return counts
+
+
+
+def fix_mixed_dtypes(model):
+    """★类型一致性修正（§108）★：把"混合类型"的算术算子里的 int 输入 Cast 成 float32 ✓。
+
+    为什么必须做（实测 ✓）：
+      · 图里存在 Concat(int64 常量, float32 张量) ✗ —— 这是【非法 ONNX】✗
+      · ONNXRuntime 直接拒收 ✗；而 OMG 容忍 ✓（所以之前一直能编过 ✓）
+      · ★DDK 会按错误声明分配内存 ⇒ 报 "param[size] is less than[dataSize]"✗★
+        —— 这正是我们 §88~§107 一直在追的那个错 ✓
+    做法：对这些算子，凡是「输入里既有浮点又有整型」的，把整型输入接一个 Cast→FP32 ✓
+    （值域安全 ✓：我们图里的 int 都是小整数 / 索引 ✓ 远小于 2^24 ✓）
+    """
+    g = model.graph
+    NP = TensorProto
+    ty = {}
+    for vi in list(g.value_info) + list(g.input) + list(g.output):
+        ty[vi.name] = vi.type.tensor_type.elem_type
+    for ini in g.initializer:
+        ty[ini.name] = ini.data_type
+    # ★自己做一遍类型传播★（因为 lowering 已把陈旧 value_info 清掉 ✓ 不能只靠它 ✓）
+    for n in g.node:
+        if n.op_type == "Constant":
+            for a in n.attribute:
+                if a.name == "value":
+                    ty[n.output[0]] = a.t.data_type
+        elif n.op_type == "ConstantOfShape":
+            for a in n.attribute:
+                if a.name == "value":
+                    ty[n.output[0]] = a.t.data_type
+        elif n.op_type == "Cast":
+            for a in n.attribute:
+                if a.name == "to":
+                    ty[n.output[0]] = a.i
+        elif n.op_type in ("Expand", "Identity", "Reshape", "Squeeze", "Unsqueeze", "Transpose",
+                           "Slice", "Neg", "Abs", "Exp", "Log", "Sqrt", "Reciprocal", "Relu"):
+            t0 = ty.get(n.input[0], 0)
+            if t0:
+                ty[n.output[0]] = t0
+        elif n.op_type in ("Add", "Mul", "Sub", "Div", "Max", "Min", "Where", "Concat", "Pow"):
+            ts = [ty.get(i, 0) for i in n.input]
+            ts = [t for t in ts if t]
+            if ts and len(set(ts)) == 1:
+                ty[n.output[0]] = ts[0]
+    FLOATY = {NP.FLOAT, NP.FLOAT16, NP.DOUBLE}
+    INTY = {NP.INT64, NP.INT32, NP.INT8, NP.UINT8}
+    WATCH = {"Concat", "Add", "Mul", "Sub", "Div", "Max", "Min", "Where"}
+    out_nodes, n_fix = [], 0
+    for idx, n in enumerate(g.node):
+        if n.op_type in WATCH:
+            ts = [ty.get(i, 0) for i in n.input]
+            has_f = any(t in FLOATY for t in ts)
+            has_i = any(t in INTY for t in ts)
+            if has_f and has_i:
+                new_in = []
+                for i, t in zip(n.input, ts):
+                    if t in INTY:
+                        cname = "__castf_%d_%s" % (idx, i.replace("/", "_"))
+                        out_nodes.append(helper.make_node("Cast", [i], [cname],
+                                                          name=cname + "_node", to=int(NP.FLOAT)))
+                        new_in.append(cname)
+                        n_fix += 1
+                    else:
+                        new_in.append(i)
+                nn = helper.make_node(n.op_type, new_in, list(n.output), name=n.name)
+                nn.attribute.extend(n.attribute)
+                out_nodes.append(nn)
+                continue
+        out_nodes.append(n)
+    if n_fix:
+        del g.node[:]
+        g.node.extend(out_nodes)
+    # ★★★ 清空所有 value_info ★★★
+    #   为什么：lowering / Cast 插入之后，图里任何【陈旧的类型声明】都会造成自相矛盾 ✗
+    #   实测代价：ORT 加载直接失败 ✗、DDK 按错误声明分配内存 ⇒ "param[size] < dataSize" ✗
+    #   清掉是安全的 ✓：ONNX 允许没有 value_info ✓，ORT/OMG 都会自己做形状/类型推断 ✓
+    if len(g.value_info):
+        del g.value_info[:]
+    return n_fix
 
 
 def main():
