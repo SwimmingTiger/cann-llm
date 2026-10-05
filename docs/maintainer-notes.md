@@ -4042,3 +4042,57 @@ namespace hiai {
 ② 跑通后，按"自定状态接口"导出全 24 层图（input_ids/position_ids + 各层状态 → logits + 新状态 ✓）
    ⇒ OMG ⇒ .omc ⇒ 自带解码循环 ⇒ ★设备上聊天★ ✓
 ```
+
+## 62. DDK hiai C++ runner：编译跑通 ✓，但 `Build/RestoreFromFile` 还没走通
+
+### 62.1 已做出来的东西（`scripts/model-conversion/qwen38/hiai_runner/hiai_runner.cpp` ✓）
+
+```
+用官方 HiAIDemo/DDK_Demo/V2 的头文件 + lib64/libhiai.so（aarch64 ✓ 256 KB 薄壳 ✓）写了个 runner：
+  .om  → CreateModelBuilder()->Build(opts, name, path, built)      （DDK 的离线模型编译 ✓）
+  .omc → CreateBuiltModel()->RestoreFromFile(path)                  （引擎那种已编译模型 ✓）
+  打印 GetInputTensorDescs()/GetOutputTensorDescs()（真实 IO ✓）+ CheckCompatibility
+  CreateModelManager()->Init(opts, built, nullptr) → Run(inputs, outputs) ✓
+
+设备上用 OHOS clang 编译成功 ✓：
+  /data/service/hnp/bin/aarch64-unknown-linux-ohos-clang++ -std=c++11 -O2 -fPIC -Iinclude \
+     -DHAVE_PTHREAD -DOHOS … hiai_runner.cpp lib64/libhiai.so -ldl      ⇒ ★42 KB 产物 ✓★
+```
+
+### 62.2 ★两条实测教训（很重要 ✓）★
+
+```
+① ★设备上不要设 LD_LIBRARY_PATH★ ✗✗
+   实测（同一个二进制、同一个目录）：
+     设了 LD_LIBRARY_PATH=$B/lib64:$B:/system/lib64/ndk:…  → "Error loading shared library
+        libhiai.so / libc++_shared.so" + 一堆 "symbol not found" ✗
+     不设任何环境变量                                        → ★正常运行 ✓★
+   ⇒ 设它反而把默认搜索路径顶掉 ✗（musl + OHOS 的行为 ✓）—— 这与我们之前跑 python 探针
+     的习惯相反 ✓，写脚本时要注意 ✓
+② OMG 的 --target 支持 om/omc/tiny/ispnn/security ✓（omg --help ✓）
+   ★我们两种都产出来了✓★：--target=omc ⇒ seg.omc 927 MB ✓；--target=om ⇒ seg.om 926 MB ✓
+```
+
+### 62.3 当前卡点：`Build` 段错误 / `RestoreFromFile` rc=1
+
+```
+· CreateBuiltModel()->RestoreFromFile("<x>.omc")  → rc=1（返回 1 ✓ 不是崩溃 ✓）
+    ⇒ .omc 是【LLM 引擎】用的格式 ✓，DDK builder 要的是 .om ✓（语义对得上 ✓）
+· CreateModelBuilder()->Build(默认 ModelBuildOptions, "<x>.om") → ★rc=1 ✗★
+· ★对照实验★：拿 demo 自带的 540p_544x960.om（20 KB ✓）跑同一个 runner
+    ⇒ ★exit=139（段错误）✗★ ⇒ 说明是【我们的用法/初始化不完整】✗，不是我们的 .om 的问题 ✓
+ModelBuildOptions 字段（model_builder_types.h ✓）：
+    inputTensorDescs · formatMode(USE_NCHW) · precisionMode(FP32) · dynamicShapeConfig
+    · modelDeviceConfig · tuningStrategy(OFF) · estimatedOutputSize · quantizeConfig
+    ⇒ LLM 显然要改成 FP16 / ND / 指定 device ✓（默认值不适合 ✓）
+```
+
+### 62.4 下一步
+
+```
+① 把 demo 的 main.cpp 也拿来看（我们只搬了 load_and_run.cpp ✗）——
+   看它是否要先做 DDK 初始化（如环境/设备注册 ✓）、以及 Build 的正确选项 ✓
+② 读 HiAIDemo 仓库的说明（HMOSNextDemo/*/OHOS_DDK Demo说明.pdf ✓ 之前搜到过）
+③ 若 DDK C++ 这条需要 app 沙箱/权限 ✗ ⇒ 回到【LLM 引擎 + 模型包】那条（§47 已跑通 6.0 tok/s ✓），
+   它的模型包形态我们全都有 ✓（§60 ✓）
+```
