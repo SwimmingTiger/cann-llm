@@ -4412,3 +4412,57 @@ failed to infer constNodeGraph graph shape ✗
   · 思路 B：用常量索引的 Gather 完成"右移+拼接" ✓（§58 的老招 ✓，全 3 维 ✓）
   · 思路 C：看官方 dopt 的 modeling_qwen3 里缓存怎么更新的 ✓（照抄最稳 ✓）
 ```
+
+## 70. ★★★★★★ OMG 编译成功：全 24 层 Qwen3.8 → seg.omc 2.75 GB ★★★★★★（目标② 达成）
+
+```
+★OMG generate offline model success（成功标志 = 1 ✓）
+★产物 seg.omc = 2753.6 MB（2.75 GB）· 零缺失算子 ✓★
+（已取回设备：/storage/.../q38_full.omc 2753.6 MB ✓，34 秒传完 ✓）
+```
+
+### 70.1 通往成功的完整根因链（本轮全部走完 ✓）
+
+```
+① 4 维 Slice 被 NPUCL 拒 ✗（"strided_slice_get_format IsDimThreeNdCase inputDim.size() 4" ✓）
+   ⇒ 把 KV 缓存的【移位】挪到 3 维做 ✓（边界仍是官方 4 维布局 ✓，
+     进层立刻转 [B*kv_heads, hd, kv_max] ✓，在 3 维里 cat([新 K, 旧缓存[S:]]) ✓）
+   ★关键认知★：4 维的 Transpose/Reshape 是【允许】的 ✓（官方 dopt 实现同样用 4 维转置 ✓），
+                 只有 4 维【Slice】不行 ✗
+② RoPE 的 FloorMod（int32）✗ ⇒ 换纯浮点 RoPE ✓（§69 ✓ 差 0.0）
+③ GatherV2D 的 INT64 数据 ✗ ⇒ position_ids 声明成 2 维 ✓（文本 M-RoPE 三段相同 ✓）
+④ ★最后一道：权重 5.49 GB 触发 uint32 溢出✗★
+     "save buffer error: buffer size:5493460928, offset:2611989, totalSize:5350433" ✗
+     "set weight partition failed!" ✗  —— 编译【全部完成】了，只在【保存】时炸 ✓
+   ⇒ 用仓库的 scripts/model-conversion/onnx_weights_to_fp16.py ✓：
+       权重转 fp16 186 个（原 5,490,868,224 字节 ✓）· 就地插 Cast 282 个 ✓
+       ⇒ 5.49 GB → ★2.75 GB（< 4 GB ✓）★
+   ⇒ ★OMG 立刻成功✓★
+   ★这条正好解释了 §47 官方配方为什么必须量化（dopt W4）✓★
+```
+
+### 70.2 各阶段实测数字（全过程 ✓）
+
+```
+层型：线性注意力 18 层（idx 0,1,2,4,…）· 全注意力 6 层（idx 3,7,11,15,19,23）✓
+图：52 个输入（input_embed/attention_mask/position_ids/new_kv_cache_pos + 每层两路状态 ✓）
+    49 个输出（hidden_states + 每层两路新状态 ✓）· 30 种算子 · 零不支持 ✓
+权重：fp32 5.49 GB → fp16 2.75 GB ✓
+omc：2.75 GB ✓（单文件 ✓）
+```
+
+### 70.3 下一步（目标③ ④）
+
+```
+③ 按 §47/models/model_qwen2_1p5b_w4_2048 的形态组装模型包：
+   <name>.omc（✓ 已有）· <name>.json（llm_config，照 W4 包改维度：hidden 2048 ✓
+   num_hidden_layers 24 ✓ num_attention_heads 8? kv_heads 2 ✓ head_dim 256 ✓
+   model_type "qwen3_5" ✓ rope_theta 1e7 ✓）· api_config.json（采样/停止符 ✓）
+   · embedding_weights(int8) + embedding_dequant_scale ✓（从 HF 词表造 ✓）
+   · tokenizer.json ✓（HF 目录里就有 ✓）· executor.json / context.json ✓
+④ 设备上 src/cann_llm/backends/hiai.py 加载 ⇒ ★聊天★ ✓
+   （先试：RestoreFromFile 对 .omc 返回 1 ✗ 是预期的 ✓ —— .omc 是引擎格式 ✓；
+     引擎接口由 api_config.json 的 modelPath 指到 omc ✓）
+※ 解码循环还没验：现在的图是 prefill 形状（S=64 ✓）—— 引擎按 prefill_len/decode_len 驱动 ✓，
+   若它按 S=1 跑 decode ✗ 则要再导一版 S=1 的图（或做动态形状 ✓）
+```

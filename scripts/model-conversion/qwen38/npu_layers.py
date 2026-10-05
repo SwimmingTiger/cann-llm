@@ -61,30 +61,39 @@ def full_attention_layer(layer, hidden, mask, cos, sin, past_key, past_value, kv
     k = att.k_norm(k)
     q, k = A._apply_rope_3d(q, k, cos, sin)                    # partial rope 0.25 ✓
 
-    # ★顺序很关键★：先把本步的新 K/V 写进缓存（官方语义：past_key_in{i} 是本步【之前】的缓存 ✓），
-    #   再在【更新后的缓存】上做注意力 ✓ —— 否则本步的 token 根本参与不了注意力 ✗（§65 实测踩到 ✓）
-    new_k = torch.cat([k.reshape(b, kv_heads, s, hd).permute(2, 1, 0, 3), past_key[s:]], dim=0)
-    new_v = torch.cat([v.reshape(b, kv_heads, s, hd).permute(2, 1, 0, 3), past_value[s:]], dim=0)
+    # ★顺序★：先更新缓存（官方语义：past_key_in{i} 是本步【之前】的缓存 ✓），再在更新后的
+    #   缓存上做注意力 ✓ —— 否则本步 token 不参与注意力 ✗（§65 踩过 ✓）
+    #
+    # ★移位必须在 3 维里做✗✗★：NPUCL 拒收 4 维 Slice（strided_slice ✗，§69）；
+    #   而 4 维的 Transpose/Reshape 是通过的 ✓（官方 dopt 实现也是 4 维转置 ✓）
+    #   这里统一转到 [B*kv_heads, hd, kv_max] 的 3 维布局做移位 ✓
+    ck = past_key.permute(2, 1, 0, 3).reshape(b * kv_heads, kv_max, hd).permute(0, 2, 1)   # [BH,hd,kv] ✓
+    cv = past_value.permute(2, 1, 0, 3).reshape(b * kv_heads, kv_max, hd).permute(0, 2, 1)
+    k_new = k.permute(0, 2, 1) if False else k.reshape(b * kv_heads, s, hd).permute(0, 2, 1)   # [BH,hd,S] ✓
+    v_new = v.reshape(b * kv_heads, s, hd).permute(0, 2, 1)
+    new_ck = torch.cat([k_new, ck[:, :, s:]], dim=2)        # ★3 维切片+Concat✓★ 新 token 在前 ✓
+    new_cv = torch.cat([v_new, cv[:, :, s:]], dim=2)
+    # ★输出缓存（kv_heads 份 ✓，用 repeat 之前的值 ✓）
+    out_k = new_ck.reshape(b, kv_heads, hd, kv_max).permute(3, 1, 0, 2)   # [kv,B? 官方布局 ✓]
+    out_v = new_cv.reshape(b, kv_heads, hd, kv_max).permute(3, 1, 0, 2)
 
-    # 缓存边界：官方布局 [kv_max, kv_heads, B, hd] ➜ 3 维 [B*kv_heads, kv_max, hd] ✓
-    ck = new_k.permute(2, 1, 0, 3).reshape(b * kv_heads, kv_max, hd)
-    cv = new_v.permute(2, 1, 0, 3).reshape(b * kv_heads, kv_max, hd)
-
-    if kv_heads != heads:                                      # GQA ✓
+    # 注意力（GQA 时把缓存复制到 heads 份 ✓）
+    ck_att, cv_att = new_ck, new_cv
+    if kv_heads != heads:
         rep = heads // kv_heads
-        ck = ck.repeat_interleave(rep, dim=0)
-        cv = cv.repeat_interleave(rep, dim=0)
-
-    scores = (q @ ck.transpose(-1, -2)) * scale                # [B*H, S, kv_max] ✓ 3 维
+        ck_att = ck_att.repeat_interleave(rep, dim=0)
+        cv_att = cv_att.repeat_interleave(rep, dim=0)
+    q3 = q.reshape(b * heads, s, hd)                        # [BH, S, hd] ✓
+    scores = (q3 @ ck_att) * scale                          # [BH, S, kv_max] ✓ 3 维
     if mask is not None:
-        m = mask.reshape(b, s, kv_max)                         # [B,S,kv] ✓
+        m = mask.reshape(b, s, kv_max)                      # [B,S,kv] ✓
         scores = scores + m
     probs = torch.softmax(scores, dim=-1)
-    out = probs @ cv                                            # [B*H, S, hd] ✓
+    out = probs @ cv_att.transpose(-1, -2)                  # [BH, S, hd] ✓
     out = _from_heads(out, b, s, heads, hd)
     out = att.o_proj(out * torch.sigmoid(gate))
 
-    return out, new_k, new_v
+    return out, out_k, out_v
 
 
 # ---------------------------------------------------------------- 线性注意力层（卷积窗口 + 递归状态）
