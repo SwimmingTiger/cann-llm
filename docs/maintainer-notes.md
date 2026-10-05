@@ -5903,3 +5903,49 @@ liveh    ★rc=1✗★   串联 + 保持对 h 的引用（o0 + h*0 ✓，数值�
    ⇒ 说明它们【虽然权重合并了，子图数仍然多】✗（合并的只是权重文件 ✓ 不是子图 ✓）
    ⇒ 更要用路线甲把"子图从哪来"搞清 ✓
 ```
+
+## 103. ★★★ 找到 op 级根因：图里有【2 维张量】⇒ NPU kernel 不支持 ⇒ 回退 CPU 子图 ⇒ 子图爆炸 ⇒ Init 失败 ★★★
+
+### 103.1 单层 `s4_full` 日志里【全部】"不支持"的算子（去重 ✓）
+
+```
+op name [/Where]   type [Select] is not supported in npucl store [fe_lib] / [elementary_lib] ✗
+op name [/Where_1] type [Select] is not supported in npucl store [fe_lib] / [elementary_lib] ✗
+op name [/Sub]     type [Sub]    is not supported in npucl store [fe_lib] / [elementary_lib] ✗
+op name [/Mul_9]   type [Mul]    is not supported in npucl store [fe_lib] / [elementary_lib] ✗
+op name [/Mul_14]  type [Mul]    is not supported …
+op name [/Mul_15]  type [Mul]    is not supported …
+★其他关键线索★：
+  "check dimCnt failed, ★2 != 3★" ✗
+  "check dimCnt failed, ★2 != 0★" ✗
+  "get opKernel of name FMK_CL failed" ×2 ✗
+```
+
+### 103.2 ★结论（这是整条链的解释 ✓）★
+
+```
+★Mul 这种最基础的算子"不支持"是不可能的✗ —— 真正的原因是【张量维度不对】✗★
+   ⇒ NPU kernel 期望 ★3 维★ ✓，而我们的图里有些张量是 ★2 维★ ✗
+   ⇒ 于是 Select / Sub / Mul 这些算子都无法在 NPU 上执行 ✗ ⇒ ★回退到 CPU✗★
+   ⇒ ★每个回退点很可能就是一个独立的子图✗★
+⇒ 数值上完全吻合：
+   · 单层（少量 2 维张量 ✓）：7 个子图 ✓ ⇒ Init rc=0 ✓（在上限内 ✓）
+   · 两层串联：13 个子图 ✗ ⇒ Init rc=1 ✗（超上限 ✓）
+   · 24 层：≈ 6×24 ≈ 150 个子图 ✗ ⇒ ★必然失败✗★
+   · 官方 Qwen3-8B：1 个子图 ✓ ⇒ 全部算子 3 维/NPU 支持 ✓ ⇒ 成功 ✓
+★且这解释了为什么"改写 Sub"没用✗★：Sub 本身不是问题 ✓，★2 维才是✗★
+```
+
+### 103.3 2 维张量从哪里来（下一步要改的地方）
+
+```
+已定位的线索（来自 §94 的 shape_inference ✓）：
+  delta 探针里 /Sub_1 ← Slice [16,1] ✗  ★这是 2 维★ ✓
+  /Sub ← Unsqueeze [16,8,1] | [16,1,8] ✓ 这是 3 维 ✓（所以它的问题另有原因 ✓）
+⇒ 嫌疑点（都在 npu_gated_delta.py ✓）：
+  · 掩码/索引相关的 [bh, s] · [bh, 1] 这种 2 维中间量 ✓
+  · A_log / dt_bias 之类的参数展开 ✓
+  · 前向代入解三角矩阵时用到的 2 维列向量 ✓
+★改法★：把每个 2 维张量统一 ★unsqueeze 成 3 维★ ✓（用前 unsqueeze(0) ✓ 用完 squeeze ✓）
+   —— 保证图里【所有】张量要么 1 维要么 3 维 ✓ 绝不出 2 维 ✗
+```
