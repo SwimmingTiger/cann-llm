@@ -37,6 +37,7 @@ import torch.nn.functional as F
 __all__ = [
     "npu_causal_conv1d_fn", "npu_chunk_gated_delta_rule",
     "install", "uninstall", "tril_ones", "strict_lower", "strict_upper",
+    "strict_lower_f", "strict_upper_f",
 ]
 
 # ---------------------------------------------------------------- 常量（编译期固定 ✓）
@@ -58,6 +59,24 @@ def tril_ones(c: int, dtype: torch.dtype, device) -> torch.Tensor:
         arr = np.triu(np.ones((c, c), dtype=np.float32))
         _MASK_CACHE[key] = torch.from_numpy(arr).to(device=device, dtype=dtype)
     return _MASK_CACHE[key]
+
+
+def _mask_f(arr: "np.ndarray", key, device) -> torch.Tensor:
+    """★float 常量掩码★（numpy 直接造 ✓ 避免 bool→float 的 Cast ✗ —— §107 踩到类型错 ✓）。"""
+    k = (key, arr.shape[0], str(device))
+    if k not in _MASK_CACHE:
+        _MASK_CACHE[k] = torch.from_numpy(arr.astype(np.float32)).to(device=device)
+    return _MASK_CACHE[k]
+
+
+def strict_upper_f(c: int, device) -> torch.Tensor:
+    """严格上三角（★float32 常量✓★）。"""
+    return _mask_f(np.triu(np.ones((c, c), dtype=np.float32), 1), "upf", device)
+
+
+def strict_lower_f(c: int, device) -> torch.Tensor:
+    """严格下三角（★float32 常量✓★）。"""
+    return _mask_f(np.tril(np.ones((c, c), dtype=np.float32), -1), "lof", device)
 
 
 def strict_lower(c: int, device) -> torch.Tensor:
@@ -247,13 +266,19 @@ def npu_chunk_gated_delta_rule(
         qi, ki, vi = q[:, sl, :], k[:, sl, :], v[:, sl, :]   # [BH, C, D] ✓ 3 维
         bi, di = b[:, sl], dec[:, sl]                        # [BH, C] ✓ 2 维
         cum = di @ cum_ones                                  # [BH, C] ✓ 前缀和（免 CumSum ✓）
-        pw = torch.where(up, neg_inf, cum.unsqueeze(2) - cum.unsqueeze(1)).exp()   # [BH,C,C] ✓
+        # ★不用 Select✗★（NPU 库里没实现 ✓ §106）：where(up,-inf,d).exp() 等价于
+        #   d.exp() * (1-up_f) ✓ —— up 处置 0 ✓；d = cum_i - cum_j ≤ 0 ✓ 不会溢出 ✓
+        up_f = strict_upper_f(c, q.device)                  # ★float 常量✓★
+        notup_f = _mask_f(np.triu(np.ones((c, c), dtype=np.float32), 1) * (-1.0) + 1.0, "notupf", q.device)
+        pw = (cum.unsqueeze(2) - cum.unsqueeze(1)).exp() * notup_f          # [BH,C,C] ✓
         v_beta = vi * bi.unsqueeze(-1)
         k_beta = ki * bi.unsqueeze(-1)
         ut = (k_beta @ ki.transpose(-1, -2)) * pw            # [BH,C,C] ✓
         intra = (qi @ ki.transpose(-1, -2)) * pw             # [BH,C,C] ✓
         dkb = k_beta * cum.exp().unsqueeze(-1)               # [BH,C,D] ✓
-        lower = torch.where(lo, -ut, zero)                   # = -(ut.tril(-1)) ✓（免 Trilu ✓）
+        # ★同样改成算术✓★：where(lo, -ut, 0) = (lo_f * ut) * (-1) ✓
+        lo_f = strict_lower_f(c, q.device)                  # ★float 常量✓★
+        lower = (lo_f * ut) * (-1.0)                        # = -(ut.tril(-1)) ✓（免 Trilu ✓）
         new_values = _solve_unit_lower(lower, v_beta, block=16, c=c)     # [BH,C,Dv] ✓
         k_cumdecay = _solve_unit_lower(lower, dkb, block=16, c=c)        # [BH,C,Dk] ✓
         qi2 = qi * cum.exp().unsqueeze(-1)

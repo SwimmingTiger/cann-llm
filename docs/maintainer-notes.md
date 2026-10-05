@@ -6109,3 +6109,55 @@ B 换执行路径：
 C 向厂商/文档确认 ModelManager::Init 是否有【子图/张量数上限】⇒ 最快拿到确定性答案 ✓
 D 先把已完成成果归档（3 维化 + 数值对拍 + OMG 官方形态 + 单层 Init ✓）✓
 ```
+
+## 107. ★★★ 拿到用户要的硬证（子图数 ✓）并抓到一个真 bug：降级后的【类型声明不同步】★★★
+
+### 107.1 ★硬证：omc 里的 "model" 关键字计数 = 子图数★
+
+```
+用 strings 统计 omc 里 "model" 关键字的出现次数（与子图数一一对应 ✓）：
+   官方 Qwen3-8B（36 层 · 能跑 ✓）      model=★1★
+   单层 s4_full（Init rc=0 ✓）          model=★7★
+   ★两层串联（Init rc=1 ✗）              model=★13★★
+   （同时 SubGraph/graph 计数也同步增长：20/15 → 220/185 → 459/387 ✓）
+⇒ ★★每层 delta-rule 层贡献 ≈6 个子图 ⇒ 24 层 ≈150 个 ✗
+   ⇒ ★远超 DDK 能力（官方只要 1 个 ✓）⇒ ModelManager::Init 必然失败✗✓★★
+   ⇒ 这坐实了"子图数上限"这条主线 ✓，也解释了单层能过（7 ✓在限内✓）两层挂（13 ✗）
+```
+
+### 107.2 ★顺着"减少子图"改，撞到一个真 bug★
+
+```
+① 从日志拿到当前"不支持"清单（修掉 RealDiv 之后 ✓）：
+     ★Select（/Where · /Where_1）×2 ✗ · Sub ✗ · Mul（/Mul_7 · /Mul_9 …）✗★
+② 定位来源：★Select 来自【我们自己】delta rule 里的 torch.where✗★（三处 ✓）：
+     L142 freqs_thw = torch.where(mask, freq[dim], freqs_thw)     （M-RoPE 文本路径 ✓）
+     L250 pw = torch.where(up, neg_inf, cum.unsqueeze(2)-cum.unsqueeze(1)).exp()
+     L256 lower = torch.where(lo, -ut, zero)
+③ 把后两处改成【纯算术】✓（掩码是常量 ⇒ 预计算 1-mask ✓ 全程无 Select/Sub ✓）：
+     pw = (cum.unsqueeze(2)-cum.unsqueeze(1)).exp() * notup_f     （up 处置 0 ✓；d≤0 不溢出 ✓）
+     lower = (lo_f * ut) * (-1.0)
+   并加 strict_upper_f / strict_lower_f（★float32 numpy 常量✓★ 免 Cast ✗）
+④ ★于是撞到这个 bug★：lower 之后的 ONNX ★ONNXRuntime 拒绝加载✗★：
+     "Type (tensor(int64)) of output arg (/ConstantOfShape_output_0) of node
+      (/ConstantOfShape_expand) does not match expected type (tensor(float))" ✗
+   ⇒ ★根因在 onnx_lower.py 的 ConstantOfShape → Expand 降级✗★：
+        val = float(...)                        # ★强转 float，丢掉原 dtype✗★
+        Expand(scalar, shape)                   # 新输出是 float32 ✓
+     ★但原 ConstantOfShape 输出在 value_info 里声明的类型（int64 ✗）没有同步更新✗★
+     ⇒ 图里类型自相矛盾 ✓ ⇒ ORT 拒收 ✗，而 OMG 容忍 ✓（所以一直能编过 ✓）
+     ⇒ ★DDK 按【声明类型】分配内存 ⇒ 与实际数据不符 ⇒ 正是
+        "param[size] is less than[dataSize]" 这类报错✗✓★★
+```
+
+### 107.3 下一步（很可能就是最后一关 ✓）
+
+```
+① ★修 onnx_lower.py：降级时同步更新 value_info 的 dtype★
+   （把被替换节点的输出类型改成新节点真实的输出类型 ✓ 或干脆删掉对应 value_info ✓）
+② 修完立刻验证三件事：
+   · ★ONNXRuntime 能加载★ ✓（之前直接拒收 ✗ —— 说明图里有硬伤 ✓）
+   · ★数值对拍仍是 argmax 1.0000★ ✓
+   · ★重新 OMG 并数 model 关键字★ ✓ ⇒ 看子图数是否下降 ✓
+③ 若 ORT 能过而 model 数下降 ⇒ 再用 runner 试 Init ✓ ⇒ 这大概率就是那条主线 ✓
+```
