@@ -4681,3 +4681,44 @@ fp16 图（q35_hiai_fp16.onnx ✓ 2.75 GB 权重）→ ★rc=0 · 成功标志=1
 ③ 若 dopt 实在跑不动 ⇒ 退路：用我们的图 + 手工做一个 compress_conf ✓
    （至少先拿到外置权重的形态 ✓ 再看引擎是否接受 ✓）
 ```
+
+## 76. dopt(ONNX 版) 链路搭好了 ✓ 但撞上 >2 GB 硬限制 ✗ ⇒ 转 dopt(pytorch 版，即 §47 那条)
+
+### 76.1 本轮搭好的部分（都可复用 ✓）
+
+```
+scripts/model-conversion/qwen38/run_dopt_q38.sh ✓
+  ① 造校准 bin：用仓库的 int8/make_calib_bin.py ✓（★magic 510/610 + shape + float32 裸数据★ ✓）
+     52 个输入各一个 .bin ✓（全 float32 ✓ 形状取自图 ✓）
+  ② make_cal_conf.py ✓ ⇒ ★51 个 preprocess_parameter 块★ ✓（实测输出 ✓）
+  ③ run_dopt.sh（DOPT_PY=~/q38env/bin/python ✓ python3.10 ✓ · DOPT_DIR=~/ddk/.../dopt_onnx_py3 ✓）
+一路踩掉的坑：
+  · dopt 需要 cv2 ✗ ⇒ uv pip install --python ~/q38env/bin/python opencv-python-headless ✓
+    （venv 里没有 pip ✗，必须用 uv ✓）
+  · run_dopt.sh 会 cd 到 dopt 目录 ✗ ⇒ MODEL/CAL_CONF/OUT/CONF ★必须绝对路径★ ✓
+```
+
+### 76.2 卡点：ORT 报 `narrowing_error` ✗（>2 GB 模型的已知限制 ✓）
+
+```
+File "onnxruntime_inference_collection.py", line 575, in _create_inference_session
+    sess = C.InferenceSession(session_options, self._model_bytes, False, ...)
+RuntimeError: narrowing_error ✗
+⇒ dopt 是用【把模型序列化成 bytes 再建 session】的方式 ✗（_model_bytes ✓）
+  我们的图 5.49 GB 权重 ✗ ⇒ protobuf/尺寸在 32 位处溢出 ⇒ narrowing_error ✓
+★这是 dopt 内部实现决定的 ✗，不是我们图的问题 ✓★
+```
+
+### 76.3 下一步：转 dopt(pytorch 版) —— 也就是 §47 那条完整验证过的链路 ✓
+
+```
+① 用 ~/ddk/tools/tools_dopt/dopt_pytorch_py3/dopt/dopt_lm/opt_main.py ✓
+   （§47 实测过 ✓ 三阶段 ~5 分钟 ✓ 产物 fake_quant_weight.pth + quant_params_file ✓）
+   显存：2B 在 bf16 下约 3.8 GB ✓ ⇒ ★RTX 2060 6 GB 应该装得下★ ✓（§47 是 1.5B/12GB ✓）
+② 把 fake_quant_weight.pth 灌回我们的 HF 模型 ✓（load_state_dict ✓）
+   ⇒ 再用 export_hiai_q35.py 导出 ✓（权重是"假量化"过的 fp32 ✓）
+③ OMG 时加 --compress_conf ✓ ⇒ ★产出的就是 omc + SubGraph_0.weight 的官方形态★ ✓
+   （compress 会把权重压到 int4/int8 ✓ ⇒ 同时绕开 4 GB 保存溢出 ✓）
+④ 组装模型包 → 引擎加载 ⇒ 聊天 ✓
+※ 备选：若 dopt-pytorch 也跑不动 ✓ ⇒ 退一步自己造 compress_conf ✓（格式可从官方样例反推 ✓）
+```
