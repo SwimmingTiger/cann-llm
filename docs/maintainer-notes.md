@@ -3214,3 +3214,50 @@ torch.onnx.export(m, (ids, pos), "x.onnx", dynamo=True, opset_version=18, ...)
   （本机已编译：CPU 正确 ✓；参考速率 Qwen2.5-1.5B Q4_K_M = 1.62 tok/s ⇒ 2.6B ≈ 1 tok/s ✗）
 · 另注：这类"Qwen3.8 蒸馏"多半不是 Qwen3.8 架构 ✗（本例基座是 LFM2.5 ✓，标签 lfm2.5 ✓）
 ```
+
+## 46. ★修正 §43 的一个错误结论★：OMG 没有"模型大小上限"——大模型走的是【外置权重】形态
+
+§43 里我写"OMG 对 ≥~2 GB 的 ONNX 会静默截断 ✗" —— **这是错的** ✗。
+证据（用户一问点破 ✓）：`models/Qwen3-8B` 的 `SubGraph_0.weight` 有 **4.39 GB** ✓，
+而它正是 OMG 那条链转出来的 ✓ —— 8B 都转得出，哪来的 2 GB 上限 ✗。
+
+### 46.1 真相
+
+```
+OMG 的输出有两种形态：
+  · 小模型：权重【内联】进 .omc ✓（omc 文件本身就很大）
+  · 大模型：权重【外置】成独立文件 ✓，.omc 只剩图（可以只有几百 KB）
+    - Qwen3-8B：SubGraph_0.weight 4.39 GB + omc.omc 6.8 MB ✓
+    - 我那次 12 层段：q/seg.omc 916 KB + ★152 个 onnx__MatMul_* 外置文件★ ✓
+⇒ ★"omc 只有 916 KB" 不是失败，是"图与外置权重分离"★ ✓（我误判成空壳 ✗）
+```
+
+同理，**torch 导出的大 ONNX 也会把权重外置** ✓：
+``` 
+g4_export.py 的 12 层导出留下 ★seg.onnx 218 KB + 152 个 onnx__* 文件★ ✓
+（命名规则：onnx::MatMul_2081 → onnx__MatMul_2081 ✓）
+⇒ 只搬 seg.onnx 会让 OMG 报 ParseOriginONNX2IrGraph FAIL ✗（我踩过 ✓）
+```
+
+### 46.2 我真正卡住的地方（与"大小"无关）
+
+```
+① use 外置数据：必须把 .onnx 与它的 onnx__* 外置文件【一起】用 ✓（OMG 按 onnx 所在目录找 ✓）
+② OMG 产物 → converter_lite --fmk=THIRDPARTY：转换器要的是【聚合权重】形态
+   （官方产物就叫 SubGraph_0.weight ✓，`g4_all16.sh` 的 conv() 正是这么拷的 ✓）
+   而 OMG 在 cwd 里散落的逐张量 onnx__* 形态 ✗ 转换器不吃 ✗ ⇒ 我得到的 seg.ms 只有 918 KB ✗
+   ★控制这个的开关是 OMG 的 `--weight_merge`★（help: "weight data will be merged in IR model" ✓）
+   —— 我试了两次都还没配对（一次参数出错 ✗、一次外置数据没带全 ✗），★待续★
+```
+
+### 46.3 结论修正
+
+```
+· ✗ 旧结论："OMG 有 ~2 GB 上限 ⇒ 12 层段转不出"
+· ✓ 新结论："OMG 对 12 层段没问题 ⇒ 只是【外置权重形态】要与转换器对齐"
+  ⇒ ★"三段（12/12/11）"在 OMG 路上并未被证伪★ —— 之前 §43 的否定只对
+    "int8/ONNX 直转（19× 主机内存 ✗）"与"fp16 I/O（设备 Build -1 ✗）"这两条成立 ✓
+· 最靠谱的对齐方式：照【官方 dopt 流程】（它产出的就是 converter 友好的
+  SubGraph_0.weight 形态 ✓ —— Qwen3-8B 就是这么来的 ✓）
+  dopt 量化 → 官方导出 → OMG(--compress_conf) → SubGraph_0.weight → converter_lite ✓
+```
