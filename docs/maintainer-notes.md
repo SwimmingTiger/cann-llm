@@ -4722,3 +4722,73 @@ RuntimeError: narrowing_error ✗
 ④ 组装模型包 → 引擎加载 ⇒ 聊天 ✓
 ※ 备选：若 dopt-pytorch 也跑不动 ✓ ⇒ 退一步自己造 compress_conf ✓（格式可从官方样例反推 ✓）
 ```
+
+## 77. ★找到官方 dopt 的完整配方★（在样例仓库的方案文档里）—— 三阶段跑到 stage3，只差 CUDA 版 torch ✗
+
+### 77.1 配方出处（这就是 §47 当年用的东西 ✓）
+
+```
+~/q38/cannkit/CANN_LLM/CANN_LLM_Engine_Guide/CANN LLM 大语言模型解决方案.md（706 行 ✓）
+  · 第 118–158 行：★config.yaml 的逐项注解★
+  · 第 158–205 行：★run.sh 的完整调用★
+  · 三段式执行说明 ✓
+```
+
+### 77.2 ★官方 run.sh 的调用（缺的就是 --optimize-config ✓）★
+
+```bash
+python -u ${qlibs}/dopt/dopt_lm/opt_main.py \
+    --model-path $model_path \
+    --dopt-config $dopt_config \
+    ★--optimize-config ${ROOT}/config.yaml★ \     ← 之前缺这个，所以 build_params 报 NoneType ✗
+    --quant-stage $quant_stage \
+    --block-size 128 \
+    --output-dir ${output_dir}
+# 注意：官方【不传】--w-bits/--act-bits/--group-size ✓（用默认 4/16/128 ✓）
+```
+
+### 77.3 config.yaml 的关键项（文档原文 ✓）
+
+```yaml
+kd:
+  enable: False              # 蒸馏量化使能；false 时用 PTQ 优化策略 ✓
+dataset:
+  train_files:               # dataset.json 或 "wikitext2"
+  train_samples: 1024
+  ptq_samples: 1024
+extra_training_config:
+  fp16: True
+cutoff_len: 128              # 样本序列长度
+num_samples: 256             # 激活量化校准样本数
+★quant_param_2: False★       # kirinx90 默认 false；kirin9020 默认 true
+embedding_separate: True     # 单独保存 embedding bin ✓
+lm_head_size:
+```
+
+### 77.4 实测进度（本轮 ✓）
+
+```
+① dopt(pytorch) 在★CPU 版 torch★下能加载模型 ✓ 并生成 dopt_config.json（30014 B ✓）
+② set_quant_strategy.py 填策略 ✓ ⇒ Quant_act_weight_eco ×186 + float ×2 ✓
+③ 用官方 config.yaml 跑三阶段：
+   stage1 ✓ stage2 ✓（过了 ✓）—— ★stage3 报错✗★：
+   torch/nn/modules/module.py convert → torch/cuda/__init__.py _lazy_init
+   AssertionError: Torch not compiled with CUDA enabled ✗
+   ⇒ ★stage3 必须要 CUDA★（我们的 ~/q38env 是 torch 2.14.1+cpu ✗）
+```
+
+### 77.5 下一步
+
+```
+① 建一个★带 CUDA 的 venv★（别动 ~/q38env ✗）：
+     uv venv ~/q38cuda --python 3.10
+     uv pip install --python ~/q38cuda/bin/python torch --index-url https://download.pytorch.org/whl/cu121
+     + transformers / datasets / accelerate / pyyaml …
+   显存：2B 在 bf16 下约 3.8 GB ✓ ⇒ RTX 2060 6 GB 应能装下 ✓
+② 用该 venv 重跑三阶段 ⇒ fake_quant_weight.pth + quant_params_file ✓
+③ 把 fake_quant_weight.pth 灌回 HF 模型 ✓ ⇒ 用 export_hiai_q35.py 导出 ✓
+   ⇒ OMG 加 --compress_conf（§75 的结论 ✓）⇒ ★官方形态的 omc + SubGraph_0.weight★ ✓
+④ 组装模型包 → 引擎加载 ⇒ 聊天 ✓
+★注★：文档也提到 stage2 会产出 embedding_weights / embedding_quant_scale ✓
+        ⇒ 与我们自己造的 embedding 包可以对照 ✓（说不定直接用它的更好 ✓）
+```
