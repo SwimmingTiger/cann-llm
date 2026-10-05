@@ -18,6 +18,20 @@ import npu_attention as A
 from npu_gated_delta import npu_causal_conv1d_fn, npu_chunk_gated_delta_rule
 
 
+def rope_cos_sin(position_ids, inv_freq, dtype=torch.float32):
+    """★纯浮点 RoPE★ ✓（position_ids 只做 Cast 成 float ✓，没有整数算术 ✗）。
+
+    position_ids: [B,S]（int64 或 float 均可 ✓）· inv_freq: [dim/2] 常量 ✓
+    返回 (cos, sin)，形状 [B,S,dim] ✓ —— 实测与模型 rotary_emb 输出差 6.3e-08 ✓（§69）
+    """
+    pos_f = position_ids.float() if position_ids.dtype != torch.float32 else position_ids
+    if inv_freq.dtype != torch.float32:
+        inv_freq = inv_freq.float()
+    freqs = pos_f.unsqueeze(-1) * inv_freq                     # [B,S,dim/2] ✓ 纯浮点 ✓
+    emb = torch.cat([freqs, freqs], dim=-1)                    # [B,S,dim] ✓
+    return emb.cos(), emb.sin()
+
+
 def _to_heads(x: torch.Tensor, b: int, s: int, n_head: int, hd: int) -> torch.Tensor:
     """[B, S, Nh*D] ➜ [B*Nh, S, D] ✓（常量索引 Gather 换序 ✓，见 npu_attention §58）。"""
     x = x.reshape(b, s * n_head, hd)

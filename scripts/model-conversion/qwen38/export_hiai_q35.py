@@ -46,6 +46,7 @@ def main() -> int:
 
     import npu_attention
     import npu_gated_delta as N
+    import npu_layers
 
     torch.set_grad_enabled(False)
     # ★必须加载真实权重★（原来只读了 config ⇒ 建出的是随机初始化模型 ✗，
@@ -78,15 +79,18 @@ def main() -> int:
         def __init__(self, m):
             super().__init__()
             self.body = m.model
+            # inv_freq 是常量 ✓（纯浮点 RoPE 用 ✓）
+            self.register_buffer("_inv_freq",
+                                 m.model.rotary_emb.inv_freq.detach().clone().float(),
+                                 persistent=False)
 
         def forward(self, first, attention_mask, position_ids, new_kv_cache_pos, *states):
             """states 按层给出：每层两个张量（第 i 层的 key 槽 / value 槽 ✓）。"""
             inputs_embeds = first if args.no_embed_head else self.body.embed_tokens(first)
-            # ★M-RoPE 的 position_ids 是 [3,B,S]★ ✓（官方接口给 [B,S] ⇒ 这里展开 ✓）
-            pos3 = position_ids
-            if pos3.dim() == 2:
-                pos3 = pos3.unsqueeze(0).expand(3, -1, -1)
-            cos, sin = self.body.rotary_emb(inputs_embeds, pos3)
+            # ★纯浮点 RoPE★（不用模型的 rotary_emb ✗ —— 它会引入 FloorMod 等整型算子 ✗）
+            # ★不要对 int64 张量做索引✗★（会生成 data 为 INT64 的 Gather ✗，
+            #   OMG 直接拒："GatherV2D Verify failed, Input[0] DataType INT64 is wrong" ✓）
+            cos, sin = npu_layers.rope_cos_sin(position_ids, self._inv_freq)
             hidden = inputs_embeds
             outs = []
             st = list(states)
@@ -119,7 +123,7 @@ def main() -> int:
         first = torch.ones(b, s, dtype=torch.int64)
         first_name = "input_ids"
     attention_mask = torch.ones(b, 1, s, kv, dtype=torch.float32)
-    position_ids = torch.arange(s).unsqueeze(0).expand(3, b, s)
+    position_ids = torch.arange(s).unsqueeze(0).expand(b, s)      # ★2 维✓★（文本 M-RoPE 三段相同 ✓）
     pos_new = torch.arange(s, dtype=torch.int64)
     inputs = [first, attention_mask, position_ids, pos_new]
     in_names = [first_name, "attention_mask", "position_ids", "new_kv_cache_pos"]

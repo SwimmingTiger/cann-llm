@@ -4373,3 +4373,42 @@ failed to infer constNodeGraph graph shape ✗
       ⇒ 彻底避开 Modular/FloorMod 之类 ✗
   然后 cos/sin 就是 [1,S,64] 的纯浮点常量派生量 ✓ ⇒ 喂给 3 维注意力 ✓
 ```
+
+## 69. 纯浮点 RoPE ✓（差 0.0）· 图零不支持算子 ✓ —— OMG 已推进到 NPUCL 的 4 维 Slice ✗
+
+### 69.1 RoPE 反推与实现（实测数据 ✓）
+
+```
+运行时实测：inv_freq (32,) · mrope_section [11,11,10] · attention_scaling 1.0
+            ★文本输入时 M-RoPE 三段完全相同✓★（position_ids 三行一样 ✓）
+            cos/sin 形状 (1,S,64) ✓
+数值反推：cos[64] 与 ★cos(cat([pos*inv_freq, pos*inv_freq], -1))★ 差 6.34e-08 ✓
+          （"4×16 重复"假设失败 ✗ 差 1.99 ✗ —— 幸好做了反推 ✓）
+实现：npu_layers.rope_cos_sin(position_ids, inv_freq) ✓
+      pos.float() → freqs = pos[:,:,None] * inv_freq[None,:] → cat([f,f]) → cos/sin ✓
+      ★纯浮点、无整数算术✗★（inv_freq 作为常量 buffer 进图 ✓）
+实测：纯浮点版 vs 模型 rotary_emb ⇒ ★cos 差 0.000e+00 · sin 差 0.000e+00 ✓★
+```
+
+### 69.2 逐个消灭 OMG 的拒收点（本轮三连）
+
+```
+① FloorMod（int32）✗ —— 图内调模型 rotary_emb 造成 ⇒ 换纯浮点 RoPE ✓（已解决 ✓）
+② GatherV2D（Input[0] INT64 错）✗ —— 我对 3 维 int64 position_ids 取了 [0] ✗
+   ⇒ 直接把 position_ids 声明成 ★2 维★ ✓（文本 M-RoPE 三段相同 ✓ 不需要三行 ✓）（已解决 ✓）
+③ ★当前卡点★：E/AI_NPUCL strided_slice_get_format IsDimThreeNdCase
+     "inputDim.size() 4 dimC 2 dimH 1" ✗ —— ★又是 4 维 Slice✗★
+     来源：全注意力层的缓存更新 past_key[s:] ✓（4 维张量切片 ✗）
+     —— 与 §57 是同一类问题（NPU 内核只吃 ≤3 维 ✗）
+   ★注意★：这次 Verify/Infershape 的错都消失了 ✓，说明前面两点确实解决了 ✓
+```
+
+### 69.3 下一步
+
+```
+把缓存更新改成【不产生 4 维 Slice】✓：
+  · 思路 A：缓存改成 3 维 per-head 布局 [B*kv_heads, kv_max, hd] ✓ ⇒ 切片就是 3 维 ✓
+    （代价：引擎给的官方 4 维布局要在边界处 reshape/transpose ✓ 一次性 ✓）
+  · 思路 B：用常量索引的 Gather 完成"右移+拼接" ✓（§58 的老招 ✓，全 3 维 ✓）
+  · 思路 C：看官方 dopt 的 modeling_qwen3 里缓存怎么更新的 ✓（照抄最稳 ✓）
+```
