@@ -7,7 +7,12 @@ torch.set_grad_enabled(False); torch.manual_seed(0)
 cfg = AutoConfig.from_pretrained("/home/hu60/q38")
 tc = cfg.text_config if hasattr(cfg, "text_config") else cfg
 tc.num_hidden_layers = 1; tc.layer_types = list(tc.layer_types)[:1]
-m = Qwen3_5ForCausalLM(tc).eval(); layer = m.model.layers[0]
+m = Qwen3_5ForCausalLM.from_pretrained("/home/hu60/q38", dtype=torch.float32).eval()
+m.model.layers = m.model.layers[:1]
+tc = m.config.text_config if hasattr(m.config, "text_config") else m.config
+layer = m.model.layers[0]
+_w = layer.linear_attn.in_proj_qkv.weight
+print("FINGERPRINT in_proj_qkv |sum|=%.6f shape=%s dtype=%s" % (float(_w.abs().sum()), tuple(_w.shape), _w.dtype))
 embeds = torch.randn(1, S, tc.hidden_size)
 pos = torch.arange(S).unsqueeze(0)
 cos, sin = m.model.rotary_emb(embeds, pos.unsqueeze(0).expand(3, -1, -1))

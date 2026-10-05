@@ -74,9 +74,12 @@ def full_attention_layer(layer, hidden, mask, cos, sin, past_key, past_value, kv
 
 
 # ---------------------------------------------------------------- 线性注意力层（卷积窗口 + 递归状态）
-def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads, hd, seq: int = 0):
+def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads, hd, seq: int = 0,
+                           batch: int = 0, trace: list | None = None):
     la = layer.linear_attn
-    b, s, _ = hidden.shape
+    # ★同样只用显式 int★（避免 legacy 追踪把 shape 变 Tensor ✗）
+    b = batch or hidden.shape[0]
+    s = seq or hidden.shape[1]
     k_heads = getattr(la, "num_k_heads", getattr(la, "num_key_heads", heads))
     v_heads = getattr(la, "num_v_heads", getattr(la, "num_value_heads", heads))
     k_dim = getattr(la, "head_k_dim", getattr(la, "key_head_dim", hd))
@@ -84,12 +87,16 @@ def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads
     ksize = la.conv_kernel_size if hasattr(la, "conv_kernel_size") else la.conv1d.weight.shape[-1]
 
     mixed = la.in_proj_qkv(hidden).transpose(1, 2)             # [B, conv_dim, S] ✓
+    if trace is not None:
+        trace.append(("mixed", mixed))
     z = la.in_proj_z(hidden).reshape(b, s, v_heads, v_dim)     # [B,S,Hv,Dv] ✓
     beta = la.in_proj_b(hidden).sigmoid()
     g = -la.A_log.float().exp() * torch.nn.functional.softplus(la.in_proj_a(hidden).float() + la.dt_bias)
 
     # ★卷积：把缓存窗口拼在序列前面★ ⇒ 新窗口 = 拼接后的最后 K-1 个 ✓（全静态切片 ✓）
     x = torch.cat([conv_state, mixed], dim=2)                  # [B, conv_dim, K-1+S] ✓
+    if trace is not None:
+        trace.append(("conv_in", x))
     y = npu_causal_conv1d_fn(x, la.conv1d.weight.squeeze(1), la.conv1d.bias,
                              activation=getattr(la, "activation", None))
     # ★切片下标一律用【正数】★ ✗✗：负下标切片在 opset>=10 的 ONNX 导出里语义会错
@@ -99,6 +106,8 @@ def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads
     # ★只取【新 token】对应的输出★：状态那 K-1 个位置的卷积结果在上一步已经算过 ✓
     #   （下标用 Python int ✓ 避免旧 tracer 把 shape 变成 Tensor ✗，§53）
     y = y[:, :, (ksize - 1):]                       # ★正下标✓★：丢掉状态那 K-1 个位置 ✓
+    if trace is not None:
+        trace.append(("conv_out_sliced", y))
     y = y.transpose(1, 2)                                      # [B, S, conv_dim] ✓
 
     kd = k_heads * k_dim
@@ -112,23 +121,32 @@ def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads
         query = query.repeat_interleave(rep, dim=2)
         key = key.repeat_interleave(rep, dim=2)
 
+    if trace is not None:
+        trace.extend([("query", query), ("key", key), ("value", value), ("g", g), ("beta", beta)])
     core, new_rec = npu_chunk_gated_delta_rule(
         query, key, value, g, beta, chunk_size=64, initial_state=rec_state,
-        output_final_state=True, use_qk_l2norm_in_kernel=True)
+        output_final_state=True, use_qk_l2norm_in_kernel=True, seq_len=s, batch=b)
 
     # ★gated RMSNorm 要额外传 gate（z）★ ✓（类名形如 Qwen3_5RMSNormGated ⇒ 用 in 判断 ✓）
+    if trace is not None:
+        trace.append(("core", core))
     if "rmsnormgated" in type(la.norm).__name__.lower():
         core = la.norm(core, z)
     else:
         core = la.norm(core)
     # ★out_proj 要 [B,S,Hv*Dv]★ ✓（delta rule 给的是 [B,S,Hv,Dv] ✓，参考实现也 reshape ✓）
     core = core.reshape(b, s, v_heads * v_dim)
-    return la.out_proj(core), new_conv, new_rec
+    if trace is not None:
+        trace.append(("normed", core))
+    out = la.out_proj(core)
+    if trace is not None:
+        trace.append(("out", out))
+    return out, new_conv, new_rec
 
 
 # ---------------------------------------------------------------- 统一入口（给导出脚本用）
 def layer_forward(layer, hidden, mask, cos, sin, k_slot, v_slot, idx, layer_type,
-                  kv_max, heads, kv_heads, hd, seq: int = 0):
+                  kv_max, heads, kv_heads, hd, seq: int = 0, batch: int = 0):
     """返回 (hidden_out, 新 key 槽, 新 value 槽) ✓。"""
     residual = hidden
     h = layer.input_layernorm(hidden)
@@ -136,7 +154,7 @@ def layer_forward(layer, hidden, mask, cos, sin, k_slot, v_slot, idx, layer_type
         h, nk, nv = full_attention_layer(layer, h, mask, cos, sin, k_slot, v_slot,
                                          kv_max, heads, kv_heads, hd)
     else:
-        h, nk, nv = linear_attention_layer(layer, h, k_slot, v_slot, heads, kv_heads, hd, seq)
+        h, nk, nv = linear_attention_layer(layer, h, k_slot, v_slot, heads, kv_heads, hd, seq, batch=batch)
     hidden = residual + h
     residual = hidden
     hidden = residual + layer.mlp(layer.post_attention_layernorm(hidden))

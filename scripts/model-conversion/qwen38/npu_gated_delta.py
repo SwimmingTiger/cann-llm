@@ -154,6 +154,8 @@ def npu_chunk_gated_delta_rule(
     initial_state=None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    seq_len: int = 0,
+    batch: int = 0,
     **kwargs,
 ):
     """`torch_chunk_gated_delta_rule` 的等价改写 —— ★全程只用 ≤3 维张量★ ✓。
@@ -173,7 +175,11 @@ def npu_chunk_gated_delta_rule(
       返回 (out [B, S, Hv, Dv], final_state [B, Hv, Dk, Dv] 或 None)
     """
     initial_dtype = query.dtype
-    batch_size, seq_len, hk, k_head_dim = key.shape
+    # ★shape 取值一律走显式 Python int★：legacy TorchScript 追踪下
+    #   `key.shape[1]` 可能是 Tensor ✗（§53/§66 实测）⇒ 这里优先用传入的 int ✓
+    _bs, _sl, hk, k_head_dim = key.shape
+    batch_size = batch or _bs
+    seq_len = seq_len or _sl
     num_v_heads, v_head_dim = value.shape[-2:]
     if hk != num_v_heads:
         raise ValueError("本实现要求 key/value 头数一致（参考实现的实际用法亦然 ✓）")

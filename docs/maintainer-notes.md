@@ -4247,3 +4247,39 @@ ONNX Runtime vs ★未打补丁的 HF 参考实现★（缓存置零 ✓ mask �
   ③ 重点怀疑：Python 层循环与 npu_chunk_gated_delta_rule 里的常量（_perm_indices 缓存 ✓、
      下三角解的前代循环 ✓）在 legacy 追踪下的语义 ✓
 ```
+
+## 66. ★重要方法论修正★：导出脚本原来建的是**随机初始化**模型 —— 与参考根本不是同一个模型 ✗
+
+### 66.1 抓到的错（这条错误让之前所有"图 vs 代码"的对拍都失效 ✗）
+
+```
+export_hiai_q35.py 原来只 AutoConfig + Qwen3_5ForCausalLM(tc) ⇒ ★随机权重★ ✗
+   而我的参考侧（另一个进程）也是 Qwen3_5ForCausalLM(tc) ⇒ ★另一份随机权重★ ✗
+   ⇒ 两次随机初始化不同 ⇒ 无论代码多正确，对拍都必然不一致 ✗✗
+修法：from_pretrained(args.hf, dtype=torch.float32) ✓（★fp32 必须显式指定★：检查点是 bf16 ✗，
+      不指定会报 "expected m1 and m2 to have the same dtype, but got: float != BFloat16" ✓）
+      --layers 的截断改为在【加载之后】切 model.model.layers[:N] ✓（保证前 N 层是真权重 ✓）
+
+★指纹核对（决定性 ✓）★：两侧打印 in_proj_qkv 权重的 |sum| ⇒ 完全一致 ✓
+   FINGERPRINT in_proj_qkv |sum|=141640.093750 shape=(6144, 2048) dtype=torch.float32  （两侧相同 ✓）
+```
+
+### 66.2 修正后仍然存在、且已缩小到最后一层的现象
+
+```
+★全零输入：三项输出全部 0.0000 完全一致 ✓★（⇒ 结构/接线/权重接口都对 ✓）
+随机输入（★同一份真权重✓★）：hidden 3.25 ✗ · conv_state 5.97 ✗ · rec_state 0.86 ✗
+   —— 而且 legacy 与 dynamo 两种导出器【都不一致】✗ ⇒ 不是某个导出器的锅 ✓
+⇒ 结论：代码数学是对的（1.4e-06 ✓），图却算出不同结果 ✗ ⇒ 差异出在【追踪/lowering 的语义】✓
+```
+
+### 66.3 下一步（把最后一道钉死）
+
+```
+① ★单点探针★：把 input_embed 做成 one-hot ✓ ⇒ 图上的 conv_state 应恰好等于 in_proj_qkv 的某一列 ✓
+   —— 一步就能判断"权重/接线"与"某个后续算子"谁在作乱 ✓
+② 把线性层按段导出（只导 in_proj_qkv+conv ✓ → 再逐步加 delta rule ✓）⇒ 找出失真的那一段 ✓
+   （注意：dbg_export_layer0.py 目前会静默 rc=1 ✗，要先修好这个调试导出 ✓）
+③ 重点怀疑清单（都还没排除）：reshape/permute 在 legacy 下的维度处理 ✓、
+   delta rule 里 `_solve_unit_lower` 的静态循环 ✓、`torch.split` 的负维度 ✓
+```

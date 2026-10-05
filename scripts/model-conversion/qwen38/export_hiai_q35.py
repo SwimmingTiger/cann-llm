@@ -48,13 +48,18 @@ def main() -> int:
     import npu_gated_delta as N
 
     torch.set_grad_enabled(False)
-    cfg = AutoConfig.from_pretrained(args.hf)
-    tc = cfg.text_config if hasattr(cfg, "text_config") else cfg
+    # ★必须加载真实权重★（原来只读了 config ⇒ 建出的是随机初始化模型 ✗，
+    #   和另一进程里的参考模型根本不是同一个 ⇒ 对拍永远不可能一致 ✓ —— §66 实测踩到 ✓）
+    model = Qwen3_5ForCausalLM.from_pretrained(args.hf, dtype=torch.float32).eval()
+    if args.layers:
+        model.model.layers = model.model.layers[: args.layers]
+    tc = model.config.text_config if hasattr(model.config, "text_config") else model.config
     if args.layers:
         tc.num_hidden_layers = args.layers
         tc.layer_types = list(tc.layer_types)[: args.layers]
     tc.kv_cache_max_len = args.kv_len
-    model = Qwen3_5ForCausalLM(tc).eval()
+    _w = model.model.layers[0].linear_attn.in_proj_qkv.weight
+    print("FINGERPRINT in_proj_qkv |sum|=%.6f shape=%s dtype=%s" % (float(_w.abs().sum()), tuple(_w.shape), _w.dtype))
 
     N.install(M)          # delta rule 3 维化 ✓
     npu_attention.install(M)
@@ -103,7 +108,7 @@ def main() -> int:
         import npu_layers
 
         return npu_layers.layer_forward(layer, hidden, mask, cos, sin, k_slot, v_slot,
-                                        idx, layer_types[idx], kv, heads, kv_heads, hd, args.seq)
+                                        idx, layer_types[idx], kv, heads, kv_heads, hd, args.seq, b)
 
     # 例化输入 ✓
     if args.no_embed_head:
