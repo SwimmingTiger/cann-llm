@@ -4466,3 +4466,45 @@ omc：2.75 GB ✓（单文件 ✓）
 ※ 解码循环还没验：现在的图是 prefill 形状（S=64 ✓）—— 引擎按 prefill_len/decode_len 驱动 ✓，
    若它按 S=1 跑 decode ✗ 则要再导一版 S=1 的图（或做动态形状 ✓）
 ```
+
+## 71. ★模型包已组装 ✓ 且★引擎真的读到了我们的 omc★ —— 只差一个不支持的激活 ✗
+
+### 71.1 模型包（目标③ 达成 ✓）
+
+```
+scripts/model-conversion/qwen38/build_hiai_pkg.py ✓（新脚本 ✓）
+  从 HF 词表造 int8 embedding（248320×2048 ✓ 508.6 MB）+ 每行一个 fp32 反量化 scale（0.99 MB）✓
+  —— 格式是【反推】出来的：W4 包里 scale 607744 B ÷ 151936 行 = 4 B ⇒ ★每行一个 scale★ ✓
+     量化：逐行对称 int8（scale = max|row| / 127 ✓）
+  复制 omc 2.75 GB ✓ + tokenizer.json 12.8 MB ✓
+  生成 <name>.json（llm_config ✓）· executor.json · context.json · api_config.json ✓
+      照 models/model_qwen2_1p5b_w4_2048 的字段逐项对齐 ✓（维度按 Qwen3.8 填 ✓：
+      hidden 2048 · 24 层 · kv_heads 2 · head_dim 256 · rope_theta 1e7 ✓）
+⇒ 成品目录：/storage/Users/currentUser/work/llm/models/model_qwen38_2b_hiai/ ✓
+      qwen38_2b.omc 2753.6 MB · embedding_weights 508.6 MB · scale 0.99 MB
+      · tokenizer.json 12.8 MB · 四个 json ✓
+```
+
+### 71.2 ★第一次用引擎加载（scripts/start_chat.sh -d <目录> -p '你好'）★
+
+```
+引擎成功走到【读我们的 omc】这一步 ✓✓（日志里能看到 model_executor_for_generation
+的 LoadModelGraphInternal → builtModel->RestoreFromFile ✓），但失败于：
+  E CPUCL: activation_op_define.cpp CheckSupport::"activation.mode = 9 not support now" ✗（多条 ✓）
+  E CPUCL: cpu_compatible_helper.cpp "op:Activation not support" ✗
+  E AI_FMK: "compatibleHelper CheckCompatibility failed by cl CPUCL" ✗
+  E hcl_built_model_impl.cpp "restore model failed." ✗
+⇒ ★模型与 CPUCL（CPU 兼容通路）不兼容 ⇒ 重编译失败 ✗★
+   —— 注意：OMG 是【编译成功】的 ✓（NPUCL ✓），卡在 CPUCL 的兼容性检查 ✓
+```
+
+### 71.3 下一步（很明确）
+
+```
+① 把图里的 Softplus 干掉 ✓（它是我们图里唯一的"非基础"激活 ✓，mode 9 最可能就是它 ✓）：
+     softplus(x) = log(1 + exp(x))          （x 大时用 Min 截到 20 ✓ 差 < 1e-9 ✓）
+     需要确认 DDK 有 Log/Min ✓（平台库字符串 + 单算子 toy 两条路都验 ✓）
+② 同样思路清一遍其它"可能被 CPUCL 拒"的算子（Cosh/Sinh? ✗ 我们没有 ✓；Erf? ✗ 没有 ✓）
+③ 重新导出 → fp16 → OMG → 再次用引擎加载 ⇒ 逐步逼近 ★聊天★ ✓
+★注意★：每次改图都要重走「导出 → lower → fp16 → OMG」四步 ✓（约 15 分钟一轮 ✓）
+```
