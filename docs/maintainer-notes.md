@@ -5251,3 +5251,44 @@ embed_scales:1,-1,1                ← ★官方图有这个输入✗★（我�
      token → embedding 查表（用我们的 int8 embedding + scale ✓）→ prefill 图（首轮 ✓）
            → decode 图（逐 token ✓）→ lm_head（主机侧 or 单独一张图 ✓）→ 采样 → 下一 token ✓
 ```
+
+## 88. INT32 假设被证伪 ✗ · 4 层版同样 Init rc=1 ✗ ⇒ 聚焦"图内容 or OMG 调用方式"
+
+### 88.1 两个实验（都很快 ✓ 用 runner 的 Init rc 做判据 ✓）
+
+```
+① INT32 position 输入（§87 假设 A ✗ 被证伪）：
+   把 position_ids / new_kv_cache_pos 改成 INT32 ✓（图里 elem_type 6 ✓）
+   ⇒ OMG 成功 ✓（omc 6.1 MB + 外置 5624.3 MB ✓）
+   ⇒ ★runner Init 仍是 rc=1 ✗★（与 INT64 版一模一样 ✓）
+② 4 层版（3 线性 + 1 全 ✓）：
+   导出 ✓ lower（Softplus 18→Log/Min ✓）✓ OMG ✓（omc 1.0 MB + 外置 937.4 MB ✓）
+   ★输入 19 个 / 输出 15 个★（已经很接近官方的 17/5 ✓）
+   ⇒ ★Init 仍 rc=1 ✗★
+⇒ ★"输入个数太多"这个假设也被证伪✗★
+```
+
+### 88.2 当前唯一确定的分水岭
+
+```
+官方 omc（models/Qwen3-8B）  ：Load rc=0 ✓ · Init ★rc=0✓★ ·（不兼容但不影响 ✓）
+我们所有 omc（89 输入 / 19 输入 / INT64 / INT32 / fp32 / fp16）：
+                              Load rc=0 ✓ · CheckCompatibility 兼容 ✓ · ★Init rc=1 ✗★
+⇒ ★我们的 OMG 产物统统无法被 ModelManager Init✗★（而 Load 都成功 ✓）
+```
+
+### 88.3 下一步（两个决定性实验 ✓ 都很便宜）
+
+```
+★实验 1：极简模型走同一条流水线★
+  torch 造 input[1,64,2048] → Linear → hidden[1,64,2048] ✓
+  ⇒ 导出(legacy) → OMG(与我们完全相同的 flags ✓) → runner Init
+  · 若 Init rc=0 ✓ ⇒ ★我们的 OMG 调用没问题✓★ ⇒ 问题在【图内容】（算子/lowering ✓）⇒ 逐算子二分 ✓
+  · 若 Init rc=1 ✗ ⇒ ★问题在【我们的 OMG 调用方式】✗★ ⇒ 逐项对齐官方 omg_convert.py 的命令 ✓
+★实验 2：补上 --dynamic_dims★
+  官方命令里有 ★--dynamic_dims="1,1,1,1,1;64,64,64,64,64"★ ✓ 我们一直没传 ✗
+  ⇒ 也许 ModelManager Init 只接受【带动态维度信息】的模型 ✗（LLM 模型都要动态 seq ✓）
+  ⇒ 试：给 4 层版加 --dynamic_dims（配合 input_shape 里的 -1 ✓）⇒ 再看 Init ✓
+※ 注意：我们的 delta rule 是【静态 S】✗ ⇒ 真要动态得改算法 ✓；
+  但如果 Init 只要求"声明了动态维度"而不实际跑动态 ✓，那就值得一试 ✓
+```
