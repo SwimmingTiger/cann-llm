@@ -6051,3 +6051,61 @@ s2_delta 日志里的关键行：
   b) 若没有 ⇒ 只能把每层图做到"几乎不产生子图"✗（工作量很大 ✗ 且不保证 ✓）
         ⇒ 那时可考虑换执行路径（CPU/GGUF 已通 ✓ 或与厂商确认 DDK 的子图上限 ✓）
 ```
+
+## 106. `formatMode = USE_ORIGIN` 不是答案 ✗ —— 到达决策点（17 轮深挖后）
+
+### 106.1 本轮做的（从 DDK 头文件找线索 ✓ 并验证 ✓）
+
+```
+读出 ModelInitOptions / ModelBuildOptions 的真实结构（DDK_Demo/V2/include ✓）：
+  struct ModelInitOptions { PerfMode perfMode; ModelBuildOptions buildOptions; };
+  struct ModelBuildOptions {
+      std::vector<NDTensorDesc> inputTensorDescs;     ★我们一直没填✗★
+      FormatMode formatMode = ★USE_NCHW★;             ★默认 NCHW ✗★
+      PrecisionMode precisionMode = PRECISION_MODE_FP32;
+      DynamicShapeConfig dynamicShapeConfig;
+      ModelDeviceConfig modelDeviceConfig;            （deviceConfigMode=AUTO ✓
+                                                       fallBackMode=ENABLE ✓
+                                                       deviceMemoryReusePlan=UNSET ✓）
+      TuningStrategy tuningStrategy = OFF;
+      size_t estimatedOutputSize = 0;
+      std::string quantizeConfig;
+  };
+  enum class FormatMode { USE_NCHW = 0, ★USE_ORIGIN = 1★ };
+  struct NDTensorDesc { std::vector<int32_t> dims; DataType dataType; ★Format format = Format::NCHW★ };
+⇒ ★我们 runner 一直用默认构造 ⇒ formatMode=USE_NCHW ✗、inputTensorDescs 空 ✗★
+★实测（hiai_runner5 ✓ 显式设 USE_ORIGIN + FP16）★：
+   两层串联：Init rc=1 ✗（与 NCHW 对照完全相同 ✗）
+   单层：rc=0 ✓ · 官方 Qwen3-8B：rc=0 ✓（无回退 ✓）
+⇒ ★formatMode 不是原因✗★（至少不是唯一原因 ✓）
+```
+
+### 106.2 17 轮深挖后的完整结论（供决策 ✓）
+
+```
+★已经完全打通✓★：
+  · 3 维化改写 + 数值对拍 argmax 1.0000 ✓
+  · 两套静态图导出（prefill S=64 / decode S=1 ✓，chunk 随 S 自适应 ✓）
+  · OMG 编译 ✓ · 官方形态产物（omc + SubGraph_0.weight ✓）
+  · ★单层（完整 delta-rule 层）端到端 Init rc=0 ✓★ —— 逐块、逐级都验证过 ✓
+  · DDK C++ API 装载 ✓（RestoreFromFile rc=0 / CheckCompatibility 兼容 ✓）
+★卡点✗★：≥2 层【串联】⇒ ModelManager::Init rc=1 ✗，DDK 不吐原因 ✗
+  相关性：weight 文件数（子图代理）★7 ✓ 过 / 13 ✗ 挂★
+  已排除：串联本身（纯 MatMul 串联能过 ✓）· 2 维张量（注入实验 ✗）· RealDiv（已修 ✓ 但数不变 ✗）
+          · hiai_version（三个都编不过 ✗）· 权重文件缺失 ✗ · 层数/状态数 ✗ · formatMode ✗
+  未拿到：24 层的【真实子图数】✗（weight 文件被合并成 1 个 ⇒ 代理失效 ✗）
+★矛盾★：官方是 36 层串联却正常 ✓ ⇒ DDK 本身支持多层 ✓ ⇒ 我们缺某个条件 ✗
+```
+
+### 106.3 到此为止可以选的路（★需要用户定方向★）
+
+```
+A 继续深挖 DDK：想办法把每层的子图数压到最低（工作量很大 ✗ 且不保证 ✗）
+B 换执行路径：
+   B1 ★CPU / GGUF（已跑通 ✓ 但慢 ✗）★
+   B2 NNRT（另一条 NDK 路线 ❓ 未知 ✓）
+   B3 回到官方 hiai LLM 引擎（§84 已证需"动态 seq + 图内无 KV" ✗ ⇒ 与混合架构不匹配 ✗，
+      除非把图改成无状态 S=1 的形态 ✗ 工作量巨大 ✗）
+C 向厂商/文档确认 ModelManager::Init 是否有【子图/张量数上限】⇒ 最快拿到确定性答案 ✓
+D 先把已完成成果归档（3 维化 + 数值对拍 + OMG 官方形态 + 单层 Init ✓）✓
+```

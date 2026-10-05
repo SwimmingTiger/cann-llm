@@ -120,7 +120,20 @@ int main(int argc, char **argv) {
         std::cout << "  ✗ CreateModelManager 返回空" << std::endl;
         return 5;
     }
+    // ★关键★：默认 options 里 buildOptions.formatMode = USE_NCHW ✗
+    //   而我们的图是【3 维】张量 ✗ ⇒ 被当 NCHW 处理 ⇒ DDK 报 "check dimCnt 2 != 3" ✗
+    //   ⇒ 必须显式设成 ★USE_ORIGIN★ ✓（§105 从 model_builder_types.h 查到 ✓）
+    //   精度按 omc 的权重类型给 FP16 ✓；fallback 显式 ENABLE ✓
     ModelInitOptions options;
+    const char *fn = getenv("INIT_NCHW");
+    if (fn && fn[0] == '1') {
+        std::cout << "  [Init] formatMode=USE_NCHW（对照 ✗）" << std::endl;
+    } else {
+        options.buildOptions.formatMode = FormatMode::USE_ORIGIN;          // ★★
+        options.buildOptions.precisionMode = PRECISION_MODE_FP16;          // ★
+        options.buildOptions.modelDeviceConfig.fallBackMode = FallBackMode::ENABLE;
+        std::cout << "  [Init] formatMode=USE_ORIGIN · precision=FP16 ✓" << std::endl;
+    }
     Status ret = manager->Init(options, built, nullptr);
     std::cout << "  Init rc=" << static_cast<int>(ret) << std::endl;
     if (ret != SUCCESS) {
