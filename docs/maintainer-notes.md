@@ -7282,3 +7282,46 @@ strings /system/lib64/platformsdk/libnnrt_proxy_1.0.z.so：
    （缺口只有 Softplus ✗ 与 Constant ✗ ⇒ 都好办 ✓）
 ⇒ 所以路线本身仍有希望 ✓，只是我的探针写法要先对齐能跑通的那份 ✓
 ```
+
+## 132. 覆盖率探针的两个具体 bug（① 已修 ✓ ② 待修 ✓）—— MATMUL 已回到 AddOp=0/Finish=0 ✓
+
+### 132.1 已修：★秩 0 的参数张量必须传 nullptr 的 dimensions★ ✓
+
+```
+现象：[pa] / [pb] / [kp] AddTensor 都返回 rc=2 ✗（这三个都是 dimensionCount=0 的参数张量 ✓）
+      ⇒ ★加张量失败 ⇒ 我的索引计数错位 ⇒ 后续所有算子 AddOp=2 ✗★（这就是 §131 里
+        "连 MATMUL 都失败"的真正原因 ✓）
+原因：我对秩 0 张量传了【非空 dimensions 指针 + dimensionCount=0】✗
+      ⇒ 判非法 ✓；§127 能跑通那份传的是 ★dimensions = nullptr★ ✓
+修法：t.dimensions = (rk == 0) ? nullptr : DM[i] ✓
+⇒ 修后：★MATMUL 回到 AddOp=0 · Finish=0 ✓★（说明探针骨架已经对齐 §127 ✓）
+```
+
+### 132.2 待修的第二个问题：`SetTensorData` 的字节数必须与张量匹配
+
+```
+现象：修好后 MATMUL 的 ★Build=1 ✗★（§127 里是 Build=0 ✓）
+差异：§127 给权重张量 w 设了 ★H*H 个 float（完整尺寸）★ ✓；
+      我的 cov.cpp 只设了【1 个 float】✗ ⇒ 尺寸不匹配 ⇒ Build 失败 ✓
+修法：给每个常量张量设【其声明形状对应的完整字节数】✓
+```
+
+### 132.3 待查的第三个问题：一元算子的 AddOperation 仍返回 2 ✗
+
+```
+现象：RELU / SQRT / SIGMOID / NEG（都是 1 输入 1 输出 ✓）AddOp=2 ✗
+猜测：这些算子可能需要【额外的参数张量】✗（例如 RELU 的 negative_slope ✓）
+  ⇒ 下一步按头文件里 OH_NN_<OP>_* 的参数枚举逐个补齐 ✓
+  （§130 已列出：ADD/DIV/MUL/SUB 有 *_ACTIVATIONTYPE ✓ · EXP 有 BASE/SCALE/SHIFT ✓ ·
+    POW 有 SCALE/SHIFT ✓ · REDUCE_MEAN 有 KEEP_DIMS/REDUCE_TO_END/COEFF ✓ ·
+    CONCAT 有 AXIS ✓ · SLICE 有 AXES ✓ · SPLIT 有 AXIS/OUTPUT_NUM/SIZE_SPLITS ✓ ·
+    UNSQUEEZE/SQUEEZE 有 AXIS ✓ · PAD 有 PADDING_MODE/CONSTANT_VALUE ✓）
+```
+
+### 132.4 结论
+
+```
+★探针骨架已经正确 ✓（MATMUL AddOp=0/Finish=0 ✓），剩下的是"每个算子的参数与数据要写全" ✗
+   —— 纯工作量问题 ✓ 不是路线问题 ✓
+★下一步★：把 cov.cpp 补齐（① 完整数据 ② 各算子参数张量 ✓）⇒ 一次跑出真实覆盖率表 ✓
+```
