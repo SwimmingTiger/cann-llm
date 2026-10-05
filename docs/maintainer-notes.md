@@ -3517,3 +3517,71 @@ qwen3_5 的 ONNX 需要 27 种算子，DDK 缺 4 个：
 **验证方式**：在 hu60tx（CPU ✓）上把改写版与参考实现**逐步对拍**（同一输入、同一 chunk ✓），
 误差达标后再导 ONNX、清点算子（目标：只剩那 23 个支持算子 ✓），最后 OMG/converter_lite →
 设备单图建图测试 ✓。
+
+## 51. ★★★★★ 路线②实战：qwen3_5 线性注意力改写成 NPU 友好版（目标①②达成，③差临门一脚）★★★★★
+
+工作机 = **hu60tx**（x570 留给游戏 ✓）。工具与改写脚本见
+`scripts/model-conversion/qwen38/`（含 README ✓）。
+
+### 51.1 ★目标① 对拍通过★ —— 改写版与参考实现等价
+
+```
+函数级（debug_delta.py）：cum_decay / pairwise / ut_system / intra / inv / new_values / k_cumdecay
+                         全部 ≤ 5e-07 ✓
+整模型（model_parity.py）：logits 最大绝对差 7.7e-04 · 最大相对差 2.9e-05
+                         ★argmax 一致率 1.0000★ ✓
+补丁命中：chunk 18 次 · conv 18 次（= 18 个线性注意力层 ✓）
+```
+
+**踩过的两个坑**：
+```
+① ★cumsum 的常量矩阵方向★：直觉写 `x @ tril(ones)`，但 `tril(ones)[j,t]=1 ⟺ j≥t`
+   ⇒ 算出来是【后缀和】✗（实测正好反了 ✓）⇒ 必须用 `triu(ones)`（前缀和 ✓）
+   （第一步就差了 3.4，导致后面全错 ✓）
+② ★UT 变换的数值稳定性★：用"平方-乘积恒等式" `(I−L)^-1 = Π(I+L^{2^k})` 数学上精确 ✓，
+   但会把条件数平方 ✗ —— 真实模型里 beta≈0.995 的层误差冲到 ★6.6e+16★ ✗
+   ⇒ 改成★分块前代★（16×16 小块用平方-乘积 + 块间 matmul ✓）⇒ 降到 ★2.4e-06★ ✓
+```
+
+### 51.2 ★目标② 达成★ —— 导出的 ONNX 零缺失算子
+
+```
+原始：27 种算子里 DDK 缺 4 种（CumSum/Trilu/ScatterElements/ScatterND ✗）
+改写后：Trilu → 常量掩码 ✓；CumSum → 常量 triu 矩阵乘法 ✓；
+        Scatter* → 列表+cat（分块扫描）与函数式 M-RoPE 分节 ✓；
+        IsNaN → 图级 lowering `Not(Equal(x,x))`（onnx_lower.py ✓）
+★最终 25 种算子，DDK 缺失 = 0★ ✓（--tiny 与真实宽度切片都验过 ✓）
+```
+
+### 51.3 目标③ 进展：转换成功 ✓，但设备建图仍失败 ✗
+
+```
+✓ converter_lite（容器 mslite-dev = debian:12 + libpython3.11 ✓）转换成功：
+    真实层型前 4 层（3 线性 + 1 全）· 单输入图（inputs_embeds fp32）⇒ ★.ms = 232 MB ✓ rc=0★
+✗ 设备上 OH_AI_ModelBuildFromFile 仍然失败：rc=-1（L4 body ✓）/ rc=-2（微型 6 MB ✓）
+    而【同一套转换器】产出的 gemma4 int8 段图当年是 Build 0 ✓（§43.1）
+    ⇒ ★不是转换器/框架不兼容，而是 qwen3_5 的【图内容】被 NPU 内核拒收★ ✗
+    DDK 日志只有栈没有消息（`[F] libhiai_adapter.so+0x...` ✓）⇒ 静默失败 ✗
+```
+
+**一路上踩掉的三个具体坑**（都已修 ✓）：
+```
+① int64 图输入 ⇒ 设备 Build -1 ✗；int32 图输入 ⇒ converter 报
+   "SetMetaGraphInput: input Parameter_1 not found in graph" ✗
+   ⇒ ★解法：S 固定 ⇒ 把 position_ids 烘成常量★（`--static-pos` ✓ 单输入图 ✓）
+② 词表投影（lm_head 248320×2048 ≈ 2 GB fp32 ✗）与 embedding 表让 ONNX 必然 >2 GB
+   ⇒ ★只导 transformer 层★（输入 inputs_embeds / 输出 hidden_states ✓，词表放主机侧 ✓ 与 gemma4 同思路 ✓）
+③ ★"position_ids 没被用到"会让转换器丢输入★：前两层都是线性注意力层时
+   （线性层不用 RoPE ✓）⇒ 报同一个 SetMetaGraphInput 错 ✗
+   ⇒ 导出必须包含至少一个 full_attention 层 ✓（真实层型前 4 层 = 3 线性 + 1 全 ✓ 就正常 ✓）
+```
+
+### 51.4 下一步（路线②的收尾）
+
+```
+① ★按算子二分图★：把 ONNX 逐块裁剪后转换 + 设备试建，定位到底是哪个算子/结构被拒 ✗
+   （怀疑对象：Softplus · Greater/Equal/Not/And · Expand/Split/Squeeze · Sqrt/Reciprocal 等
+     —— 我的"字符串比对"判据太弱 ✗：库里出现该字样 ≠ NPU 内核实现了它 ✓）
+② 若定位到少数算子 ⇒ 继续 lowering 掉它们（如 Softplus → log1p(exp(x)) ✓ 等）✓
+③ 若能建图 ⇒ 把 24 层切成 3~4 段（每段带 position 常量 ✓ + 段间 hidden 传递 ✓）⇒ 设备上跑通前向 ✓
+```
