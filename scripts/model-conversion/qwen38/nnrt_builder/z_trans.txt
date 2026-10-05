@@ -1,0 +1,7 @@
+T 0 x F32 3 1 4 4
+T 2 pm I32 1 3
+I 2 tiny_blob.bin 0 12
+T 1 y F32 3 1 4 4
+N 41 0 2 0 2 1 1
+IN 0
+OUT 1

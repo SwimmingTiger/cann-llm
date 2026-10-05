@@ -7643,3 +7643,51 @@ C 换路：CPU/GGUF（已跑通 ✓ 非 NPU ✗）
 ② 目标：AddOperation 失败 0 ⇒ ★Finish=0 + Build=0★
 ③ 之后：Executor（SetInput/SetOutput/Run ✓）⇒ 前向出数 ⇒ 解码循环 ⇒ 设备上聊天 ✓
 ```
+
+## 140. ★★NNRt 在线建图：只有 MATMUL 能过 ✗（POW/PAD 在真实模型里过 ✓）—— 怀疑 hiai HCL 后端只认极少数算子★★
+
+### 140.1 有效的对照实验（★这次参数都带 PARAM 字段✓★）
+
+```
+★先纠正一个我自己的错误✗★：之前几个手造表里参数写成 `T 3 pa B 0` ✗（少了 `PARAM 33` ✓）
+   ⇒ 那些实验【全部无效】✗（复现了 §135 的根因 ✓）⇒ 重做后才有下面的有效结果 ✓
+★有效结果（最小表 ✓ 同样的骨架 ✓ 只换算子 ✓）★：
+   ★MATMUL(19)  2 参数 ⇒ AddOperation=0 ✓ Finish=0 ✓ ★Build=0✓★
+   ★MATMUL(19)  1 参数 ⇒ AddOperation=0 ✓ Finish=0 ✓ ★Build=0✓★   （transposeA 可省 ✓）
+   ADD(1) 0参 ✗ · ADD(1) 1参(I32 activationType ✓) ✗ · MUL(22) 1参 ✗
+   SUB(38) ✗ · DIV(11) ✗ · MAXIMUM(20) ✗ · MINIMUM(97) ✗ · PAD(24) ✗
+   SIGMOID(28) ✗ · EXP(60) ✗ · NEG(84) ✗ · SQRT(33) ✗ · RELU(47) ✗ · TANH(39) ✗ ·
+   ABS(58) ✗ · RSQRT(44) ✗ · TRANSPOSE(41, 带 perm 输入 ✓) ✗
+★全部是 AddOperation 返回 2（INVALID_PARAMETER）✗★
+```
+
+### 140.2 真实模型里的分布（543 节点 ✓）
+
+```
+★通过✓★：MATMUL 143/143 ✓ · POW 17/17 ✓ · PAD 2/2 ✓（共 162 个 ✓）
+★失败✗★：其余 381 个 ✓（ADD 93 · SLICE 72 · MUL 66 · RESHAPE 32 · CAST 30 · TRANSPOSE 22 ·
+   EXP 12 · CONCAT 10 · UNSQUEEZE 10 · SIGMOID 8 · SUB 6 · WHERE 4 · NEG 4 · …）
+⇒ ★注意★：真实模型里 ★POW 与 PAD 能过✓★ 而我的最小表里 PAD 失败 ✗
+   ⇒ 说明最小表的骨架【仍与真实表有差异】✗（某个我还没发现的细节 ✓）
+   ⇒ 但 ★MATMUL 在两处都过 ✓、其它算子在两处都不过 ✗★ 这个结论是稳的 ✓
+```
+
+### 140.3 判断（★接近路线判定★）
+
+```
+★可能性 A★：NNRt 的 NPU 后端 = ★hiai HCL 服务★（§128 已证 ✓）
+   ⇒ HCL 只接受它自己那套图/算子 ✗ ⇒ 通过 NNRt 在线建图能用的算子极少 ✗
+★可能性 B★：NNRt 对这些算子还有我没找到的额外要求 ✗（如必须给某个默认参数 ✓）
+   ⇒ ★下一步用官方 API 直接问设备★：OH_NNModel_GetAvailableOperations(model, deviceID,
+      &isSupported, &opCount) ✓ —— 头文件里有这个 API ✓
+      ⇒ 它会【直接告诉我们每个算子在 NPU 上支不支持】✓✓ 这是最权威、最便宜的一步 ✓
+```
+
+### 140.4 下一步
+
+```
+① ★调 OH_NNModel_GetAvailableOperations 拿到设备的算子支持表★ ✓（决定性 ✓ 便宜 ✓）
+② 若支持表里只有少数算子 ⇒ ★NNRt 在线建图路线【硬性不匹配】✗★
+   ⇒ 按目标要求回报用户并定方向（CPU/GGUF ✓ / 厂商 ✓ / 其它 ✓）
+③ 若支持表很大（只是我用法不对 ✓）⇒ 继续按 §139 的权威约定逐个修 ✓
+```
