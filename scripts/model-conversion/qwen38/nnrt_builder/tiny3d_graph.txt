@@ -1,0 +1,11 @@
+T 0 w F32 3 1 2048 2048
+I 0 tiny_blob.bin 0 16777216
+T 1 input_embed F32 3 1 64 2048
+T 2 __p_/MatMul_OH_NN_MATMUL_TRANSPOSE_A_0 B 0 
+I 2 tiny_blob.bin 16777216 1
+T 3 __p_/MatMul_OH_NN_MATMUL_TRANSPOSE_B_1 B 0 
+I 3 tiny_blob.bin 16777217 1
+T 4 hidden_states F32 3 1 64 2048
+N 19 2 2 3 2 1 0 1 4
+IN 1
+OUT 4

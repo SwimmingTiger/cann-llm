@@ -1,0 +1,12 @@
+# 按 §127 的顺序：x(0) w(1) y(2) pa(3) pb(4) ✓
+T 0 input_embed F32 3 1 64 2048
+T 1 w F32 2 2048 2048
+I 1 tiny_blob.bin 0 16777216
+T 2 hidden_states F32 3 1 64 2048
+T 3 __pa B 0
+I 3 tiny_blob.bin 16777216 1
+T 4 __pb B 0
+I 4 tiny_blob.bin 16777217 1
+N 19 2 3 4 2 0 1 1 2
+IN 0
+OUT 2

@@ -7409,3 +7409,52 @@ A ★写通用 ONNX→NNRt 建图器★（推荐 ✓ 是"在线建图重建模�
 B 继续手工逐算子调参（已被证明易踩坑 ✗ 且不可复用 ✗）
 C 换路：CPU/GGUF（已跑通 ✓ 非 NPU ✗）
 ```
+
+## 135. ★★★★★ 通用 ONNX→NNRt 建图器打通（读 ONNX 表 ⇒ NNRt 在线建图 ⇒ ★NPU Build=0★）★★★★★
+
+### 135.1 本轮成果
+
+```
+★新增工具（scripts/model-conversion/qwen38/nnrt_builder/ ✓）★：
+   ① onnx_to_nnrt.py  —— 读 ONNX ⇒ 生成紧凑表 graph.txt + 权重 blob ✓
+        · 做【形状推断】（onnx.shape_inference ✓）⇒ 每个张量都有静态形状 ✓（NNRt 不能有 -1 ✗）
+        · 常量（initializer + 参数张量）写进大 blob ✓（C++ 侧按偏移读取 ✓ 不生成巨型 C++ ✓）
+        · ★PARAM_TABLE★：每个算子需要哪些参数张量 / 类型 / 取值 ✓（一次写好长期可用 ✓）
+        · 输出格式：T（张量 ✓ 带可选 PARAM <枚举值> ✓）· I（常量数据位置 ✓）·
+          N（算子 + 参数 + 输入 + 输出 ✓）· IN/OUT（模型输入输出 ✓）
+   ② nnrt_build.cpp  —— 读表 ⇒ NNRt 在线建图（AddTensor/SetTensorData/AddOperation ✓）
+        ⇒ SpecifyInputsAndOutputs ⇒ Finish ⇒ Compilation(NPU) ⇒ ★Build★ ✓
+★实测（tiny.onnx ✓ 一个 MatMul ✓）★：
+   AddTensor 失败 0 个 · AddOperation 失败 0 个 · Specify=0 · Finish=0 · SetDevice=0
+   ★★Build=0 —— NPU 编译成功★★ ✓✓
+```
+
+### 135.2 ★根因：参数张量必须设成对应的 OH_NN_TensorType★（§131~§133 一系列报错的真凶 ✓）
+
+```
+★现象★：AddOperation 一律返回 2（INVALID_PARAMETER）✗，连 MATMUL 也不通 ✗
+★定位过程★：把我的建图器日志与【能跑通的 §127 程序】日志逐行对齐 ⇒ 两者【完全一致】✗
+   （张量顺序/类型/形状/参数索引/输入输出索引 全部相同 ✓ 却一个 rc=0 一个 rc=2 ✗）
+★真凶★：§127 的程序里，参数张量是这样声明的——
+     pa.type = ★OH_NN_MATMUL_TRANSPOSE_A★ ✓（不是 OH_NN_TENSOR ✗）
+   而我的表格式【没有携带这个信息】✗ ⇒ 所有张量都被当成普通张量 ✗ ⇒ 参数索引非法 ✓✓
+★修法★：表里加 PARAM <枚举值> 字段 ✓（枚举值从 neural_network_runtime_type.h 自动抽取 ✓）
+   · MATMUL: TRANSPOSE_A=33 / TRANSPOSE_B=34 ✓
+   · ADD=1 · DIV=29 · MUL=41 · SUB=59 · EXP_BASE=89/SCALE=90/SHIFT=91 ·
+     POW_SCALE=107/SHIFT=108 · CONCAT_AXIS=10 · REDUCE_MEAN_KEEP_DIMS=60/
+     REDUCE_TO_END=117/COEFF=118 · UNSQUEEZE_AXIS=77 · SQUEEZE_AXIS=52 ·
+     PAD_PADDING_MODE=116/CONSTANT_VALUE=43 · SPLIT_AXIS=49/OUTPUT_NUM=50/SIZE_SPLITS=51 ·
+     SLICE_AXES=127 ✓
+★这条经验对后面所有算子都适用✓★：NNRt 里【每个参数都是一个"带 type 的秩 0 张量"】✓
+```
+
+### 135.3 下一步（★scale up★）
+
+```
+① 拿【真实模型】跑：先用 q35_chk.onnx（2 层 ✓）⇒ 看有没有不支持的算子 ✗
+   （§130 静态对照：24 种算子 NNRt 覆盖 22 种 ✓；需处理的：Softplus ✗ Constant ✗
+     ConstantOfShape ✗ Cast/Gather/Where 等要核对参数表 ✓）
+② 补 PARAM_TABLE 里缺的条目（Reshape/Transpose/Slice/Gather/Cast/Where/Sqrt/Sigmoid/Neg/Exp ✓）
+③ 打通 Build 后 ⇒ 加 Executor（SetInput/SetOutput/Run ✓）⇒ 前向出数 ✓
+④ 然后才是解码循环 + lm_head + 采样 ⇒ ★设备上聊天★
+```
