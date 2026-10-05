@@ -99,6 +99,26 @@ def full_attention_layer(layer, hidden, mask, cos, sin, past_key, past_value, kv
 
 # ---------------------------------------------------------------- 线性注意力层（卷积窗口 + 递归状态）
 
+
+def _expl_rmsnorm(nrm, x):
+    """★普通 RMSNorm 的 NPU 友好实现★（§118 ✓）。
+
+    为什么必须改写：原实现用 ★ReduceMean✗★ + ★RSqrt(Sqrt)✗★ ——
+      实测成本表（§118 ✓ 干净底座逐个测）：
+          ReduceMean ⇒ 子图 +2 ✗   ReduceSum ⇒ +2 ✗   ★Sqrt/rsqrt ⇒ +2 ✗★
+          而 Add/Mul/Sub/Div/Where/Cast/Exp/Pow/Sigmoid/Reshape/Transpose/Slice/
+             Gather/Split/Conv/MatMul ⇒ ★0（免费✓）★
+      ★我们每层有 3 个 RMSNorm★（linear 的 gated norm + input_layernorm +
+        post_attention_layernorm ✓）⇒ 24 层 × 3 × 2 ≈ ★144 个子图✗★ ——
+      正是 §116 里"9 / 13"那类计数的真正来源 ✓
+    等价改写：mean(-1) → _sum_last(x*x) * (1/D) ✓（MatMul 版 ✓ 免费 ✓）
+              rsqrt(v+eps) → (v+eps).pow(-0.5) ✓（Pow ✓ 免费 ✓）
+    """
+    d = x.shape[-1]
+    v = _sum_last(x * x) * (1.0 / float(d))
+    return x * (v + nrm.variance_epsilon).pow(-0.5) * nrm.weight
+
+
 def _expl_gated_rmsnorm(nrm, x, gate):
     """★用 NPU 支持的算子显式实现 Qwen3_5RMSNormGated★（§115 ✓）。
 
@@ -218,7 +238,7 @@ def layer_forward(layer, hidden, mask, cos, sin, k_slot, v_slot, idx, layer_type
                   kv_max, heads, kv_heads, hd, seq: int = 0, batch: int = 0):
     """返回 (hidden_out, 新 key 槽, 新 value 槽) ✓。"""
     residual = hidden
-    h = layer.input_layernorm(hidden)
+    h = _expl_rmsnorm(layer.input_layernorm, hidden)      # ★NPU 友好✓★（§118 ✓）
     if layer_type == "full_attention":
         h, nk, nv = full_attention_layer(layer, h, mask, cos, sin, k_slot, v_slot,
                                          kv_max, heads, kv_heads, hd)
@@ -226,5 +246,5 @@ def layer_forward(layer, hidden, mask, cos, sin, k_slot, v_slot, idx, layer_type
         h, nk, nv = linear_attention_layer(layer, h, k_slot, v_slot, heads, kv_heads, hd, seq, batch=batch)
     hidden = residual + h
     residual = hidden
-    hidden = residual + layer.mlp(layer.post_attention_layernorm(hidden))
+    hidden = residual + layer.mlp(_expl_rmsnorm(layer.post_attention_layernorm, hidden))   # ★✓★
     return hidden, nk, nv

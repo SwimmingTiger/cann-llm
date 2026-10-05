@@ -99,7 +99,7 @@ def main() -> int:
                 hidden, new_k, new_v = call_layer(layer, hidden, attention_mask, cos, sin,
                                                   k_slot, v_slot, idx)
                 outs.extend([new_k, new_v])
-            hidden = self.body.norm(hidden)
+            hidden = _expl_rmsnorm(self.body.norm, hidden)   # ★NPU 友好✓★（§118 ✓）
             logits = self.body.embed_tokens.weight.new_zeros(1)  # 占位；--no-embed-head 时不用 ✓
             return (hidden, *outs) if args.no_embed_head else (logits, *outs)
 
