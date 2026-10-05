@@ -30,6 +30,7 @@
 """
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -40,22 +41,41 @@ __all__ = [
 
 # ---------------------------------------------------------------- 常量（编译期固定 ✓）
 
+_MASK_CACHE: dict = {}
+
+
 def tril_ones(c: int, dtype: torch.dtype, device) -> torch.Tensor:
     """★前缀和用的常量矩阵★：`M[j,t] = 1 ⟺ j <= t`，即 `triu(ones)` ✓
 
-    ★坑★：直觉上会写成 `tril(ones)`，但 `tril(ones)[j,t] = 1 ⟺ j >= t`
-    ⇒ `x @ tril(ones)` 算出来是【后缀和】✗（实测正好反了 ✓，见 §51）。
-    cumsum 是前缀和 ⇒ 必须用 `triu(ones)` ✓。
+    ★坑★：直觉会写 `tril(ones)`，但 `tril(ones)[j,t] = 1 ⟺ j >= t` ⇒ 算出来是【后缀和】✗
+    （实测正好反了 ✓，§51）⇒ cumsum 是前缀和 ⇒ 必须用 triu(ones) ✓。
+
+    ★用 numpy 造★：`torch.triu` 会导出成 `Trilu` 节点 ✗，而 OMG 的 pre-check 拒收它 ✗
+    （§68 实测：全图只剩 Trilu 一个 fail ✓）
     """
-    return torch.triu(torch.ones(c, c, dtype=dtype, device=device))
+    key = ("ones", c, str(dtype), str(device))
+    if key not in _MASK_CACHE:
+        arr = np.triu(np.ones((c, c), dtype=np.float32))
+        _MASK_CACHE[key] = torch.from_numpy(arr).to(device=device, dtype=dtype)
+    return _MASK_CACHE[key]
 
 
 def strict_lower(c: int, device) -> torch.Tensor:
-    return torch.tril(torch.ones(c, c, dtype=torch.bool, device=device), -1)
+    """严格下三角（布尔 ✓，numpy 常量 ✓）。"""
+    key = ("lo", c, str(device))
+    if key not in _MASK_CACHE:
+        arr = np.tril(np.ones((c, c), dtype=bool), -1)
+        _MASK_CACHE[key] = torch.from_numpy(arr).to(device=device)
+    return _MASK_CACHE[key]
 
 
 def strict_upper(c: int, device) -> torch.Tensor:
-    return torch.triu(torch.ones(c, c, dtype=torch.bool, device=device), 1)
+    """严格上三角（布尔 ✓，numpy 常量 ✓）。"""
+    key = ("up", c, str(device))
+    if key not in _MASK_CACHE:
+        arr = np.triu(np.ones((c, c), dtype=bool), 1)
+        _MASK_CACHE[key] = torch.from_numpy(arr).to(device=device)
+    return _MASK_CACHE[key]
 
 
 def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:

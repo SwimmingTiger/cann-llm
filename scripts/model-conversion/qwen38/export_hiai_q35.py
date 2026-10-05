@@ -123,7 +123,7 @@ def main() -> int:
     pos_new = torch.arange(s, dtype=torch.int64)
     inputs = [first, attention_mask, position_ids, pos_new]
     in_names = [first_name, "attention_mask", "position_ids", "new_kv_cache_pos"]
-    out_names = ["lm_logits"]
+    out_names = ["hidden_states" if args.no_embed_head else "lm_logits"]   # ★名字要对上★ ✓
     for i, lt in enumerate(layer_types):
         if lt == "full_attention":
             inputs.append(torch.zeros(kv, kv_heads, b, hd))

@@ -4329,3 +4329,47 @@ seg5 out（gated norm + out_proj）                8.94e-07 ✓
    + tokenizer.json ✓ + <name>.json/api_config.json/executor.json/context.json ✓）
 ④ 设备上 backends/hiai.py 加载 ⇒ ★聊天★ ✓
 ```
+
+## 68. 全 24 层 hiai 接口图已导出且【零不支持算子】✓ —— OMG 卡在 RoPE 的整数运算 ✗
+
+### 68.1 本轮做成的（数据都在 ✓）
+
+```
+① 全 24 层导出成功（真权重 fp32 ✓）：产物 1.2 MB 图 + 307 个外置张量文件（5.2 GB ✓）
+   —— torch 的 legacy 导出器对 >2GB 的图会写成【按张量分文件】的外置数据
+      （文件名如 onnx__Mul_16095 ✓，与 §46 记录一致 ✓；注意：这会让 pre-check 的
+        "总节点数"看着很大 ✓ 实际 9600 节点 · initializer 373 个（外置 307）✓）
+② ★图级 lowering 必须【单独一步】做★ ✗（不要在导出脚本里 onnx.save 覆盖 ✓）：
+     先 onnx.load（会加载外置数据 ✓）→ lower_model ✓ → fix_static_shapes ✓
+     → onnx.save(save_as_external_data=True, all_tensors_to_one_file=True) ✓
+   ⇒ 得到 1.5 MB 图 + ★单个 5493 MB 权重文件★ ✓（比 307 个碎片规整 ✓）
+   lowering 结果：ConstantOfShape ×19 → 0 ✓  ⇒ ★算子 34 种，残留不支持 = 无 ✓★
+③ 一路修掉的具体坑：
+   · 掩码常量（tril_ones/strict_lower/strict_upper）原用 torch.triu/tril ✗
+     ⇒ 导出成 Trilu 节点 ✗（OMG pre-check 拒收 ✓）⇒ 全改 numpy 常量 ✓
+   · --no-embed-head 时第 0 路输出名要叫 hidden_states ✓（原来还叫 lm_logits ✗，
+     OMG 报 "Invalid output node:hidden_states" ✓）
+   · ★check_result.json 会在 cwd 残留★ ✗ —— 上一次的失败报告会冒充这一次的结论 ✓
+     ⇒ 每次跑 OMG 前先 rm -f check_result.json ✓
+```
+
+### 68.2 ★当前唯一的致命错（已定位 ✓）★
+
+```
+[op:/rotary_emb/Mod_3 type:FloorMod] Verify failed, Input[0] DataType INT32 is wrong ✗
+failed to infer constNodeGraph graph shape ✗
+⇒ ★RoPE 的整数取模运算 OMG 不接受✗★ —— 因为我在图内直接调用了模型的 rotary_emb ✓
+   （它内部有 position_ids 的 int 运算 + M-RoPE 的分节索引 ✓）
+```
+
+### 68.3 修法（下一步，已想好）
+
+```
+★自己在图内用纯浮点 + 常量索引重算 cos/sin★ ✓，不要调模型的 rotary_emb ✗：
+  · position_ids: int64 → cast 成 float ✓（没有 int 算术 ✓）
+  · freqs = pos_f[:, None] * inv_freq[None, :] ✓（inv_freq 是常量 ✓，纯浮点 ✓）
+  · M-RoPE 的分节交错（mrope_section=[11,11,10] + mrope_interleaved=True ✓）
+      ⇒ 用【常量索引的 Gather/index_select】完成 ✓（和 head 换序同一招 ✓，§58）
+      ⇒ 彻底避开 Modular/FloorMod 之类 ✗
+  然后 cos/sin 就是 [1,S,64] 的纯浮点常量派生量 ✓ ⇒ 喂给 3 维注意力 ✓
+```
