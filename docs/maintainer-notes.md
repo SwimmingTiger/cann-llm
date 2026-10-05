@@ -7162,3 +7162,46 @@ strings /system/lib64/platformsdk/libnnrt_proxy_1.0.z.so：
 ③ ★查 hiai HCL 服务接受的模型形态★：既然后端是 HCL ✓
    ⇒ 我们的 omc 是否需要用某种"认证/签名"或特定包装 ✗（§123 的 Authentication 机制 ✓）
 ```
+
+## 129. ★NNRt 离线模型路径：所有形态都 Build rc=1 ✗（硬性不匹配）⇒ 按目标要求回报用户★
+
+### 129.1 试过的全部形态（都带了完整编译选项 ✓）
+
+```
+探测程序：scripts/model-conversion/qwen38/nnrt_probe/nnrt_probe.cpp ✓
+   流程：OH_NNDevice_GetAllDevicesID ✓ → ConstructWithOfflineModelFile ✓ → SetDevice(NPU) ✓
+        → SetCache(cache, ver=1) rc=0 ✓ → SetPerformanceMode(HIGH) rc=0 ✓ → SetPriority(HIGH) rc=0 ✓
+        → ★Build★
+   实测结果（全部 ★rc=1（OH_NN_FAILED）✗★）：
+     · 我们的 DDK/OMG 产物  models/f24/seg.omc          ✗
+     · 旧 .tmp/q35_body_L4.ms                            ✗
+     · ★mslite 厂商插件产出的 tiny_vendor.ms（16.78MB ✓ 按 §128 正确配置转出 ✓）★ ✗
+     · ★OMG 的 IR 形态 tiny_ir.om（16.78MB ✓ --target=om ✓）★ ✗
+     · （tiny.onnx 本身当然也不行 ✗）
+```
+
+### 129.2 唯一成功过的 NPU 通路
+
+```
+★在线建图（§127 ✓）★：OH_NNModel_Construct → AddTensor/SetTensorData/AddOperation →
+   SpecifyInputsAndOutputs → Finish → Compilation(SetDevice=NPU) → ★Build=0✓★ →
+   Executor → SetInput/SetOutput → ★Run=0✓★ 且 ★数值正确（差 7.99e-08✓）★
+⇒ ★NNRt 的 NPU 通路【是通的】✓，但只对【在线建图】的模型通✗★
+```
+
+### 129.3 硬性不匹配的具体形态
+
+```
+★NNRt 的 NPU 后端 = hiai HCL 服务★（§128 ✓ libhiai_nn_proxy → IHiaiHcl ✓）
+  ⇒ 它的"厂商离线模型"格式，我们用手上的工具【造不出来】✗：
+     · mslite 厂商插件 ⇒ 产出的 .ms 被拒 ✗
+     · DDK OMG ⇒ .om / .omc 都被拒 ✗
+  ⇒ 而【在线建图】能在 NPU 上跑 ✓
+⇒ ★两条出路★：
+   a) ★在线建图重建我们的模型★：把 Qwen3.8 的每个算子都用 NNRt 的在线 API 拼出来 ✗
+      · 可行性：NNRt 的算子表覆盖度未知 ✗（我们的 delta rule 用了 Exp/Pow/MatMul/Slice/
+        Concat/Reshape/Transpose/Where/Cast… ✓ 需逐一核对 ✓）
+      · 工作量：大 ✗（但完全在标准 NDK 接口内 ✓ 不需要厂商转换器 ✓）
+   b) 换回 CPU/GGUF（已跑通 ✓ 只是慢 ✗）
+   c) 继续找"厂商离线模型"的正确格式（信息在厂商侧 ✗ 与 §120 的厂商提问材料合并 ✓）
+```

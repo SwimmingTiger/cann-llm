@@ -28,7 +28,7 @@ int main(int argc, char **argv) {
             // ★加缓存路径★（有些实现要求它 ✓）
             const char *cache = getenv("NNRT_CACHE");
             if (cache && cache[0]) {
-                OH_NN_ReturnCode rc2 = OH_NNCompilation_SetCache(c, cache);
+                OH_NN_ReturnCode rc2 = OH_NNCompilation_SetCache(c, cache, 1);
                 printf("   SetCache(%s) rc=%d\n", cache, (int)rc2);
             }
             // ★试编译选项（性能模式/优先级 ✓）
