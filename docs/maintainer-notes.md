@@ -6453,3 +6453,20 @@ runner 加实验开关（INIT_CPU=1 ⇒ modelDeviceOrder = {ExecuteDevice::CPU} 
 ② 换执行路径：CPU/GGUF（已跑通 ✓）或 NNRt
 ③ 把 ①~⑥ 整理成正式文档/脚本进仓库 ✓（本文件即原始记录 ✓）
 ```
+
+## 114. 归档完成 ✓（交接文档 + 一键链路脚本 + 厂商提问材料）
+
+```
+用户确认"这些算硬成果" ✓ ⇒ 本轮把它们正式落进仓库：
+① ★docs/hiai-ddk-direct-run-handoff.md★ —— 结论 / 极窄复现面（单层过 ✓ ≥2 层不过 ✗）/
+   完整可复现链路（①导出 ②lower ③OMG ④组装 ⑤DDK 判据 ✓）/ 修掉的真 bug / 工具表 / 下一步
+② ★scripts/model-conversion/qwen38/run_hiai_ddk_chain.sh★ —— 一键跑 ①~④
+   （自动从 ONNX 生成 input_shape/input_type ✓ 类型按图的真实 elem_type 给 ✓
+     自动拷全部 SubGraph_*.weight ✓ 语法已 bash -n 校验 ✓）
+③ ★docs/hiai-ddk-vendor-question.md★ —— 可直接发出的提问材料：
+   一句话问题 / 环境 / 最小复现步骤（含 ModelInitOptions 的写法 ✓）/
+   ★8 行对照表★（官方 17/5 过 ✓ · 我们单层 3/1 过 ✓ · 2/4/24 层不过 ✗ ·
+     纯 MatMul 串联过 ✓ · 两层并联过 ✓ · 两层串联不过 ✗）/
+   已排除清单（11 项 ✓）/ 希望获得的 4 条信息（错误码含义 · 模型约束清单 · 主机侧校验工具 · 官方链路参数）
+⇒ 卡点从"我们独自深挖"变成"有材料可交给掌握工具链细节的人" ✓
+```
