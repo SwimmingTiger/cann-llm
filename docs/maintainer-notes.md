@@ -7240,3 +7240,45 @@ strings /system/lib64/platformsdk/libnnrt_proxy_1.0.z.so：
 ★这个探针还能顺手把"每个算子的参数怎么传"固化下来★ ✓
    —— 后面写正式建模器时直接照抄 ✓（MatMul 的 transposeA/B 就是这么踩出来的 ✓）
 ```
+
+## 131. 算子覆盖率探针：遇到"工具性差异"✗（连 MATMUL 在我的探针里也失败 ✗，而 §127 的程序是通的 ✓）
+
+### 131.1 本轮做了什么
+
+```
+按用户选择（走在线建图 + 先探算子覆盖 ✓），写了两个探针：
+   ① scripts/.../nnrt_probe/nnrt_ops.cpp  —— 多算子批量（SQRT/EXP/SIGMOID/NEG/DIV/POW/
+      REDUCE_MEAN/CONCAT/RESHAPE/TRANSPOSE/UNSQUEEZE ✓ 用统一辅助函数 ✓）
+   ② scripts/.../nnrt_probe/one_op.cpp    —— ★单算子最小版★（命令行给算子号 ✓）
+      （生成方式：把 §127 能跑通的 nnrt_online.cpp 当模板改算子 ✓ 但那版模板里残留了
+        矩阵校验代码 ✗ 编译失败 ⇒ 改成手写干净版 ✓）
+★实测（one_op ✓ 单算子 ✓ NPU ✓）★：
+   RELU(op=47) SQRT(33) EXP(60) ABS(58) SIGMOID(28) NEG(84) REDUCE_MEAN(42) MATMUL(19)
+   ⇒ ★全部 AddOp=2（INVALID_PARAMETER）✗ · Finish=4 ✗ · Build=2 ✗★
+★对照★：nnrt_online.cpp（§127 ✓ 已提交 ✓）用 MATMUL 是 ★AddOp=0 / Finish=0 / Build=0 / Run=0✓★
+⇒ ★★说明我的探针与那份能跑通的程序有【本质差异】✗，不是算子本身的问题✗★★
+   （MATMUL 只给 1 个输入当然也会失败 ✓ 但 RELU/SQRT 这类一元算子不该失败 ✗）
+```
+
+### 131.2 已定位的差异线索（下一步逐条比对 ✓）
+
+```
+能跑通的 nnrt_online.cpp 与我的 one_op.cpp 的区别：
+   ① 它是 ★3 个张量★（x · w 常量 · y ✓）并调了 SetTensorData(w) ✓
+      ⇒ 我的 one_op 只有 2 个（x · y ✓）且★没有常量张量★ ✗
+      ⇒ ★怀疑：NNRt 的在线建图可能要求"至少有一个常量/权重张量"或某种张量数量下限 ✗★
+   ② 它把 ★MatMul 的参数张量（transposeA/B）也 AddTensor 进来了★ ✓
+      ⇒ 我的 one_op 传 nullptr ✗
+   ③ 它的 OH_NN_Tensor 是 main 里的长寿命局部变量 ✓；我的是 static 全局 ✓（都应可以 ✓）
+   ④ 它在 AddOperation 之前调了 SetTensorData ✓；我没有 ✗
+★下一步★：把 one_op 改成"照抄 nnrt_online.cpp 的全部结构 ✓ 只把算子换成 RELU/SQRT" ✓
+   一次只改一个变量（先加常量张量 ✓ 再加参数张量 ✓），即可定位到底哪一步是必需的 ✓
+```
+
+### 131.3 静态对照仍然是好消息（§130 ✓）
+
+```
+★NNRt 的算子表（108 个 ✓）静态覆盖我们图里 24 种算子的 22 种✓★
+   （缺口只有 Softplus ✗ 与 Constant ✗ ⇒ 都好办 ✓）
+⇒ 所以路线本身仍有希望 ✓，只是我的探针写法要先对齐能跑通的那份 ✓
+```
