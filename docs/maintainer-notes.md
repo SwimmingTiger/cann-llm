@@ -3172,3 +3172,45 @@ gemma4 三段 int8：建完 2 段 = VmRSS 11.42 GB + swap 10.5 GB ⇒ 第三段�
 · 想让更大的模型上机：① 13B 级 + dopt/hiai（有风险 ✗）；② 等官方出小尺寸 omc 包 ✓
 · 现成可用：Qwen3-8B（5.1 GB ✓ 12.8 tok/s）、qwen25_coder_7b（4.3 GB）、qwen15b_e2e（3.2 GB）
 ```
+
+## 45. GGUF → ONNX：★可复现的配方★（实测 LFM2.5-2.6B 成功），但转 NPU 可行性低
+
+### 45.1 配方（全部实测通过 ✓）
+
+```bash
+# 环境：x570 的 venv-msllm（transformers 4.57.6 + gguf ≥0.19 + torch 2.14.1 + onnxruntime）
+pip install -U gguf            # ★0.17.1 太老：MODEL_ARCH 里没有 LFM2 ✗；0.19.0 有 LFM2/LFM2MOE ✓
+pip install onnxruntime onnxscript
+
+# ① 直接读 GGUF（★不需要手写 HF↔GGUF 映射表★ —— transformers 自带）
+m = Lfm2ForCausalLM.from_pretrained(dir, gguf_file="model-bf16.gguf")   # ✓ 266 张量自动反量化+映射
+# ② ★必须用新版 dynamo 导出器★
+torch.onnx.export(m, (ids, pos), "x.onnx", dynamo=True, opset_version=18, ...)
+#    旧 TorchScript 导出器会 ★RuntimeError: unordered_map::at★ ✗（卡在 masking_utils 的 vmap 路径）
+#    且要绕开 attention_mask（用一个只暴露 input_ids/position_ids 的 wrapper ✓）
+# ③ onnxruntime 数值校验 ✓
+```
+**实测结果**：误差 **8.58e-05** ✓（数值一致）；图 2.93 MB + 外置权重 **10.79 GB**（fp32 = 2.7B×4B ✓）；
+1417 节点 / 35 种算子 ✓。想变一半大小：`m.half()` 后再导 ✓。
+
+### 45.2 但转 NPU 的判定：★低可行性★
+
+```
+该 ONNX 需要的算子          DDK 平台库（libai_npucore_fusionengine_internal.so）
+  Conv×22（★Conv1D★）   →   Conv2D ✓ / Conv1D ✗（需 OMG 转换，未见支持）
+  ★IsNaN×8★             →   ✗ 缺
+  ★CumSum×1★            →   ✗ 缺
+  ★GatherND×1★          →   ✗ 缺
+  Where ✓ Expand ✓ Range ✓ Slice ✓ Pad ✓ Softmax ✓ MatMul ✓
+⇒ 三类算子缺失 ✗ + 动态形状（Slice×81 · Shape×10 · Range×1）+ 10.8 GB 远超 OMG 的 ~2 GB 输入上限 ✗
+```
+
+### 45.3 结论
+
+```
+· GGUF → ONNX ★技术上完全可行★ ✓（配方见 45.1，半小时级）
+· 但"GGUF→ONNX→NPU"这条路对本例（LFM2.5 混合 conv/attention 架构）★不现实★ ✗
+· 只有 GGUF 的模型，最现实的本机跑法仍是 ★llama.cpp 直接跑★ ✓
+  （本机已编译：CPU 正确 ✓；参考速率 Qwen2.5-1.5B Q4_K_M = 1.62 tok/s ⇒ 2.6B ≈ 1 tok/s ✗）
+· 另注：这类"Qwen3.8 蒸馏"多半不是 Qwen3.8 架构 ✗（本例基座是 LFM2.5 ✓，标签 lfm2.5 ✓）
+```
