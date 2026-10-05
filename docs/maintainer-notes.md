@@ -4604,3 +4604,41 @@ scripts/model-conversion/qwen38/run_cycle.sh ✓ —— 一键跑完整四步 �
     而引擎这次走的是 CPUCL ✗ ⇒ 检查 api_config.json/executor.json 里是否需要指定后端 ✓
     （官方包里有个 "inferType": 0 ✓ 也许还有别的字段控制 ✓）
 ```
+
+## 74. ★基准实验：W4 包同一命令下完全正常（bot> 2 ✓ 零 CPUCL 报错）★ —— 问题在我们的 omc 结构
+
+### 74.1 基准（可复现 ✓）
+
+```
+./cann-llm/scripts/start_chat.sh -d models/model_qwen2_1p5b_w4_2048 --large-mem -p '1+1=' 
+  ⇒ rc=0 ✓ ★输出 "bot> 2" ✓★（与 §47 记录一致 ✓）
+  ⇒ ★全程没有 CPUCL / NPUCL 的报错★ ✓（模型加载顺畅 ✓）
+对照我们的包（同一命令 ✓）：卡在 CPUCL 的 /Mul_1 "param[size] < dataSize" ✗
+★结论：引擎/环境/脚本都没问题 ✓，是我们的 omc 结构与官方 dopt 路线的产物不同 ✗★
+```
+
+### 74.2 另一个重要认知：NPUCL 的 Slice 提示是【建议性】的 ✗
+
+```
+1 层 fp32 实验（run_l1_experiment.sh ✓）里出现：
+   E/AI_NPUCL strided_slice_get_format IsDimThreeNdCase "inputDim.size() 1 dimC 1048576 dimH 0" ✗
+   E/AI_NPUCL … "inputDim.size() 2 dimC 16 dimH 64" ✗
+⇒ 1 维、2 维的切片也在报 ✗ —— 但★全模型带着大量同类提示照样 OMG rc=0 ✓★
+⇒ 这些 E/AI_NPUCL 是【建议/回退提示】✗，不能当成致命判据 ✓（本轮差点被误导 ✓）
+   真正的判据只有一个：OMG 末尾的 "OMG generate offline model success" ✓
+```
+
+### 74.3 下一步（聚焦"omc 结构差异"）
+
+```
+① 官方 W4 路线 = dopt 量化（权重 int4/int8 + 压缩配置 ✓）⇒ 引擎完全接受 ✓
+   我们 = onnx_weights_to_fp16.py 的"激活侧 Cast"（权重 fp16 ✓ 激活 Cast ✓）✗
+   ⇒ ★优先试 dopt★（DDK 自带 ✓ ~/ddk/tools/tools_dopt ✓）
+     风险：dopt 需要 CUDA ✗ —— hu60tx 是 RTX 2060 6 GB，2B 模型的 fake-quant 需 ~7.5 GB ✗
+     对策：按层切片量化（仓库 build_model.py 支持 --layers ✓）或在 CPU 上试 ✓
+② 退路：ONNX 级量化（onnxruntime.quantization ✓ 动态 int8 ✓ 不需要 CUDA ✓）
+   但会引入 QuantizeLinear/DequantizeLinear ✓ ⇒ 要先用单算子 toy 验 OMG 收不收 ✓
+③ 还有一个廉价对照 ✓：把我们的全模型【不转 fp16】直接 OMG ✗ 已知会撞 4 GB 保存溢出 ✗
+   ⇒ 可试把 kv_len 从 2048 降到 512 ✓（省掉 KV 带来的内存 ✓）看是否能压到 4 GB 以下 ✓
+      —— 若成功且引擎能加载 ✓，就证明"fp16 Cast"是元凶 ✓
+```
