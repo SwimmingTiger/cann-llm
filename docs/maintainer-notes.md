@@ -5203,3 +5203,51 @@ embed_scales:1,-1,1                ← ★官方图有这个输入✗★（我�
   · Init rc=1 的障碍要解决：先确认它与"静态 S=64 却按引擎预期分配"无关 ✓
     —— 我们自己的 Init 用的是默认 option ✓，需要按 DDK 文档填合适的 ModelInitOptions ✓
 ```
+
+## 87. ★用户确认改走 DDK C++ 直跑（A 方案）★ + 下一步的具体化
+
+```
+用户选择（原话选项）：
+  · 方向：★A 转 DDK C++ 直跑（推荐 ✓）★
+  · 目标描述：★授权我改成 DDK C++ 直跑★ ✓
+※ 但 update_goal 的 edit 被系统拒绝："requires a direct human turn on a top-level agent"
+  —— 因为当前是【自动 goal round】✗ ⇒ ★需要用户在【直接发言轮】说一句"改目标"才能改✓★
+  （先把新目标文本记在下面 ✓ 到时候直接用 ✓）
+```
+
+### 87.1 新目标文本（待用户直接发言时写入 ✓）
+
+```
+让 Qwen3.8（qwen3_5，empero-ai/Qwen3.8-2B-Distill）在设备 NPU 上跑通聊天。
+★路线：DDK hiai C++ 直跑★（§84/§86 已证 hiai LLM 引擎要"动态 seq + 图内无 KV +
+引擎自带 attention 算子"，与"静态 S + 混合线性注意力"不匹配 ✗）
+① 旧 TorchScript 导出器 + 3 维化改写 ⇒ ★两套静态图★：
+     prefill(S=64, chunk=64) 与 decode(S=1, chunk=1) ✓，IO 自定义 ✓，对拍 argmax 1.0000 ✓
+② 各自 OMG（--target=omc + --save_weights_as_external_data=true）⇒ omc + SubGraph_0.weight ✓
+③ 用 DDK hiai C++ API（§61/§62 的 hiai_runner ✓ 已验证 rc=0/兼容 ✓）解决 Init rc=1 ⇒ 设备上加载+前向 ✓
+④ 自己写解码循环（查表 → 前向 → lm_head → 采样）⇒ ★设备上聊天★
+```
+
+### 87.2 下一轮开始做的第一件事：解决 `Init rc=1`（两个廉价假设 ✓）
+
+```
+★假设 A（很可疑 ✓）：position_ids / new_kv_cache_pos 用了 INT64 ✗★
+   官方注释明确写："position_ids 是 ★INT32★" ✓（omg_convert.py 的 input_type_str 注释 ✓）
+   而我们的图是 INT64 ✗ ⇒ 8 字节 vs 4 字节 ⇒ 正好能造成 "param[size] < dataSize" 这类尺寸错 ✗✓
+   ⇒ 试：把这两个输入改成 ★INT32★（图内再 Cast 成 INT64 供 rope 用 ✓）
+     —— 注意 §53 那次"int32 输入"失败是【dynamo 导出器】下 ✗；现在用 legacy ✓ 应当没问题 ✓
+★假设 B：输入个数 89 vs 官方 17 ✗★
+   ⇒ 若 A 不成立，再考虑把每层状态【合并成少数几个张量】（例如把所有 full 层的 KV 拼成一个大张量 ✓）
+```
+
+### 87.3 之后的路线（清晰 ✓）
+
+```
+· prefill 图：S=64 ✓ chunk=64 ✓（现在就有的那版 ✓ 只需改 INT32 与 IO 形态 ✓）
+· decode 图：S=1 ✓ ★chunk=1★ ✓ —— 此时 delta rule 退化成逐 token 的递归更新 ✓
+     ★正确性要点★：chunk=1 时没有 padding ✗ ⇒ 状态不会被 padding 污染 ✓
+     （而 chunk=64 处理 S=1 会 pad 63 个位置 ✗ ⇒ final_state 会被污染 ✗ ⇒ 必须单独一版 ✓）
+· 解码循环（C++ 或 C++ shim + Python 驱动 ✓）：
+     token → embedding 查表（用我们的 int8 embedding + scale ✓）→ prefill 图（首轮 ✓）
+           → decode 图（逐 token ✓）→ lm_head（主机侧 or 单独一张图 ✓）→ 采样 → 下一 token ✓
+```
