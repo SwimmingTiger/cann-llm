@@ -7325,3 +7325,37 @@ strings /system/lib64/platformsdk/libnnrt_proxy_1.0.z.so：
    —— 纯工作量问题 ✓ 不是路线问题 ✓
 ★下一步★：把 cov.cpp 补齐（① 完整数据 ② 各算子参数张量 ✓）⇒ 一次跑出真实覆盖率表 ✓
 ```
+
+## 133. 覆盖率探针：MATMUL 完全可用 ✓（骨架正确 ✓）· 其它算子仍 AddOp=2 ✗（待逐个补参数）
+
+### 133.1 本轮结果
+
+```
+★MATMUL：AddOp=0 · Finish=0 · ★Build=0 · ★可用★★ ✓（与 §127 一致 ✓）
+   ⇒ ★探针骨架 100% 正确✓★（数据结构、参数张量、Specify、Finish、Build 流程都对 ✓）
+其它（RELU · SQRT · SIGMOID · NEG · DIV · ADD · CONCAT · RESHAPE · REDUCE_MEAN · 非法算子号）：
+   ★全部 AddOp=2（INVALID_PARAMETER）✗★
+★试过但无效的修法✗★：
+   · 给常量张量设【完整尺寸数据】（[1,64,64] = 16384 float ✓）—— 修好了 MATMUL 的 Build ✓
+     但对其它算子无用 ✗
+   · 把 params 从 nullptr 改成【非空数组但 size=0】✗ —— 无效 ✓
+★MATMUL 与其它算子的唯一结构差别★：
+   MATMUL 有【2 个参数张量（transposeA/B）】✓；ADD/DIV/RELU/SQRT… 我都没给参数 ✗
+   ⇒ ★怀疑：这些算子在 NNRt 里也要求把某个参数张量显式加上✗★
+     （例如 ADD/DIV/MUL/SUB 有 OH_NN_*_ACTIVATIONTYPE ✓ · EXP 有 BASE/SCALE/SHIFT ✓
+       POW 有 SCALE/SHIFT ✓ · CONCAT 有 AXIS ✓ · REDUCE_MEAN 有 KEEP_DIMS/REDUCE_TO_END/COEFF ✓
+       SLICE 有 AXES ✓ · SPLIT 有 AXIS/OUTPUT_NUM ✓ · UNSQUEEZE 有 AXIS ✓ ·
+       PAD 有 PADDING_MODE/CONSTANT_VALUE ✓ —— §130 已列全 ✓）
+```
+
+### 133.2 下一步（★决定性做法★）
+
+```
+★从能跑通的 nnrt_online.cpp 出发，只做"单变量"替换★：
+   ① MATMUL → ADD（同样 2 输入 ✓ 但不给参数）⇒ 若失败 ✗ ⇒ 说明 ADD 需要 activationType 参数 ✓
+   ② ADD + OH_NN_ADD_ACTIVATIONTYPE 参数 ⇒ 若成功 ✓ ⇒ ★规律确认：NNRt 里参数必须显式给全✓★
+   ③ 按此规律给每个算子补参数 ⇒ 一次跑出真实覆盖率表 ✓
+★这条规律很可能是通用的★（MATMUL 就是"必须给 transposeA/B"才成功的 ✓）
+⇒ 拿到覆盖率表后，就能判断"在线建图重建 Qwen3.8"是否可行 ✓
+   （§130 的静态对照已显示：NNRt 有 108 个算子 ✓ 覆盖我们 24 种里的 22 种 ✓）
+```

@@ -35,7 +35,9 @@ static void go(const char *nm, OH_NN_OperationType op,
     for (uint32_t v : ins) iv[ni++] = v;
     for (uint32_t v : outs) ov[no++] = v;
     OH_NN_UInt32Array P{pv, (uint32_t)np}, I{iv, (uint32_t)ni}, O{ov, (uint32_t)no};
-    int ra = OH_NNModel_AddOperation(M, op, np ? &P : nullptr, &I, &O);
+    // ★即使没有参数也要传非空数组✓★（MATMUL 有参数才成功 ⇒ 怀疑 nullptr 被拒 ✗）
+    P.size = (uint32_t)np;   // data 已指向 pv（非空 ✓）
+    int ra = OH_NNModel_AddOperation(M, op, &P, &I, &O);
     uint32_t a = mio, b = moo; OH_NN_UInt32Array MI{&a, 1}, MO{&b, 1};
     int rs = OH_NNModel_SpecifyInputsAndOutputs(M, &MI, &MO);
     int rf = OH_NNModel_Finish(M);
@@ -63,7 +65,9 @@ int main() {
         static bool f = false;
         uint32_t pa = add("pa", OH_NN_BOOL, 0, 0, 0, 0, OH_NN_MATMUL_TRANSPOSE_A);
         uint32_t pb = add("pb", OH_NN_BOOL, 0, 0, 0, 0, OH_NN_MATMUL_TRANSPOSE_B);
-        data(w, &one, sizeof(one)); data(pa, &f, sizeof(f)); data(pb, &f, sizeof(f));
+        static float WDATA[1 * 64 * 64]; for (int i = 0; i < 1 * 64 * 64; ++i) WDATA[i] = 0.01f;
+        data(w, WDATA, sizeof(WDATA));                 // ★完整尺寸✓★
+        data(pa, &f, sizeof(f)); data(pb, &f, sizeof(f));
         go("MATMUL", OH_NN_OPS_MATMUL, {pa, pb}, {x, w}, {y}, x, y); }
     // 一元 ✓
     FRESH(); { uint32_t x = add("x", OH_NN_FLOAT32, 3, 1, 64, 64), y = add("y", OH_NN_FLOAT32, 3, 1, 64, 64);
@@ -76,10 +80,14 @@ int main() {
         go("NEG", OH_NN_OPS_NEG, {}, {x}, {y}, x, y); }
     // 二元 ✓
     FRESH(); { uint32_t x = add("x", OH_NN_FLOAT32, 3, 1, 64, 64), w = add("w", OH_NN_FLOAT32, 3, 1, 64, 64),
-        y = add("y", OH_NN_FLOAT32, 3, 1, 64, 64); data(w, &one, sizeof(one));
+        y = add("y", OH_NN_FLOAT32, 3, 1, 64, 64);
+        static float W2[1 * 64 * 64]; for (int i = 0; i < 1 * 64 * 64; ++i) W2[i] = 1.0f;
+        data(w, W2, sizeof(W2));
         go("DIV", OH_NN_OPS_DIV, {}, {x, w}, {y}, x, y); }
     FRESH(); { uint32_t x = add("x", OH_NN_FLOAT32, 3, 1, 64, 64), w = add("w", OH_NN_FLOAT32, 3, 1, 64, 64),
-        y = add("y", OH_NN_FLOAT32, 3, 1, 64, 64); data(w, &one, sizeof(one));
+        y = add("y", OH_NN_FLOAT32, 3, 1, 64, 64);
+        static float W3[1 * 64 * 64]; for (int i = 0; i < 1 * 64 * 64; ++i) W3[i] = 0.5f;
+        data(w, W3, sizeof(W3));
         go("ADD", OH_NN_OPS_ADD, {}, {x, w}, {y}, x, y); }
     // 形状类 ✓
     FRESH(); { uint32_t x = add("x", OH_NN_FLOAT32, 3, 1, 64, 64), y = add("y", OH_NN_FLOAT32, 3, 1, 64, 64),
