@@ -3078,10 +3078,18 @@ runner 现在【从不】调用 OH_AI_ModelDestroy（docstring 明说"不 destro
   · 不回落 ⇒ 那些缓冲是 DDK 全局的，只能靠换路线 ✓
 ```
 
-## 43. ★★★★★ 三段（12/12/11 层）在 gemma4 上【做不到】—— 三条路线全都实测堵死 ★★★★★
+## 43. 三段（12/12/11 层）的三条路线实测 —— ★其中路线③的结论已被 §46 推翻，务必先读 §46★
+
+> [!IMPORTANT]
+> **本节路线③（OMG）当时的结论是错的 ✗，已在 [§46](#46-修正-43-的一个错误结论omg-没有模型大小上限大模型走的是外置权重形态) 更正。**
+> 当时把「OMG 产出的 `omc` 只有 916 KB」误判成「静默截断 / 空壳」✗ ——
+> 实际那是 **图与外置权重分离** ✓（`models/Qwen3-8B` 的 `SubGraph_0.weight` **4.39 GB** + `omc.omc` 6.8 MB 就是同一形态 ✓）。
+> ⇒ **OMG 没有模型大小上限** ✗（8B 都能转，哪来的 2 GB 上限 ✗）。
+> 12 层段能不能转，取决于**外置权重形态是否与转换器对齐** ✓（开关是 OMG 的 `--weight_merge` ✓，待验证）。
+> 本节路线 ① ② 的结论**仍然成立** ✓（int8 直转 19× 主机内存 ✗；fp16 I/O 段图设备 Build -1 ✗）。
 
 目标：用 `--large-mem` 打掉 2 GiB 限制后，把 gemma 从 5/9 段减到 **3 段**（12/12/11 层）。
-结论：**做不到** ✗ —— 三条路线各自堵在不同的地方，而且都不是我们能绕的。
+结论（更正后）：路线 ① ② 堵死 ✗；**路线 ③ 未被证伪，待续** ✓。
 
 ### 43.1 路线①：`converter_lite --fmk=ONNX + WEIGHT_QUANT`（int8）★能建，但内存爆★
 
@@ -3102,15 +3110,23 @@ runner 现在【从不】调用 OH_AI_ModelDestroy（docstring 明说"不 destro
 ⇒ ★段图必须 fp32 I/O★ —— 这条是硬约束 ✓
 ```
 
-### 43.3 路线③：OMG（`--weight_data_type FP16` ⇒ fp16 权重 + fp32 I/O）★小段能过，12 层被截断★
+### 43.3 路线③：OMG（`--weight_data_type FP16` ⇒ fp16 权重 + fp32 I/O）★小段能过；12 层段的结论见 §46★
 
 ```
 s0（12 层，fp32 ONNX 1.79 GB）⇒ OMG ok=1 ✓ converter SUCCESS ✓ seg.ms 1.80 GB ✓ 真能跑 ✓
-s12（12 层，fp32 ONNX 2.78 GB）⇒ OMG「报成功」但 ★q/seg.omc 只有 916 KB★ ✗ 空壳
-s24（11 层，2.88 GB）         ⇒ 776 KB ✗ 空壳
-★同一失败模式此前也把 g4m3/mseg12 留成 912 KB 的残骸 ✓（§41 记录 ✓）★
-⇒ OMG 对 ≥~2 GB 的 ONNX 会静默截断 ✗ ⇒ ★它只吃得了 ≤8 层左右的段★
-   而这正是当初 5 段/9 段切法的由来 ✓（绕开 OMG 的输入上限 ✓）
+s12（12 层，fp32 ONNX 2.78 GB）⇒ OMG ok=1 ✓ 但 ★q/seg.omc 只有 916 KB★
+s24（11 层，2.88 GB）         ⇒ 776 KB
+★当时的（错误 ✗）解读★：以为 OMG "静默截断" ⇒ 断定它只吃 ≤8 层
+★更正（§46）★：
+  · OMG ★没有大小上限★ ✗；它在大模型上把权重【外置】成独立文件 ✓
+    （官方形态叫 SubGraph_0.weight ✓ —— Qwen3-8B 的 4.39 GB 就是它 ✓）
+  · 916 KB 的 omc 只是【图】✓ 不是空壳 ✗
+  · 真正的问题是：OMG 散落在 cwd 的逐张量外置权重（onnx__MatMul_*）
+    ★转换器（converter_lite --fmk=THIRDPARTY）不吃★ ✗ ⇒ seg.ms 只有 918 KB ✗
+    ⇒ 控制开关是 OMG 的 `--weight_merge`（"weight data will be merged in IR model" ✓）
+  · 另外：torch 导出的大 ONNX 自己也会外置数据 ✓
+    （12 层的 seg.onnx 只有 218 KB + 152 个 onnx__MatMul_* ✓，命名规则 onnx::MatMul_2081 → onnx__MatMul_2081 ✓）
+    ⇒ 搬迁/复用时★必须整目录带上★，只搬 .onnx 会让 OMG 报 ParseOriginONNX2IrGraph FAIL ✗
 ```
 
 ### 43.4 还试过一个"组合拳"：fp16 小 ONNX + OMG 显式声明 FP32 I/O ✗
@@ -3120,17 +3136,17 @@ s24（11 层，2.88 GB）         ⇒ 776 KB ✗ 空壳
 实测：★OMG ok=0 ✗★（converter 随之失败）⇒ OMG 不接受"网络 fp16 但 I/O 声明 fp32"
 ```
 
-### 43.5 结论与出路
+### 43.5 结论与出路（表格中 OMG 一行已按 §46 更正）
 
 | 路线 | 能建？ | 内存 | 结论 |
 |---|---|---|---|
-| int8（ONNX 直转） | ✓ | ~19× ✗ | 三段必 OOM ✗ |
-| fp16 I/O（ONNX 直转） | ✗ Build -1 | — | 段图必须 fp32 I/O ✗ |
-| OMG（fp16 权重 + fp32 I/O） | 仅 ≤8 层 ✓ | ~2.9× ✓ | 12 层被 OMG 截断 ✗ |
-| dopt + OMG + **hiai**（Qwen3-8B 那条 ✓） | ? | 8B 仅 5.1 GB ✓ | 唯一可能实现"少段 + 省内存"的路 ✓，但要把 runner 从 `.ms`/NDK 换到 hiai/omc ✗ |
+| int8（ONNX 直转） | ✓ | ~19× ✗ | 三段必 OOM ✗（**此结论不变** ✓） |
+| fp16 I/O（ONNX 直转） | ✗ Build -1 | — | 段图必须 fp32 I/O ✗（**此结论不变** ✓） |
+| OMG（fp16 权重 + fp32 I/O） | ✓ 小段已通 ✓ | ~2.9× ✓ | ★12 层段**未被证伪**★ ✓ —— 卡在"外置权重形态未与转换器对齐" ✓（§46）；`--weight_merge` 待验证 |
+| dopt + OMG + **hiai**（Qwen3-8B 那条 ✓） | ✓（8B 已证 ✓） | 8B 仅 5.1 GB ✓ | 最省内存的路 ✓；官方流程产出的就是转换器友好的 `SubGraph_0.weight` 形态 ✓ |
 
-**短期建议**：维持 5 段（7.46 GB `.ms`、~2.9×、**已验证能跑** ✓）。
-**想要更少的段/更小的常驻**：只有官方 **dopt(W4) + OMG + hiai** 那条（§42 表里最后一格 ✓）。
+**短期建议**：维持 5 段（7.46 GB `.ms`、~2.9×、**已验证能跑** ✓）—— 在 §46 的 `--weight_merge` 验证通过前，三段仍不可用 ✓。
+**要更少的段 / 更小的常驻**：① 先把 `--weight_merge` 配对（10 分钟级 ✓，能成就回到"三段 + `--large-mem`"验证 ✓）；② 或走官方 **dopt(W4) + OMG + hiai**（§42 表最后一格 ✓）。
 
 ## 44. 本机"能跑多大的模型"——实测能力边界（Qwen3.8 之类的问题）
 
@@ -3202,7 +3218,11 @@ torch.onnx.export(m, (ids, pos), "x.onnx", dynamo=True, opset_version=18, ...)
   ★CumSum×1★            →   ✗ 缺
   ★GatherND×1★          →   ✗ 缺
   Where ✓ Expand ✓ Range ✓ Slice ✓ Pad ✓ Softmax ✓ MatMul ✓
-⇒ 三类算子缺失 ✗ + 动态形状（Slice×81 · Shape×10 · Range×1）+ 10.8 GB 远超 OMG 的 ~2 GB 输入上限 ✗
+⇒ 三类算子缺失 ✗ + 动态形状（Slice×81 · Shape×10 · Range×1）
+  ＋ 10.8 GB（fp32）/ 5.4 GB（fp16）的规模 —— ★但注意：规模不是"OMG 上限"问题✗★
+     （OMG 对大模型走外置权重 ✓，见 §46 ✓）；真正的规模障碍是
+     ① OMG 散落的外置权重要与转换器对齐（`--weight_merge` ✓ 待验证）
+     ② 必须分段才能上 NPU（LFM2 每层还有 conv 状态要做成显式 I/O ✓）
 ```
 
 ### 45.3 结论
@@ -3251,6 +3271,9 @@ g4_export.py 的 12 层导出留下 ★seg.onnx 218 KB + 152 个 onnx__* 文件�
 ```
 
 ### 46.3 结论修正
+
+> 📌 这条知识已同步进转换文档：[model-conversion.md §0.1](model-conversion.md)
+> （面向"要转换模型的人"写了两条常见误判：看 omc 小就以为失败 ✗、搬迁 ONNX 漏掉外置数据 ✗）
 
 ```
 · ✗ 旧结论："OMG 有 ~2 GB 上限 ⇒ 12 层段转不出"

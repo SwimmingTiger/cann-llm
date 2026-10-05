@@ -61,6 +61,36 @@ ONNX  +  外置的 embedding_weights / embedding_dequant_scale
 | 导出 ONNX | ~2.4 min |
 | OMG 转换 | ~3 min |
 
+### 0.1 ★产物是"图 + 外置权重"，OMG 没有模型大小上限★（两个常见误判）
+
+**误判 1：看到 `.omc` 很小就以为转换失败 ✗**
+```
+· OMG 的输出有两种形态：
+    小模型 → 权重【内联】进 .omc（omc 本身就有数 GB）
+    大模型 → 权重【外置】成独立文件，.omc 只剩【图】（可以只有几百 KB ✓）
+· 官方 8B 包就是这个形态：<name>.omc 6.8 MB + SubGraph_0.weight ★4.39 GB★
+⇒ ★OMG 没有"模型大小上限"✗★ —— 大模型照样转得出，只是权重在外置文件里 ✓
+  判断转换是否成功要看【整目录】，不能只看 omc 大小 ✓
+```
+
+**误判 2：复用了 `.onnx` 却漏掉它的外置数据文件 ✗**
+```
+· torch 导出的大 ONNX 自己也会外置权重 ✓：
+    seg.onnx（只有 218 KB 的壳）+ 152 个 onnx__MatMul_* 数据文件
+    命名规则：onnx::MatMul_2081 → onnx__MatMul_2081 ✓
+· 只搬 .onnx ⇒ OMG 报：
+    ParseOriginONNX2IrGraph(...) "false, return FAIL" ⇒ Failed to generator IR graph!
+⇒ ★搬迁/复用 ONNX 时必须整目录带上它的 onnx__* 外置文件★ ✓
+```
+
+**权重聚合开关**：OMG 的 `--weight_merge`（`--help` 原文：
+*"IR model weight merge switch. Support true(default): weight data will be merged in IR model;
+false: weight data will not be merged"*）—— 外置形态散成逐张量文件时，
+转换器（`converter_lite --fmk=THIRDPARTY`）需要的是**聚合权重**形态
+（官方产物即 `SubGraph_0.weight` ✓）；对不上时 `seg.ms` 只有几百 KB ✗。
+（这条在 gemma 三段实验里踩到过，详见
+[maintainer-notes §46](maintainer-notes.md#46-修正-43-的一个错误结论omg-没有模型大小上限大模型走的是外置权重形态) ✓）
+
 ---
 
 ## 1. 前置条件
