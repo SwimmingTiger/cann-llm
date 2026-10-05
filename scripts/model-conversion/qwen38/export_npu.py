@@ -36,6 +36,55 @@ def ddk_has(op: str) -> bool:
     return False
 
 
+class WrapBodyStaticPos(torch.nn.Module):
+    """★把 position_ids 烘成常量★（S 固定 ⇒ arange(S) 是编译期常量 ✓）
+
+    动机（§51 实测）：
+      · int64 图输入 ⇒ 设备上 `OH_AI_ModelBuildFromFile` 直接 -1 ✗
+      · int32 图输入 ⇒ converter_lite 报 "SetMetaGraphInput: input Parameter_1 not found" ✗
+    两头堵 ⇒ 干脆不把它当输入 ✓：S 固定时位置就是常量 ✓。
+    """
+
+    def __init__(self, m, s: int, attn_mask: bool = False):
+        super().__init__()
+        self.body = m.model
+        self.attn_mask = attn_mask
+        self.register_buffer("pos", torch.arange(s, dtype=torch.long).unsqueeze(0), persistent=False)
+
+    def forward(self, inputs_embeds):
+        kw = {}
+        if self.attn_mask:
+            kw["attention_mask"] = torch.ones(inputs_embeds.shape[:2], dtype=torch.long,
+                                              device=inputs_embeds.device)
+        out = self.body(inputs_embeds=inputs_embeds, position_ids=self.pos,
+                        use_cache=False, **kw)
+        return out.last_hidden_state
+
+
+class WrapBody(torch.nn.Module):
+    """★只导 transformer 层★：输入 inputs_embeds，输出 hidden_states ✓
+
+    词表投影（lm_head）与 embedding 表都太大（248320×2048 ≈ 2 GB fp32 ✗），
+    进图会让 ONNX 超 2 GB ⇒ 转换器吃不下 ✗（§51 实测 ✓）。
+    gemma4 的做法也是把它们放到主机侧 ✓（见 docs/maintainer-notes.md §30 ✓）。
+    """
+
+    def __init__(self, m, attn_mask: bool = False):
+        super().__init__()
+        self.body = m.model            # 不含 lm_head ✓
+        self.attn_mask = attn_mask
+
+    def forward(self, inputs_embeds, position_ids):
+        position_ids = position_ids.long()
+        kw = {}
+        if self.attn_mask:
+            kw["attention_mask"] = torch.ones(inputs_embeds.shape[:2], dtype=torch.long,
+                                              device=inputs_embeds.device)
+        out = self.body(inputs_embeds=inputs_embeds, position_ids=position_ids,
+                        use_cache=False, **kw)
+        return out.last_hidden_state
+
+
 class Wrap(torch.nn.Module):
     """只暴露 logits（transformers 5.x 输出里带 DynamicCache，dynamo 不认 ✗）"""
 
@@ -88,6 +137,10 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--attn-mask", action="store_true", help="显式传全 1 attention_mask（绕开 mask→position_ids ✗）")
     ap.add_argument("--layers", type=int, default=0, help=">0 时用真实宽度但只保留这么多层（做单图验证 ✓）")
+    ap.add_argument("--static-pos", action="store_true",
+                    help="把 position_ids 烘成常量（S 固定 ✓ 单输入图 ⇒ 设备能建图 ✓）")
+    ap.add_argument("--no-embed-head", action="store_true",
+                    help="只导 transformer 层（输入 inputs_embeds / 输出 hidden_states ✓ 避开 2 GB 词表 ✗）")
     args = ap.parse_args()
     tiny = args.tiny or not args.full
     out = args.out or ("micro_qwen35.onnx" if tiny else "qwen35_2b.onnx")
@@ -103,15 +156,35 @@ def main():
     N.install(M)
 
     s = args.seq
-    # ★dummy 用 int32★ ⇒ 图输入就是 int32 ✓（DDK 对 int64 支持存疑 ✗；wrapper 内部 Cast 到 int64 ✓）
-    ids = torch.arange(1, s + 1, dtype=torch.int32).unsqueeze(0)
-    pos = torch.arange(s, dtype=torch.int32).unsqueeze(0)
+    # ★dummy 用 int64★：实测 converter_lite 对 int32 图输入会报
+    #   "input Parameter_1 not found in graph" ✗（§51）；而 int64 输入转换正常 ✓
+    ids = torch.arange(1, s + 1, dtype=torch.long).unsqueeze(0)
+    pos = torch.arange(s, dtype=torch.long).unsqueeze(0)
     print("③ 导出 ONNX（dynamo / opset18 / 固定 S=%d）…" % s, flush=True)
-    torch.onnx.export(
-        Wrap(m, args.attn_mask), (ids, pos), out,
-        input_names=["input_ids", "position_ids"], output_names=["logits"],
-        dynamo=True, opset_version=18, do_constant_folding=True,
-    )
+    if args.static_pos:
+        _tc = m.config.text_config if hasattr(m.config, "text_config") else m.config
+        emb = torch.zeros(1, s, _tc.hidden_size, dtype=torch.float32)
+        print("    ★position_ids 烘成常量（单输入图 ✓）", flush=True)
+        torch.onnx.export(
+            WrapBodyStaticPos(m, s, args.attn_mask), (emb,), out,
+            input_names=["inputs_embeds"], output_names=["hidden_states"],
+            dynamo=True, opset_version=18, do_constant_folding=True,
+        )
+    elif args.no_embed_head:
+        _tc = m.config.text_config if hasattr(m.config, "text_config") else m.config
+        hid = _tc.hidden_size
+        emb = torch.zeros(1, s, hid, dtype=torch.float32)
+        torch.onnx.export(
+            WrapBody(m, args.attn_mask), (emb, pos), out,
+            input_names=["inputs_embeds", "position_ids"], output_names=["hidden_states"],
+            dynamo=True, opset_version=18, do_constant_folding=True,
+        )
+    else:
+        torch.onnx.export(
+            Wrap(m, args.attn_mask), (ids, pos), out,
+            input_names=["input_ids", "position_ids"], output_names=["logits"],
+            dynamo=True, opset_version=18, do_constant_folding=True,
+        )
     sz = os.path.getsize(out) + (os.path.getsize(out + ".data") if os.path.exists(out + ".data") else 0)
     print("   产物 %.2f GB" % (sz / 1e9), flush=True)
 

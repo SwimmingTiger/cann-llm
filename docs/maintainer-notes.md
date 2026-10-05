@@ -3585,3 +3585,46 @@ qwen3_5 的 ONNX 需要 27 种算子，DDK 缺 4 个：
 ② 若定位到少数算子 ⇒ 继续 lowering 掉它们（如 Softplus → log1p(exp(x)) ✓ 等）✓
 ③ 若能建图 ⇒ 把 24 层切成 3~4 段（每段带 position 常量 ✓ + 段间 hidden 传递 ✓）⇒ 设备上跑通前向 ✓
 ```
+
+## 52. ★★★★★ 目标③ 的真凶：不是算子缺失，是【≥4 维张量】被 OMG 拒收 ★★★★★
+
+### 52.1 两条关键教训（都踩过 ✓）
+
+```
+① ★设备只认"经 OMG 编译"的 .ms★
+   实测对照（同一条探针 ✓）：
+     x570 产的 gemma int8 段（走 OMG + converter --fmk=THIRDPARTY ✓）：Build rc=0 · Predict rc=0 ✓✓
+     hu60tx 产的 matmul toy（走 converter --fmk=ONNX 直转 ✗）  ：Build rc=-2 · Predict rc=-2 ✗✗
+   ⇒ ★`--fmk=ONNX` 直转出来的 .ms 设备一律拒收✗★（连一个 MatMul 都不行 ✓）
+   ⇒ 必须：OMG（--target=omc）→ converter_lite --fmk=THIRDPARTY ✓
+     （仓库 `scripts/model-conversion/int8/README.md` 早就写了这一条 ✓ —— 我绕了远路 ✗）
+   ★附带坑★：我那个"批量探针"没设 NNRt device id，导致连已知能建的 gemma 段都报 -1/-2 ✗
+     （§41 的老坑 ✓）；且同进程连建多个模型不稳 ✗ ⇒ 一律用单进程探针 ✓
+
+② ★OMG 的 pre-check 报告是宝藏★：失败时生成 check_result.json（逐算子 pass/fail ✓）
+   用法：grep fail/total，再按 op 的 type 统计 ✓
+```
+
+### 52.2 真凶：49 个 `Reshape` 失败 —— 因为它们操作的是 **5 维张量** ✗
+
+```
+q35_sp_L4.onnx（真实宽度前 4 层 · 0.92 GB · 单输入图）走 OMG：
+  total 893 · pass 844 · ★fail 49★
+  失败类型统计：★Reshape ×49（全部是 node_view_*，即 torch 的 .view()）★
+  通过的类型：MatMul×219 Add×148 Mul×97 Slice×89 Gather×51 Transpose×35
+             Unsqueeze×22 Pow×20 Sqrt×20 Where×15 Concat×15 …（含 5 个普通 Reshape ✓）
+⇒ ★不是算子不支持，而是【≥4 维张量】被 NPU-CL 拒收★ ✗
+   —— 与 gemma4 当年的结论完全一致（§30：「全部张量 3 维化，NPU-CL 对 ≥4 维支持很差 ✗」✓）
+   我们的分块 delta rule 用 5 维张量：[B,H,nc,C,D] 与 [B,H,nc,C,C] ✗
+```
+
+### 52.3 修法（照 gemma4 的老办法 ✓）
+
+```
+把 (head, chunk) 折进前导维，★全程保持 3 维★ ✓
+    [B,H,nc,C,D] → [B*H*nc, C, D]        ✓ 3 维
+    [B,H,nc,C,C] → [B*H*nc, C, C]        ✓ 3 维
+块间顺序扫描：用固定下标的 Slice 逐块取（chunk 数是编译期常量 ✓ ⇒ 可展开 ✓）
+M-RoPE：同样把 (3, bs, pos) 的用法摊平成 3 维 ✓
+⇒ 改完重新对拍（目标① 的判据不变 ✓）→ 重新 OMG + THIRDPARTY 转换 → 设备试建 ✓
+```
