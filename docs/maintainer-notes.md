@@ -7546,3 +7546,52 @@ C 换路：CPU/GGUF（已跑通 ✓ 非 NPU ✗）
 ③ 定位后 ⇒ 在生成器里补对应处理（如给每个参数补齐个数 ✓ / 把权重 reshape 成同秩 ✓）
    —— 我们的 exporter 本来就是三维化的 ✓ 改起来不难 ✓
 ```
+
+## 138. ★每个算子的通过率统计（规律很清楚 ✓）★ + 两个被排除的假说 ✗
+
+### 138.1 通过率（真实 2 层模型 ✓ 543 节点 ✓）
+
+```
+★通过✓★：MATMUL 143/143 ✓ · POW 17/17 ✓ · PAD 2/2 ✓
+★失败✗★：ADD 93/0 · SLICE 72/0 · MUL 66/0 · RESHAPE 32/0 · CAST 30/0 · TRANSPOSE 22/0 ·
+   EXP 12/0 · CONCAT 10/0 · UNSQUEEZE 10/0 · SIGMOID 8/0 · SUB 6/0 · WHERE 4/0 · NEG 4/0 ·
+   DIV 2/0 · GATHER 2/0 · SPLIT 2/0 · SQRT 2/0 · REDUCE_MEAN 2/0 · LOG 2/0
+⇒ ★合计 381 失败 / 543★ ✓
+```
+
+### 138.2 已排除的两个假说 ✗
+
+```
+① ★"参数个数"假说✗★：0/1 个参数失败 ✗、2 个成功 ✓ —— 但把 MUL/ADD 的参数【删掉】后
+   失败数【仍是 381】✗ ⇒ 排除 ✓
+② ★"不同秩广播"假说✗★：把 68 个秩 1 张量升到秩 3（[1,d] ⇒ [1,1,d]）后失败数【仍是 381】✗ ⇒ 排除 ✓
+```
+
+### 138.3 ★真正的规律：ONNX 与 NNRt 的"输入/参数约定"不同✗★（失败样例直指 ✓）
+
+```
+  OP[0]  MUL(22)      params=[442] ins=★[437, 437]★ outs=[443] ✗
+        ⇒ 同一个张量被当成两个输入 ✗（NNRt 可能不允许 ✓ 需验证 ✓）
+  OP[3]  ADD(1)       params=[449] ins=[448, 39] outs=[450] ✗
+  OP[8]  TRANSPOSE(41) params=[]  ins=★[460]★ outs=[461] ✗
+        ⇒ ★ONNX 的 Transpose 把 perm 放在【属性】✗；NNRt 要【张量输入】✓★
+  OP[10] RESHAPE(45)  params=[]   ins=[464, 41] outs=[465] ✗
+        ⇒ NNRt 的 Reshape 可能把目标形状当【参数张量】✗（而非输入 ✓）
+⇒ ★结论★：剩下的是【每个算子一张"输入/参数约定表"】✗ —— 纯工作量 ✓ 但必须做 ✓
+   · 需要按 NNRt 头文件里每个算子的注释（@param 说明 ✓）逐个核对 ✓
+   · 这正是 PARAM_TABLE 的姊妹表：INPUT_MAP ✓
+```
+
+### 138.4 下一步
+
+```
+① 写 INPUT_MAP（每个 ONNX 算子 ⇒ NNRt 的输入/参数构造方式 ✓）：
+   · Transpose ⇒ 把 perm 属性做成张量输入 ✓
+   · Reshape   ⇒ 核对目标形状是输入还是参数 ✓
+   · Slice     ⇒ ONNX 是 starts/ends/axes/steps（4 输入 ✓）⇒ NNRt 是 begin/size + AXES 参数 ✓
+   · Cast      ⇒ 目标类型在属性里 ⇒ NNRt 可能用参数张量 ✓
+   · Concat/Unsqueeze/Split/ReduceMean ⇒ 已有参数表 ✓ 但可能取值来源要改 ✓
+   · ADD/MUL/SUB/DIV ⇒ 同张量两输入 ⇒ 需确认是否允许 ✓（不允许就复制一份张量 ✓）
+② 头文件里每个算子都有详细注释（输入个数、参数 ✓）⇒ 用脚本抽取成表 ✓ 再人工核对 ✓
+③ 逐个修复后重跑 ⇒ 目标：AddOperation 失败 0 ⇒ Finish=0 + ★Build=0★
+```
