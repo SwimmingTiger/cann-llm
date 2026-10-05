@@ -4938,3 +4938,31 @@ CPUCL: GenerateOp(153)::"Op:/Mul_1 opRunContext UpdateDataAndWeight failed" ✗
 若 fp32 + 外置也不行 ⇒ 再排查 onnx_weights_to_fp16.py 的 Cast 是否真的破坏了元数据 ✓
    （可以对比：同一张图，转 fp16 前 / 后，onnx.checker + 权重 dims 是否一致 ✓）
 ```
+
+## 81. ★fp32 + 外置权重也能过（不需要 fp16 那步 ✗）★ —— 用户重启电脑，任务暂停
+
+```
+OMG fp32（q35_hiai_low.onnx ✓ 5.49 GB 权重）+ --save_weights_as_external_data=true：
+  ★rc=0 · "OMG generate offline model success." ✓★
+  ★seg.omc = 6.1 MB ✓ + seg/SubGraph_0.weight = 5624.3 MB（fp32 ✓）★
+⇒ ★说明 fp16 那一步（onnx_weights_to_fp16.py）完全不需要✗✓★
+   —— 之前 fp32 失败只是【单体保存撞 4 GB】✗，权重外置后就没这个问题 ✓
+★这也印证 §80 的怀疑：引擎的那个 "param[size] < dataSize"（/input_layernorm/Mul_1 权重）
+  很可能就是 fp16 Cast 步骤留下的元数据问题 ✗ ⇒ 换成 fp32 外置版应该就好了 ✓（待验证 ✓）
+```
+
+### 81.1 恢复任务后的第一步（非常明确 ✓）
+
+```
+① 把 omg_f32 的产物灌进模型包：
+     hu60tx:~/q38/omg_f32/seg/seg.omc            → models/model_qwen38_2b_hiai/qwen38_2b.omc
+     hu60tx:~/q38/omg_f32/seg/SubGraph_0.weight  → models/model_qwen38_2b_hiai/SubGraph_0.weight
+② 跑：./cann-llm/scripts/start_chat.sh -d models/model_qwen38_2b_hiai --large-mem -p '你好'
+   ⇒ 若不再报 param[size] < dataSize ✓ 就看下一步（采样/解码/形状）✓
+③ 相关环境（都在 hu60tx ✓，与本机重启无关 ✓）：
+     ~/q38/{export_hiai_q35.py, lower_hiai.py, npu_layers.py, npu_attention.py, npu_gated_delta.py}
+     ~/q38/{q35_hiai_full.onnx, q35_hiai_low.onnx, omg_f32/, omg_ext/, dopt_work/}
+     ~/q38/dopt_shim/sitecustomize.py（dopt 的 M-RoPE 补丁 ✓）
+     ~/q38cuda（CUDA venv ✓）· ~/q38env（python3.10 主环境 ✓）
+   ★本机重启不影响 hu60tx 上的任何东西 ✓★
+```
