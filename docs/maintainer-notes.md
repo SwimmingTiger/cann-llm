@@ -3934,3 +3934,48 @@ E/AI_NPUCL 统计（真实微型图 nat11）：
    + <name>.json / api_config.json（照 W4 包改维度 ✓）
 ③ 用 src/cann_llm/backends/hiai.py 在设备上加载 ⇒ 聊天 ✓（目标③ 直接闭环 ✓）
 ```
+
+## 60. 转向 hiai 模型包：素材清点 + 官方图接口（本轮摸底）
+
+### 60.1 素材（全部到位 ✓）
+
+```
+✓ dopt 工具：~/ddk/tools/tools_dopt/dopt_pytorch_py3/dopt/dopt_lm/opt_main.py（hu60tx ✓）
+✓ 官方样例仓库：hu60tx:~/q38/cannkit（gitcode HarmonyOS_Samples/cannkit_samplecode_lm_engine_cpp ✓）
+    CANN_LLM/CANN_LLM_Engine_Model/npu_tuned_export/
+      export_model_single_qwen2.py · export_model_single_qwen3.py · export_model_single_glm.py
+      onnx_utils.py · model_info_target.yaml
+✓ 仓库流水线：scripts/model-conversion/qwen/build_model.py（导出+onnxsim+OMG+装配 一条龙 ✓）
+     还支持 --arch / --layers / --hidden / --kv-heads / --head-dim / --vocab-size 等切片参数 ✓
+✓ 成品包对照：models/model_qwen2_1p5b_w4_2048/（§47 跑通 6.0 tok/s ✓）
+✓ 后端：src/cann_llm/backends/hiai.py（按目录加载 omc + 同名 json + api_config ✓）
+✓ 补两个文件的工具：PYTHONPATH=src python3 -m cann_llm.modelpkg <模型目录>
+✓ 全部量化+导出+OMG 配方：§47.1（dopt 三阶段 → build_model.py → modelpkg → start_chat.sh）
+```
+
+### 60.2 ★官方图接口★（我们的导出必须匹配，摘自 export_model_single_qwen3.py ✓）
+
+```
+输入： input_ids            [batch, seq_len]                        int64
+       attention_mask       [batch, 1, seq_len, kv_cache_max_len]   dtype
+       position_ids         [batch, seq_len]                        int64
+       past_key_in{i}       [batch, kv_heads, kv_cache_max_len, head_dim]
+       past_value_in{i}     同上
+输出： lm_logits            [batch, seq_len, vocab]
+       past_key{i} / past_value{i}
+  （模型内部先做 embed_tokens ✓，再喂进 decoder ✓）
+```
+
+### 60.3 下一步（待做）
+
+```
+① 把官方导出脚本适配到 qwen3_5（混合架构：24 层里 18 层线性注意力 + 6 层全注意力 ✗）：
+   · 套上我们的 3 维化补丁（npu_gated_delta.py + npu_attention.py ✓ 对拍 argmax 1.0000 ✓）
+   · 但两处要补"缓存接口"：全注意力的 past_key/value（4 维 ✓）
+     与线性注意力的循环状态（delta rule 的 final_state ✓）
+② dopt(W4) 量化 2B 模型（★必须 CUDA★，hu60tx 是 RTX 2060 6 GB ✗ 可能偏紧 ⇒ 备选：
+   先在 CPU/切片上验证流程，或改用仓库的 ONNX 级量化 ✓）
+③ build_model.py 一条龙 ⇒ omc + SubGraph_0.weight + embedding + 配置 ✓
+④ PYTHONPATH=src python3 -m cann_llm.modelpkg ⇒ 补 api_config.json / <name>.json ✓
+⑤ scripts/start_chat.sh -d <模型目录> -p '1+1=' ⇒ ★设备上聊天★（目标③ 闭环 ✓）
+```
