@@ -5761,3 +5761,51 @@ s3_norm   + gated RMSNorm ✓                   ✓    ★rc=0★   34M
    strings seg.omc | grep -c "subgraph" 或用 omg --mode 1 转 json ✓
    ⇒ 验证"子图多 ⇒ Init 失败"这条相关性 ✓
 ```
+
+## 100. 串联的三种微变体全部失败 ✗ ⇒ 病灶稳健绑定"串联"；★新相关：子图数 13 ⇒ 失败 / 7 ⇒ 成功★
+
+### 100.1 串联微变体（都把"串联"以外的因素挪开 ✓）
+
+```
+变体     Init rc   含义
+ident    ★rc=1✗★   串联 + 中间加恒等（o0*1.0 ⇒ 打断 OMG 的折叠优化 ✓）
+extra    ★rc=1✗★   串联 + 把 o0 也作为输出（多一个引用 ✓）
+liveh    ★rc=1✗★   串联 + 保持对 h 的引用（o0 + h*0 ✓，数值等价 ✓）
+⇒ ★三种都失败✗★ ⇒ 不是某个具体优化造成的 ✓，就是"hidden 串联"这个结构本身 ✗
+```
+
+### 100.2 ★强相关：SubGraph_*.weight 文件个数★
+
+```
+★串联类★（dep / same / ident / extra / liveh）：★13 个★ SubGraph_*.weight ⇒ Init rc=1 ✗
+★并联类★（indep / states）：7 个 ⇒ rc=0 ✓
+单层 s4_full：7 个 ⇒ rc=0 ✓
+真 2 层 / 24 层：1 个（权重被合并进 SubGraph_0 ✓）⇒ rc=1 ✗
+官方 Qwen3-8B：1 个 ⇒ rc=0 ✓
+⇒ 数值上"≥13 ⇒ 失败 / ≤7 ⇒ 成功"很明显 ✓ —— 像是 DDK 内部有个固定上限 ✗
+★但要小心★：文件个数 ≠ 子图个数 ✗（OMG 可以把多个子图的权重放进同一个文件 ✓）
+   所以真 2 层"1 个文件"不代表"1 个子图" ✗ —— 需要别的办法数真实子图数 ✓
+```
+
+### 100.3 OMG 的全部选项（已列全 ✓ 没有子图切分开关 ✗）
+
+```
+与本次相关的：
+  ★--hiai_version★  Version of hiai. Support ★master(default), IR, v310, v300★ ✓
+     ⇒ 决定产物的 HIAI ABI 版本 ✓ —— ★若版本与设备运行时不符，Load 可能过而 Init 失败✗✓★
+  --stream_num  Stream num(default 1; current only support 1) ✓
+  --weight_merge  true(default)/false ✓（实测对 omc 体积无影响 ✓）
+  --use_origin_format  ✓（已试无效 ✗）
+  --mode 0/1/3（1 = om→json ✓ 可用于★把 omc 转成 json 来数真实子图★✗→✓）
+```
+
+### 100.4 下一步
+
+```
+① ★试 --hiai_version★：对失败的 2 层/串联探针分别用 master / IR / v310 / v300 重编 ✓
+   ⇒ 看 Init rc 是否翻转 ✓（最便宜的一刀 ✓ 单开关 ✓）
+② ★数真实子图数★：用 omg --mode 1 把（om 形式的）模型转 json ✓ 或在 omc 里找结构信息 ✓
+   ⇒ 验证"子图上限"这条假设 ✓
+③ 若①无效 ⇒ 换思路：★把状态张量从图里彻底去掉★（做一张"无状态"的图：
+   把每层的状态【当作普通中间张量】，只在图内用 ✓ ⇒ 但那会改变语义 ✗ hmm）
+```
