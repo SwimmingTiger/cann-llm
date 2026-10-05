@@ -4899,3 +4899,42 @@ venv：~/q38cuda（uv venv --python 3.10 ✓ + torch cu121 ✓ = torch 2.5.1+cu1
   ⇒ 得到 ★官方形态的 omc + SubGraph_0.weight + embedding_weights/scale★ ✓
   ⇒ 组装模型包 → 引擎加载 ⇒ 聊天 ✓
 ```
+
+## 80. ★★★★★★ 产出官方外置权重形态成功（omc 6.3 MB + SubGraph_0.weight 2878.8 MB）★★★★★★
+
+```
+OMG 加上 ★--save_weights_as_external_data=true★（这个开关是仓库 omg_convert.py 里
+  记着"开发机上当年能跑的那条命令"里带的 ✓ §47 的历史命令 ✓）：
+    omg --model q35_hiai_fp16.onnx --framework 5 --output omg_ext/seg \
+        --input_shape="input_embed:1,64,2048" --input_type="input_embed:FP32" \
+        --output_type="hidden_states:FP32" --weight_data_type FP16 \
+        ★--save_weights_as_external_data=true★ --platform=kirinx90 --target=omc
+  ⇒ rc=0 · "OMG generate offline model success." ✓
+  ⇒ ★seg.omc = 6.3 MB ✓ + seg/SubGraph_0.weight = 2878.8 MB ✓★
+     日志："save weights list as external data." ✓ / "SaveCompiledModelToFile SUCCESS." ✓
+★与能跑的 models/model_qwen2_1p5b_w4_2048（omc 3.0 MB + SubGraph_0.weight 3104 MB）同形态 ✓✓★
+（omg_convert.py 的注释还点明了 §47 那次失败的真因：
+  "真正的原因在输入 ONNX 的权重精度：当年那份是 fp16 量级（产物 3.1 G），我们这次是 fp32（5.8 G）" ✓）
+```
+
+### 80.1 但引擎仍然失败 ✗ —— 已定位到具体算子与张量
+
+```
+CPUCL: op_run_context "param["size"] is less than["dataSize"]" ✗
+CPUCL: GenerateOp(153)::"Op:/Mul_1 opRunContext UpdateDataAndWeight failed" ✗
+查图：★/input_layernorm/Mul_1★（第 0 层 input_layernorm 的 Mul ✓）
+   输入 = /input_layernorm/Mul_output_0（激活 ✓）+ ★onnx::Mul_17452（权重初始化器）★
+⇒ "声明的 size 比实际 dataSize 小" ✗ ⇒ ★权重元数据与实际数据不符✗★
+★高度怀疑：onnx_weights_to_fp16.py 插 Cast 那一步留下的元数据问题✗★
+   （它是"激活侧 Cast"方案 ✓ 把大权重转 fp16 ✓ 并就地插 Cast ✓ —— 元数据可能没同步 ✓）
+```
+
+### 80.2 下一步（很可能就是最后一关）
+
+```
+★用 --save_weights_as_external_data=true 试【fp32 版】图★ ✓（q35_hiai_low.onnx ✓ 5.49 GB 权重 ✓）
+  —— 之前 fp32 失败是因为【单体保存撞 4 GB】✗；现在权重外置 ✓ ⇒ 可能直接就过了 ✓✓
+  ⇒ 若成功 ⇒ ★完全不需要 onnx_weights_to_fp16.py 那步✗★ ⇒ 元数据干净 ✓ ⇒ 引擎可能就接受了 ✓
+若 fp32 + 外置也不行 ⇒ 再排查 onnx_weights_to_fp16.py 的 Cast 是否真的破坏了元数据 ✓
+   （可以对比：同一张图，转 fp16 前 / 后，onnx.checker + 权重 dims 是否一致 ✓）
+```
