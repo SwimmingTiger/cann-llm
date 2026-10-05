@@ -7205,3 +7205,38 @@ strings /system/lib64/platformsdk/libnnrt_proxy_1.0.z.so：
    b) 换回 CPU/GGUF（已跑通 ✓ 只是慢 ✗）
    c) 继续找"厂商离线模型"的正确格式（信息在厂商侧 ✗ 与 §120 的厂商提问材料合并 ✓）
 ```
+
+## 130. ★★NNRt 算子表覆盖度：我们 24 种算子几乎全有对应（在线建图路线可行✓）★★
+
+### 130.1 对照结果（用户选择"走在线建图 + 先探算子覆盖" ✓）
+
+```
+★NNRt 支持 108 个算子★（从 neural_network_runtime_type.h 的 OH_NN_OPS_* 枚举取出 ✓）
+★我们图里的 24 种算子（q35_chk.onnx 实测 ✓）与 NNRt 的映射★：
+   Add→ADD ✓ · Cast→CAST ✓ · Concat→CONCAT ✓ · ConstantOfShape→CONSTANT_OF_SHAPE ✓
+   Div→DIV ✓ · Exp→EXP ✓ · Gather→GATHER ✓ · MatMul→MATMUL ✓ · Mul→MUL ✓ · Neg→NEG ✓
+   Pad→PAD ✓ · Pow→POW ✓ · ReduceMean→REDUCE_MEAN ✓ · Reshape→RESHAPE ✓ · Sigmoid→SIGMOID ✓
+   Slice→SLICE ✓ · Split→SPLIT ✓ · Sqrt→SQRT ✓ · Sub→SUB ✓ · Transpose→TRANSPOSE ✓
+   Unsqueeze→UNSQUEEZE ✓ · Where→WHERE ✓
+★缺口只有两个（都好办 ✓）★：
+   · ★Softplus★ 不在列表 ✗ ⇒ 用 LOG+EXP+ADD 展开 ✓（我们 lowering 里本来就有这个改写 ✓）
+   · ★Constant★ 不在列表 ✗ ⇒ 常量张量直接用 OH_NNModel_SetTensorData 设 ✓（无需算子 ✓）
+★另外 NNRt 还有我们以后可能用得上的★：LAYER_NORM ✓ L2_NORMALIZE ✓ SOFTMAX ✓
+   RSQRT ✓ RECIPROCAL ✓ SQUARE ✓ STACK ✓ UNSTACK ✓ SQUEEZE ✓ EXPAND_DIMS ✓
+   FULL_CONNECTION ✓ CONV2D ✓ DEPTHWISE_CONV2D_NATIVE ✓ LSTM ✓ …
+```
+
+### 130.2 下一步：★实测算子覆盖（写覆盖率探针）★
+
+```
+★做法★：写一个探针，对【每个关键算子】在线建一个极小图 ✓
+   ⇒ OH_NNModel_Finish ✓ + OH_NNCompilation_Build(NPU) ✓
+   ⇒ 得到一张"★NNRt 实际能编到 NPU 的算子表★" ✓
+★优先测这些（不确定性最高 ✓）★：
+   SQRT ✓ POW ✓ REDUCE_MEAN ✓ WHERE/SELECT ✓ SPLIT ✓ GATHER ✓ PAD ✓ DIV ✓ NEG ✓
+   CONCAT ✓ SLICE ✓ TRANSPOSE ✓ RESHAPE ✓ UNSQUEEZE ✓ CAST ✓
+   ★SOFTPLUS（预期失败 ✗ ⇒ 验证"必须展开"这条结论 ✓）★
+★判据★：Finish==0 && Build==0 ⇒ 该算子可用于我们的在线建图 ✓
+★这个探针还能顺手把"每个算子的参数怎么传"固化下来★ ✓
+   —— 后面写正式建模器时直接照抄 ✓（MatMul 的 transposeA/B 就是这么踩出来的 ✓）
+```
