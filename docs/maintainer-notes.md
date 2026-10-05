@@ -6310,3 +6310,49 @@ check_hiai_parity.py：
    ⇒ 各自 lower（dtype 修复 ✓）⇒ OMG ⇒ 数 model + 测 Init ✓
    —— 这一步便宜（三个小图 ✓）且能立刻分辨出上面两种可能 ✓
 ```
+
+## 111. 用修好的 lower 重做探针：串联仍 13 ✗ / 并联 7 ✓ ⇒ 探针与整模型的 OMG 路径不同 ✓
+
+### 111.1 本轮结果
+
+```
+探针（全部走修好的 lower ✓ 类型修正 0 处 ✓）：
+   v2_dep（两层串联）   ★model=13 ✗★ · weight=13（与修前一样 ✗）
+   v2_indep（两层并联） model=7  ✓  · weight=7
+   st_s4_full（单层）   model=7  ✓  · weight=7
+★对比整模型★（同样修好的 lower ✓）：
+   2 层整模型  ★model=1✓★（修前 13 ✗）
+   24 层整模型 ★model=1✓★（修前 1 ✗）
+⇒ ★dtype 修复只改变了【整模型导出】的子图数 ✗→✓，对【探针】没有影响 ✗★
+   ⇒ 说明探针（直接调 linear_attention_layer ✓）与整模型导出（export_hiai_q35.py ✓）
+     走的是【不同的 OMG 行为】✗ —— 也说明"model 计数"这个代理在不同图上含义不同 ✓
+```
+
+### 111.2 于是 Init 失败的真正约束仍然未知（20+ 轮累计 ✓）
+
+```
+★已排除✗★：串联本身（纯 MatMul 串联 rc=0 ✓）· 2 维张量 · RealDiv · hiai_version
+        · 权重文件缺失 · 层数/状态数/权重内容 · formatMode=USE_NCHW
+        · 子图数（整模型 13→1 后仍失败 ✓）· ONNX 合法性（非法→合法后仍失败 ✓）
+★现在的局面★：
+   · 官方 36 层（17 进 / 5 出 ✓ 无 KV ✓）⇒ rc=0 ✓
+   · 我们单层（3 进 / 1 出 ✓ 有状态 ✓）⇒ rc=0 ✓
+   · 我们 ≥2 层（8~89 进 ✓ 有状态 ✓）⇒ rc=1 ✗
+   ⇒ 失败点既不在"层数"✗ 也不在"状态"✗（单层有状态也能过 ✓）
+   ⇒ ★只可能在某处"多层才出现"的构造上 ✗ —— 而 DDK 不吐原因 ✗★
+```
+
+### 111.3 ★下一步最有价值的一刀（还没试过 ✓）★
+
+```
+★把执行设备强制成 CPU★：ModelDeviceConfig 里有
+    std::vector<ExecuteDevice> modelDeviceOrder;                       // 模型级设备顺序 ✓
+    std::map<std::string, std::vector<ExecuteDevice>> opDeviceOrder;   // 算子级 ✓
+    enum class ExecuteDevice { ★NPU = 0, CPU = 1★ };
+  ⇒ 设 modelDeviceOrder = { ExecuteDevice::CPU } ✓（或 NPU,CPU ✓）
+  ⇒ ★若 Init 就过了✓★ ⇒ 说明问题在【NPU 侧的某个算子/kernel 组合】✗
+     （那就能顺着"哪些算子只能在 CPU 跑"去砍 ✓）
+  ⇒ 若仍失败 ✗ ⇒ 说明与设备无关 ✓ ⇒ 是图结构/元数据层面的东西 ✗
+★另一刀（更省事 ✓）★：把 inputTensorDescs 显式填上（从 ONNX 读出每个输入的形状/dtype ✓）
+   —— DDK 一直是"自己推断" ✓，显式给它也许能绕过推断的坑 ✓
+```
