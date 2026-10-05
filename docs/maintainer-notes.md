@@ -3472,3 +3472,48 @@ DDK 平台库（libai_npucore_*）：
 ② 手写 NPU 版 Gated DeltaNet（固定 shape + 常量三角矩阵 + matmul-only）✗ 1~3 天，收益最大 ✓
 ③ 等官方/DDK 支持 qwen3_5 ✗ 时间不可控
 ```
+
+## 50. 路线②开工：把 qwen3_5 的线性注意力改写成"NPU 算子友好"版（施工中）
+
+### 50.0 工作机已迁到 hu60tx ✓（x570 让给游戏 ✓）
+
+```
+· 已搬迁（x570 → hu60tx 局域网 rsync ✓）：~/q38（Qwen3.8-2B safetensors 4.6G + 脚本 ✓）
+  ~/ddk（1.2G ✓）~/mslite（200M，converter_lite ✓）~/tools（转换辅助脚本 ✓）
+· hu60tx：x86_64 / 16 核 / 62 GB 内存 / docker 免密 ✓ / uv 0.12.19 ✓ / GPU RTX 2060 6G
+· 环境：uv 建 python3.10 ⇒ torch 2.14.1+cpu · transformers 5.18.0 · onnx 1.23.1 · ort 1.23.2 ✓
+· ★注意★：x570 的 mslite-dev 容器 = debian:12 + 把 MindSpore Lite 构建目录 bind mount 进 /src ✓
+  （200 MB 的 converter_lite 已随 mslite/ 一起搬 ✓，hu60tx 上重建容器即可 ✓）
+```
+
+### 50.1 缺口回顾（§49）
+
+```
+qwen3_5 的 ONNX 需要 27 种算子，DDK 缺 4 个：
+  ★ScatterElements · ScatterND · CumSum · Trilu★（其余 23 个都有 ✓）
+```
+
+### 50.2 参考实现的位置（transformers 内置 ✓，纯 PyTorch）
+
+```
+~/q38env/lib/python3.10/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py
+  · causal_conv1d_fn            (268)  ★短卷积（因果）★
+  · ★torch_chunk_gated_delta_rule★ (299)  ★Gated DeltaNet 分块实现★
+  · Qwen3_5GatedDeltaNet.forward (549)
+  （模型代码里的 masked_scatter 只是图文插入用 ✓ 纯文本路径不涉及 ✓）
+  没装 flash-linear-attention / causal-conv1d ⇒ 自动走上面这份参考实现 ✓（对我们有利 ✓）
+```
+
+### 50.3 改写方案（不碰 site-packages，导出时 monkey-patch ✓）
+
+| 参考实现里的写法 | 问题 | NPU 友好替换 |
+|---|---|---|
+| `decay.cumsum(dim=3)` | `CumSum` ✗ 缺 | ★常量下三角矩阵乘法★（`tril(ones) @ decay` ✓ 与 gemma4 用常量矩阵替代 StridedSlice 同一招 ✓）|
+| `torch.ones(C,C).triu(1)` / `masked_fill` | `Trilu` ✗ 缺 | ★常量布尔掩码 + `Where`★ ✓（C 固定 ⇒ 编译期常量 ✓）|
+| 分块状态更新里的 scatter | `ScatterElements/ScatterND` ✗ 缺 | ★固定 chunk 数 ⇒ `Reshape`/`Concat`/`Pad` 或**预计算常量索引**★ ✓（还要看具体形态 ✓）|
+| 三角求逆（若有 `linalg.solve_triangular` ✗）| 无此算子 ✗ | ★UT 变换（固定步数纯 matmul 迭代）★ 或 Neumann 级数截断 ✓ |
+| `causal_conv1d_fn`（因果短卷积）| `Conv1D` ✗（只有 Conv2D ✓）| unsqueeze 成 ★Conv2D★ ✓ 或 unfold+matmul ✓ |
+
+**验证方式**：在 hu60tx（CPU ✓）上把改写版与参考实现**逐步对拍**（同一输入、同一 chunk ✓），
+误差达标后再导 ONNX、清点算子（目标：只剩那 23 个支持算子 ✓），最后 OMG/converter_lite →
+设备单图建图测试 ✓。
