@@ -6861,3 +6861,47 @@ converter_lite --fmk=ONNX --modelFile=tiny.onnx --outputFile=tiny
 ③ 若 .ms 必须 ⇒ 用 mslite 的 python 包（mindspore_lite ✓ pip 可装 ✓）或
    查 mslite 官方文档里 third_party 配置段的键名 ✓
 ```
+
+## 123. ★★NNRt 关键机制（从设备上的库直接读出来 ✓）★★
+
+### 123.1 NNRt 的 OT API（core 库里 ✓）
+
+```
+OH_NNCompilation_ConstructWithOfflineModelFile   ← 从【离线模型文件】构造 ✓
+OH_NNCompilation_ConstructWithOfflineModelBuffer ← 从内存缓冲 ✓
+OH_NNCompilation_SetDevice · OH_NNDevice_GetAllDevicesID · OH_NNDevice_GetName
+PrepareOfflineModel / CopyOfflineModelToDevice / "HDIDeviceV1.0 not support PrepareOfflineModel"
+⇒ ★离线模型交给 HDI 设备（厂商 HAL ✓）⇒ 具体格式由厂商决定✓★
+★要求静态形状✓★："input nnTensor should has certain dimensions which cannot contain -1" ✗
+   —— 我们的图本来就是静态的 ✓ 正好符合 ✓
+```
+
+### 123.2 ★★认证机制（这可能就是 NPU 的门槛 ✓）★★
+
+```
+core 库里的字符串（直出 ✓）：
+   ★"Model accupy memory less then limit, no need authenticating"✓★
+   "AuthenticateModel failed, fail to check if model exceed ram limit." ✓
+   ★"Authentication failed, input model cannot run by npu."✗★
+   "Authentication failed, fail to get nnrt service, skip Authentication." ✓
+   "Authentication failed, nnrtService Authentication func is nullptr." ✓
+   "IsSupportAuthentication" ✓
+⇒ ★解读★：NNRt 对【超过 RAM 上限】的模型要求认证（问 nnrt service ✓）；
+   ★不超过上限的模型【不需要认证】✓★
+   ⇒ 我们的 2B（fp16 约 4GB）很可能【超过上限】✗ ⇒ 会触发认证 ✗
+     ⇒ 自编模型大概率认证不过 ⇒ ★NPU 可能被这个机制挡住✗★
+★策略★：先用【小模型】（例如 1~2 层 ✓ 或极简图 ✓）在 NNRt 上试 ✓
+   —— 小模型无需认证 ✓ ⇒ 能验证"N渾T + NPU"链路是否通 ✓
+   若小模型能上 NPU ✓ ⇒ 再考虑大模型怎么办（量化到更小 ✓ 或走认证 ✓）
+```
+
+### 123.3 当前的两个未知（下一步要解决）
+
+```
+① ★NNRt 的"离线模型"到底是什么格式★：
+   · 若接受 .om/.omc ⇒ ★我们已有现成产物✓★（OMG 编出来的 ✓）⇒ 完全跳过 mslite ✓✓
+   · 若只接受 .ms ⇒ 必须修好 mslite 转换（third-party 配置键名未知 ✗）
+   依据：neural_network_core.h 的注释 / 华为文档 / 实测（写个小程序试 ✓）
+② NNRt 头文件（neural_network_runtime.h / neural_network_core.h）还没取到 ✗
+   —— 本机 web_fetch 拒外网 ✗ ⇒ 必须走 hu60tx 的 curl ✓（gitee 直链 404 ✗，换源 ✓）
+```
