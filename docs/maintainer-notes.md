@@ -5152,3 +5152,54 @@ input_embed · attention_mask · position_ids · new_kv_cache_pos · ★embed_sc
 ③ 若还不行 ⇒ ★走"无状态 prefill 图"✗→✓ 再评估★：把状态全去掉 ✓ 只留 input_embed→hidden_states ✓
    （引擎的 17/5 形态其实很接近这个 ✓ §84 ✓）
 ```
+
+## 86. ★根因两条：静态 S=64 ✗（官方是动态 seq）· INT8 input_embed + embed_scales ✗
+
+### 86.1 静态核对：权重完全正常 ✓（排除了 initializer 假设 ✗）
+
+```
+自写脚本核对 q35_hiai_low.onnx 与 q35_hiai_fp16.onnx（不加载 5.5 GB 数据 ✓
+  直接查外置记录的 length 与期望字节数 ✓）：
+  initializer 427 个 · 外置尺寸 OK 319 · ★尺寸不符 0★ ✓（两张图都是 ✓）
+  /input_layernorm/Mul_1 用的 onnx::Mul_17452 = dims=[2048] dtype=1(FP32) ✓ 正常 ✓
+⇒ ★"图内张量声明尺寸不对"这个方向的假设被排除✗★
+```
+
+### 86.2 ★官方 omg_convert.py 的命令，我们漏了两点★（对照出来的 ✓）
+
+```python
+# 官方 build_input_shape ✓（仓库 scripts/model-conversion/omg_convert.py ✓）
+input_embed:1,-1,{hidden}          ← ★seq 维 = -1（动态）★
+attention_mask:1,1,-1,{kv_len}     ← -1 ✓
+position_ids:1,-1                  ← -1 ✓
+past_key_in{i}:{kv_len},{kv_heads},1,{head_dim}   ← 固定 ✓
+new_kv_cache_pos:-1 ✓
+embed_scales:1,-1,1                ← ★官方图有这个输入✗★（我们没有 ✓）
+# 以及：
+--dynamic_dims="1,1,1,1,1;64,64,64,64,64"   ← ★两档形状：decode S=1 / prefill S=64★
+# 注释还写明：input_embed 在官方图里是 ★INT8★（embedding 分离后量化过 ✓），
+#   attention_mask FP16 ✓，position_ids INT32 ✓ —— 声明与真实不符时 OMG 直接失败 ✓
+```
+
+### 86.3 ⇒ 结论：★hiai 引擎这条路与我们的模型形态根本不匹配✗★
+
+```
+引擎要：· 动态 seq（-1 + dynamic_dims ✓ 两档 S=1/S=64 ✓）
+        · INT8 input_embed + embed_scales（我们用的是 fp32/已反量化的 embed ✗）
+        · 图里【不含 KV】✓（§84 ✓ 由引擎的 executor_attention_op 管 ✓）
+★我们的图：· 写死 S=64 ✗（delta rule 的分块算法要求静态 S ✗ —— 循环展开 ✓）
+          · 线性注意力层没有 KV ✗（卷积窗口 + 递归状态 ✓ 引擎无此概念 ✗）
+⇒ ★即使把 IO 对齐（加 embed_scales ✓ 改 int8 ✓），"静态 S + 混合架构"这两点仍然过不去✗★
+```
+
+### 86.4 下一步（转向 DDK C++ 直跑 —— 唯一能容纳我们约束的路 ✓）
+
+```
+★用 §62 那条 DDK hiai C++ 路线 ✓（runner 已验证：RestoreFromFile rc=0 ✓ 兼容 ✓）★
+  · ★两张静态图★：prefill（S=64）+ decode（S=1）✓ 各自编译成 omc ✓
+    —— 静态 S 正是我们 delta rule 需要的 ✓；两张图分别用各自的静态形状 ✓
+  · IO 完全自定义 ✓（不需要 embed_scales ✓ 不需要动态维度 ✓ 不需要引擎的 attention 算子 ✓）
+  · 自己写解码循环（C++ 或 C++ shim + Python 驱动 ✓）：查表 → 前向 → lm_head → 采样 ✓
+  · Init rc=1 的障碍要解决：先确认它与"静态 S=64 却按引擎预期分配"无关 ✓
+    —— 我们自己的 Init 用的是默认 option ✓，需要按 DDK 文档填合适的 ModelInitOptions ✓
+```
