@@ -3979,3 +3979,66 @@ E/AI_NPUCL 统计（真实微型图 nat11）：
 ④ PYTHONPATH=src python3 -m cann_llm.modelpkg ⇒ 补 api_config.json / <name>.json ✓
 ⑤ scripts/start_chat.sh -d <模型目录> -p '1+1=' ⇒ ★设备上聊天★（目标③ 闭环 ✓）
 ```
+
+## 61. ★★★★★ 找到直跑 omc 的正路：DDK 的 hiai C++ API（头文件来自官方 HiAIDemo）★★★★★
+
+### 61.1 素材来源（全部是官方仓库 ✓）
+
+```
+gitee.com/huawei-hiai-foundation/HiAIDemo   → 已克隆到 hu60tx:~/q38/HiAIDemo ✓
+  DDK_Demo/V2/include/                       ← ★DDK 的 hiai C++ 头文件★
+    model/built_model.h · model/model_api_export.h
+    model_manager/model_manager.h · model_manager_types.h
+    tensor/nd_tensor_buffer.h · tensor/nd_tensor_desc.h · tensor/buffer.h
+    model_builder/hiai_ir_build.h（离线模型编译 ✓，即 omg 的同类 API）
+    base/error_types.h
+```
+
+### 61.2 ★API 全貌（这就是"直接加载并运行 .omc"的路 ✓）★
+
+```cpp
+namespace hiai {
+  // ① 加载已编译模型（.omc）
+  std::shared_ptr<IBuiltModel> CreateBuiltModel();
+    -> RestoreFromFile(const char* file);          // ★读 omc★ ✓
+    -> GetInputTensorDescs() / GetOutputTensorDescs();   // 查 IO 描述 ✓
+    -> CheckCompatibility(bool&) / SaveToFile / RestoreFromBuffer …
+
+  // ② 执行
+  std::shared_ptr<IModelManager> CreateModelManager();
+    -> Init(const ModelInitOptions&, builtModel, listener);
+    -> Run(inputs, outputs);                       // std::vector<INDTensorBuffer> ✓
+    -> RunAsync(context, inputs, outputs, timeout); -> Cancel(); -> DeInit();
+  // 监听：OnRunDone(context, status, outputs) / OnServiceDied()
+}
+```
+
+### 61.3 为什么这条路对 qwen3_5 特别重要
+
+```
+★IO 由我们自己定★ ✓ ⇒ 不必迁就 LLM 引擎的固定接口
+  （引擎要求 input_ids/attention_mask/position_ids + 每层 past_key/value ✓，
+   而 qwen3_5 是【混合架构】：18 层线性注意力 + 6 层全注意力 ✗
+   —— 线性层要传的是【卷积状态 + 递归状态】，引擎没有这个概念 ✗）
+⇒ 用 DDK hiai API：我们自己设计状态输入/输出 ✓，解码循环自己写 ✓
+```
+
+### 61.4 另外查到的事实
+
+```
+· 官方模型矩阵（gitcode.com/openharmony-models）里 ★没有 Qwen3.8/Qwen3.5/3-Next 的包★ ✗
+  （Qwen2.5-Coder-7B-Instruct 等有 ✓）⇒ 想要 Qwen3.8 只能自己编译 ✓（正是本目标在做的事 ✓）
+· libhiai_foundation.so（NDK，151 个符号 ✓）导出的是另一族 API：
+    HMS_HiAIExecutor_* / HMS_HiAIKernelExecutor_*（Buffer 按 fd/addr ✓）
+  但它【没有头文件】（DDK 与固件里都查过 ✗）⇒ C++ 的 hiai API 更好用 ✓
+```
+
+### 61.5 下一步
+
+```
+① 用 DDK 头文件写一个最小 runner（C++ ✓，在设备上用 OHOS clang 编 ✓）
+   —— 先拿【已经产出的 4 层 omc（927 MB ✓）】验证：
+     RestoreFromFile ✓ → GetInputTensorDescs（看到真实 IO ✓）→ Run ✓
+② 跑通后，按"自定状态接口"导出全 24 层图（input_ids/position_ids + 各层状态 → logits + 新状态 ✓）
+   ⇒ OMG ⇒ .omc ⇒ 自带解码循环 ⇒ ★设备上聊天★ ✓
+```
