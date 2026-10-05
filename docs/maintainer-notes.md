@@ -7004,3 +7004,45 @@ core 库里的字符串（直出 ✓）：
 ② 修好 SetCache 调用（3 参数 ✓）并把错误码打全 ✓，看能不能拿到更具体的失败原因 ✓
 ③ 另注意：NNRt 的认证机制只针对超 RAM 上限的模型 ✓ ⇒ 先用小模型（如 L4 ✓）试 ✓
 ```
+
+## 126. NNRt 在线建图 API 侦察完成 ✓（v1/v2 两套都在 ✓）· Build 失败细节待挖 ✗
+
+### 126.1 从设备头文件里确认的 API（可直接写程序 ✓）
+
+```
+★模型构建（两套并存 ✓）★：
+   v1（@since 9 ✓ 更简单）：OH_NNModel_Construct ✓
+        OH_NNModel_AddTensor(model, const OH_NN_Tensor *)              ← 用 OH_NN_Tensor 结构 ✓
+        OH_NNModel_SetTensorData(model, index, buffer, length) ✓
+        OH_NNModel_AddOperation(model, op, param, inputIdx[], inputNum, outputIdx[], outputNum) ✓
+        OH_NNModel_Finish(model) ✓
+   v2（@since 11 ✓）：OH_NNModel_AddTensorToModel(model, const NN_TensorDesc *) ✓
+★编译与执行★：
+   OH_NNCompilation_Construct(model) ✓ · SetDevice ✓ · SetPerformanceMode ✓ · SetPriority ✓
+   ★OH_NNCompilation_SetCache（3 个参数 ✗ 我之前按 2 个写 ⇒ 编译失败 ✓）★
+   ConstructForCache / ExportCacheToBuffer / ImportCacheFromBuffer / EnableFloat / AddExtensionConfig ✓
+   OH_NNExecutor_Construct(compilation) ✓ · SetInput ✓ · SetOutput ✓ · Run ✓ · RunSync（新 ✓）
+   GetInputCount / GetOutputCount / GetOutputShape / CreateInputTensorDesc / CreateOutputTensorDesc ✓
+★关键结构与枚举★：
+   OH_NN_Tensor { dataType · dimensionCount · dimensions · quantParam · type ✓ }
+   OH_NN_TensorType：OH_NN_TENSOR = 0 ✓ · OH_NN_ADD_ACTIVATIONTYPE = 1 ✓ ·
+       OH_NN_MATMUL_TRANSPOSE_A = 33 · _TRANSPOSE_B = 34 · _ACTIVATION_TYPE = 35 ✓
+   OH_NN_DataType：OH_NN_INT32 = 4 · OH_NN_UINT8 = 6 · ★OH_NN_FLOAT32 = 11★ ✓
+   算子：OH_NN_OPS_ADD = 1 · ★OH_NN_OPS_MATMUL = 19★ ✓
+   OH_NN_ReturnCode：0 SUCCESS · 1 FAILED · 2 INVALID_PARAMETER · 3 MEMORY_ERROR ·
+       4 OPERATION_FORBIDDEN · 5 NULL_PTR · 6 INVALID_FILE ✓
+★注★：找不到 NN_TensorDesc 的创建函数名 ✗ ⇒ 先用 ★v1 API（OH_NN_Tensor ✓）★ 写最简单 ✓
+```
+
+### 126.2 下一步（★最有说服力的一步★）
+
+```
+★用 v1 API 在线建一个极小模型（input[1,64,64] × 权重[64,64] ⇒ output[1,64,64] 的 MatMul）✓★
+   ⇒ OH_NNCompilation_Construct → SetDevice(NPU ✓) → Build ⇒ ★看能否 NPU 编译✓★
+   ⇒ OH_NNExecutor_Construct → SetInput → Run → SetOutput/取回 ⇒ ★看数值对不对✓★
+★这一步的意义★：
+   · 若通 ⇒ ★"NNRt + NPU 执行链路"被证明可用✓★ ⇒ 剩下的只是"把我们的图做成厂商离线模型"✓
+   · 若不通（Build 也失败 ✗）⇒ 说明 NPU 只接受【厂商离线模型】✗
+     ⇒ 那就必须攻下 mslite 厂商插件的 third_party_model 配置（或找其它厂商转换器 ✓）
+★注意★：小模型不会触发认证 ✓（未超 RAM 上限 ✓）⇒ 是最干净的验证 ✓
+```
