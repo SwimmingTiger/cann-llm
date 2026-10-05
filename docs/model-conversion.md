@@ -888,3 +888,22 @@ ln -snf "$(readlink -f /lib64/ld-linux-x86-64.so.2)" /tmp/ld-linux-x86-64-2.35.s
 | RoPE theta | 1000000 | 5000000 |
 
 `eos_token_id` 不同这点在写 `executor.json` 时容易忽略（Qwen3 的 eos 是 `<|im_end|>`)。
+
+---
+
+## 附录 D：**Qwen3.8（`qwen3_5` 新架构）不能走本文件的主流程**
+
+本文件的主流程（dopt + 官方导出 + OMG + hiai）**只支持 `qwen2 / qwen3 / glm`** ✗。
+
+**Qwen3.8 是另一套架构**：`model_type = qwen3_5`，
+`layer_types = [linear_attention ×3, full_attention] ×N` ⇒ **混合线性注意力（Gated DeltaNet）** ✓，
+官方导出脚本 `npu_tuned_export/export_model_single_qwen3.py` 处理不了它 ✗。
+
+社区有**架构忠实的蒸馏版**✓（`empero-ai/Qwen3.8-{2B,4B,9B}-Distill`，`model_type` 同样是 `qwen3_5` ✓，
+另有 `-GGUF` 仓库 ✓）。**要"在本机跑起来"，目前可行的是 llama.cpp（CPU）** ✓：
+
+```bash
+llama-server -m Qwen3.8-2B-Q4_K_M.gguf -ngl 0 -t 16 -c 2048 --port 8123
+# 实测：'北京' ✓ / decode 1.70 tok/s；Vulkan(-ngl 99) 仍算错 ✗
+```
+细节与前后因后果见 [maintainer-notes §48](maintainer-notes.md) ✓。

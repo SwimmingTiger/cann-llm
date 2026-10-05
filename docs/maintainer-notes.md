@@ -3351,3 +3351,69 @@ scripts/start_chat.sh -d <模型目录> -p '1+1='
   （gemma4 若要"少段/省内存"，只能回到 §§41–46 那几条自建路线 ✓）
 · 想给设备加新模型（架构在支持列表内、尺寸在本机能力边界内 §44）现在有可复现路径 ✓
 ```
+
+## 48. ★★★★★ 在本机运行 Qwen3.8（真·qwen3_5 架构）★— llama.cpp CPU 路线跑通 ★★★★★
+
+**目标**：运行 **Qwen3.8**（新家族，不是 "Qwen3 8B" ✗）。蒸馏/量化不限、后端不限。
+**结果**：✓ 跑通了 —— 用 `empero-ai/Qwen3.8-2B-Distill`（Q4_K_M，1.31 GB）在**本机 llama.cpp（CPU）**上：
+
+```
+问：用一句中文说明你是什么模型。
+答：我是 Qwen3.5，一个基于 Qwen3 架构的超大规模语言模型。   ← 家族内部命名即 Qwen3.5 ✓
+问：中国的首都是哪里？只回答城市名。    答：北京 ✓
+速度：prompt 3.57 t/s · decode ★1.70 t/s★（偏慢 ✗，但正确 ✓）
+```
+
+### 48.1 关键事实：这些"Qwen3.8 蒸馏"就是【qwen3_5 新架构】本身
+
+```
+empero-ai/Qwen3.8-{2B,4B,9B}-Distill（有 ★safetensors★ ✓，不只是 GGUF ✓）
+  config.json: architectures=["Qwen3_5ForConditionalGeneration"], model_type="qwen3_5"
+  text_config: hidden 2048 / head_dim 256 / attn_output_gate / linear_conv_kernel_dim 4
+  ★layer_types = [linear_attention ×3, full_attention] ×6 ⇒ 混合线性注意力（Gated DeltaNet）★
+  （标签 qwen3.5 · gated-deltanet ✓；__不需要__自定义建模代码，依赖 transformers 内置 ✓）
+safetensors 体积：2B=4.5 GB · 4B=9.3 GB · 9B=19.3 GB
+GGUF（2B）：Q4_K_M 1.31 GB · Q5 1.45 · Q6 1.61 · Q8 2.08 · BF16 3.90
+★注意★：官方 Qwen3.8 家族只有 27B / Flash-Next(~180B MoE) / 2.4T-A95B ✗
+        ⇒ 2B/4B/9B 这些是【社区蒸馏】✓（架构忠实于 qwen3_5 ✓）
+```
+
+### 48.2 本机 llama.cpp 路线（已跑通 ✓）
+
+```bash
+# ① 本机可直连 HF ✓，直接下 GGUF
+curl -L -o models/qwen38_2b_q4/Qwen3.8-2B-Q4_K_M.gguf \
+  https://huggingface.co/empero-ai/Qwen3.8-2B-Distill-GGUF/resolve/main/Qwen3.8-2B-Q4_K_M.gguf
+
+# ② ★libomp shim★（不补会满屏 "symbol not found: __kmpc_*" ✗）
+cd llama.cpp && mkdir -p libshim
+ln -sf <ohos-sdk>/llvm/lib/aarch64-linux-ohos/libomp.so libshim/libomp.so
+export LD_LIBRARY_PATH="$PWD/libshim:$PWD/build/bin"
+
+# ③ 跑（本机 llama.cpp 是 2026-09-20 的 b23efaa ✓，★已支持该架构★
+#    源码里叫 ★qwen35★ ✓ —— 用 "qwen3_5" 去 grep 会误判成"不支持" ✗）
+./build/bin/llama-bench -m <gguf> -ngl 0 -t 16 -p 32 -n 16 -r 1     # qwen35 2B Q4_K ✓ 被识别
+./build/bin/llama-server -m <gguf> -ngl 0 -t 16 -c 2048 --port 8123  # 起服务，curl 聊天 ✓
+```
+
+### 48.3 ★Vulkan(GPU) 依然算错 ✗★（再次确认 README 的结论）
+
+```
+CPU    （-ngl 0） : '北京' ✓   1.72 tok/s
+Vulkan （-ngl 99）: 乱码/空 ✗  4.01 tok/s（快 2.3×，但结果不可用 ✗）
+```
+⇒ Maleoon 916 的 Vulkan 计算着色器在这个驱动上仍然不正确 ✗（README 已记 ✓，本次在 qwen35 架构上复验 ✓）。
+
+### 48.4 后续提速的三条可能（按性价比）
+
+```
+① llama.cpp CPU 调优 ✓ 便宜：README 记"CPU 后端比同类 ARM 核慢约一个数量级"✗
+   ⇒ 可能缺平台最优 kernel（i8mm/dotprod/SVE）⇒ 试带 GGML_CPU_ARM_ARCH 的重新编译
+   预期：3~10× ⇒ 5~17 tok/s，那就"可用"了 ✓
+② NPU（hiai/cann/nnrt）✓ 慢工：需要
+   ① transformers 先升级到认识 Qwen3_5 的版本 ✗（本地 4.57.6/4.51.0 都【没有】Qwen3_5 类 ✓）
+   ② 自己导出 ONNX，③ 清点算子 —— ★线性注意力（gated delta rule / conv1d / 状态传递）大概率
+      不在 DDK 平台库里 ✗★（对照 §45 LFM2 的遭遇：IsNaN/CumSum/GatherND 缺 + Conv1D 无 ✓）
+   预期：若通，10~20 tok/s 级 ✓（参照 Qwen3-8B 的 12.8 ✓）；但成功率低 ✗
+③ 官方 dopt+OMG+hiai ✗ 不通：官方流程只支持 qwen2/qwen3/glm ✗（§47）⇒ qwen3_5 走不了 ✓
+```
