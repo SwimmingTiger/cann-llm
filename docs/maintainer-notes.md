@@ -6905,3 +6905,58 @@ core 库里的字符串（直出 ✓）：
 ② NNRt 头文件（neural_network_runtime.h / neural_network_core.h）还没取到 ✗
    —— 本机 web_fetch 拒外网 ✗ ⇒ 必须走 hu60tx 的 curl ✓（gitee 直链 404 ✗，换源 ✓）
 ```
+
+## 124. ★★NNRt 头文件到手 + 读懂"离线模型"是什么★★
+
+### 124.1 头文件（终于取到 ✓ 路径记录在此备查 ✓）
+
+```
+★可用源★：gitee 的 openharmony/ai_neural_network_runtime
+★master 上真实路径★：interfaces/kits/c/neural_network_runtime/{neural_network_core.h,
+                      neural_network_runtime.h, neural_network_runtime_type.h}
+   实测：core.h 56206 B ✓（含 OfflineModel ✓）· runtime.h 34015 B ✓ · type.h 143184 B ✓
+   （另一条可用路径：分支 ★OpenHarmony-4.0-Release★ + interfaces/kits/c/<file> ✓
+     但那个分支【没有】OfflineModel API ✗ —— 它是 @since 11 才加的 ✓）
+★坑★：本机 web_fetch 工具拒外网域名 ✗ ⇒ 一律走 hu60tx 的 curl ✓
+      gitee raw 的路径会随分支变 ✗ ⇒ 用 GitHub API 的 contents?ref=<branch> 先确认 ✓
+★下载到★：hu60tx:~/q38/nnrt_inc/{neural_network_core.h, neural_network_runtime.h, neural_network_runtime_type.h}
+```
+
+### 124.2 ★★核心答案：什么是"离线模型"★★（头文件注释原文 ✓）
+
+```
+@brief Creates a compilation instance based on an offline model file.
+★"Offline model is a type of model that is offline compiled by the model converter
+  provided by a ★device vendor★. So that the offline model can only be used on the
+  specified device, but the compilation time of offline model is usually much less
+  than OH_NNModel. You should perform the offline compilation during your development
+  and deploy the offline model in your app package."   @since 11★
+⇒ ★NNRt 要的"离线模型"= ★厂商转换器★ 编出来的产物✓★
+   ⇒ 两种候选 ✓：
+     a) ★mslite 的厂商插件★ libmslite_converter_plugin.so（在 mslite 包里 ✓）
+        ⇒ 但它要求 [third_party_model] 配置（键名 input_shapes / output_shapes ✓
+          从 libmindspore_converter.so 的 strings 挖到 ✓）而我的配置格式还没试对 ✗
+     b) ★DDK 的 OMG 产物（omc / om）★ —— 它同样是"厂商转换器"编出来的 ✓
+        ⇒ ★若 NNRt 接受它，我们【已有现成产物】✓✓ —— 这是最值得先试的 ✓★
+```
+
+### 124.3 NNRt 的其它要求（从库与头文件 ✓）
+
+```
+· ★静态形状✓★（"input nnTensor … cannot contain -1" ✗）—— 我们的图符合 ✓
+· ★认证★：只针对【超过 RAM 上限】的模型 ✓（"Model accupy memory less then limit,
+  no need authenticating" ✓）；超限的要问 nnrt service 认证 ✗
+  ⇒ 先用小模型验证链路 ✓（无需认证 ✓）
+· 设备通过 HDI ✓（厂商 HAL ✓）
+```
+
+### 124.4 下一步（决定性实验 ✓）
+
+```
+★写一个最小的 NNRt C++ 程序★（头文件已到手 ✓ 链接设备 /system/lib64/ndk/libneural_network_runtime.so ✓）：
+   ① OH_NNDevice_GetAllDevicesID + OH_NNDevice_GetName ⇒ ★看设备上有哪些 device★
+      （NPC / CPU ✓ —— 这一步就能确认 NPU 是否暴露给 NNRt ✓）
+   ② 然后分别拿【我们的 omc】与（若能产出的）【.ms】去
+      OH_NNCompilation_ConstructWithOfflineModelFile ⇒ 看哪个被接受 ✓
+   ⇒ ★这个实验能一次性回答"NNRt 路线可行吗"✓★
+```
