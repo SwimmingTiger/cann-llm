@@ -4966,3 +4966,50 @@ OMG fp32（q35_hiai_low.onnx ✓ 5.49 GB 权重）+ --save_weights_as_external_d
      ~/q38cuda（CUDA venv ✓）· ~/q38env（python3.10 主环境 ✓）
    ★本机重启不影响 hu60tx 上的任何东西 ✓★
 ```
+
+## 82. ★官方 Qwen3-8B 在设备上完整跑通（12.8 tok/s）★ —— 证明引擎链路没问题，差别在我们的 omc 结构
+
+### 82.1 基准（可复现 ✓ 非常有价值 ✓）
+
+```
+./cann-llm/scripts/start_chat.sh -d models/Qwen3-8B --large-mem -p '你好'
+  ⇒ rc=0 ✓
+  ★bot> 你好！我是Qwen，很高兴认识你！有什么问题或需要帮助吗？✨★
+  ★[in 60 tok · out 187 tok · prefill 398 ms · decode 14635 ms (12.8 tok/s)]★
+★结论：引擎 / 环境 / 启动脚本 / 模型包格式，全链路都正常 ✓★
+   ⇒ 我们那个包卡在 CPUCL 的 /Mul_1 "param[size] < dataSize" ✗ ⇒ ★问题在我们 omc 的结构✗★
+```
+
+### 82.2 本轮排查掉的两个假设（都被证伪 ✗）
+
+```
+① fp16 的 Cast 破坏元数据 ✗ ⇒ 换成 fp32 外置版（SubGraph_0.weight 5624 MB ✓）仍报同一个错 ✗
+② 输入 dtype 应设 FP16 ✗ ⇒ 用 input_embed:FP16 / hidden_states:FP16 重编 omc 后，错误不变 ✗
+```
+
+### 82.3 ★配置格式差异（已修正 ✓，但没解决 ✗）★
+
+```
+对照官方 models/Qwen3-8B（★它跑通了✓★）：
+  · executor.json 的 llm_config ★只放 embedding 两项★ ✓（所有维度放在 <name>.json ✓）
+  · autoregressive 里是 ★"weight_path": "./"★ ✓（我们原先写成了 "weight_dir" ✗ —— 已改 ✓）
+  · <name>.json 还多这些运行开关 ✓：use_cache / is_kv_cache_merge / enable_dynamic_kv_cache
+    / enable_lm_head_opt / enable_lm_head_topk / enable_dynamic_lora_rank / head_dim
+    / hidden_act / transformers_version ✓（已全部补上 ✓）
+  · api_config.json 的 tokenizerType：官方 qwen3 用 ★6★ ✓（我们用的 4 ✓ —— qwen2 风格 ✗ 待改 ✓）
+⇒ 改完仍是同一个错 ✗ ⇒ 格式不是根因 ✓
+引擎日志还提示："weights data size in omc is 0, will try par…" ✓（说明它去读外置权重了 ✓）
+```
+
+### 82.4 下一步（有了官方包做逐项对照 ✓）
+
+```
+① 用我们的 hiai_runner（RestoreFromFile ✗ 对 .omc 返回 1 ✓）或 strings/解析 ✓
+   把【官方 omc】与【我们的 omc】的 ★IO 清单（名字 / 形状 / 类型）逐项对比★ ✓
+   —— 官方包的 omc 文件名是 qwen3_8b_ceval_g256.omc ✓（在 models/Qwen3-8B/ 里 ✓）
+② 重点怀疑：★图边界不同★ ✗
+   · 官方的图很可能从 input_ids 开始（embedding 在图外用 embedding_weights ✓）
+     而我们的图从 input_embed 开始 ✓ ⇒ /input_layernorm/Mul_1 是图里的第一个算子 ✗
+   · 或者 KV/状态的形状与引擎的分配不一致 ✗（§73 改过一次 ✗ 但方向可能反了 ✓）
+③ 最直接的做法：★把官方 omc 的 IO 打印出来 ✓，照它改我们的导出边界✓★
+```
