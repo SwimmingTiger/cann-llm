@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import os
 import torch
 
 import npu_attention as A
@@ -110,12 +111,24 @@ def _expl_gated_rmsnorm(nrm, x, gate):
       rsqrt(v + eps)    →  (v + eps).pow(-0.5)    （Pow ✓ —— l2norm 那边同样改法 ✓）
       silu(g)           →  g * sigmoid(g)         （sigmoid 已在用 ✓）
     """
+    # ★实验开关（§115 拆分用 ✓）：NPU_NORM_MODE ∈ {full, nogate, gateonly, w4d}
+    #   full    = 完整显式实现 ✓（默认）
+    #   nogate  = ★只做 rmsnorm、不做 silu(gate)★ ⇒ 用来判断"gate 路径"是否是元凶 ✓
+    #   gateonly= 只做 x*silu(gate)（不做 rmsnorm ✓）
+    #   w4d     = weight 显式 reshape 成 [1,1,1,D] 再广播 ✓（判断 1 维广播是否是元凶 ✓）
+    mode = os.environ.get("NPU_NORM_MODE", "full")
     d = x.shape[-1]
-    v = (x * x).sum(-1, keepdim=True) * (1.0 / float(d))       # ReduceSum ✓
-    x = x * (v + nrm.variance_epsilon).pow(-0.5)               # Pow(-0.5) ✓
-    x = x * nrm.weight                                         # [D] 广播 ✓
-    g = gate.to(torch.float32)
-    return x * g * torch.sigmoid(g)                            # silu(g) ✓
+    if mode != "gateonly":
+        v = (x * x).sum(-1, keepdim=True) * (1.0 / float(d))    # ReduceSum ✓
+        x = x * (v + nrm.variance_epsilon).pow(-0.5)            # Pow(-0.5) ✓
+        w = nrm.weight
+        if mode == "w4d":
+            w = w.reshape([1, 1, 1, -1])                        # ★显式 4 维广播✓★
+        x = x * w
+    if mode != "nogate":
+        g = gate.to(torch.float32)
+        x = x * g * torch.sigmoid(g)                            # silu(g) ✓
+    return x
 
 
 def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads, hd, seq: int = 0,
