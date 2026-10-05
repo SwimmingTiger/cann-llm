@@ -6759,3 +6759,60 @@ norm 里还剩三个可怀疑的特性 ✗→✓：
 ③ ★把这份材料交厂商✓★（复现面：单层过/≥2 层不过 ✓ 材料见 docs/hiai-ddk-vendor-question.md ✓）
 ④ 若坚持 NPU ⇒ 换 NNRt 路线（不同 API ✓ 约束可能不同 ✓）
 ```
+
+## 121. ★NNRt 路线侦察：三个关键件都在 ✓（按规则查固件镜像 ✓）★
+
+### 121.1 固件镜像里的 NNRt（★规则要求以镜像为准 —— 果然不能臆断 ✓★）
+
+```
+/home/hu60/work/hmos/firmware/unpack_result_010554/system/system/lib64/ 下：
+   ndk/libneural_network_core.so
+   ★ndk/libneural_network_runtime.so★            ← NNRt 主库 ✓
+   platformsdk/libneural_network_runtime_ext.so
+   platformsdk/libnnrt_proxy_1.0.z.so / 2.0 / 2.1  ← NNRt 代理 ✓
+★设备（本机）上同样存在✓★：/system/lib64/ndk/{libneural_network_runtime.so, libneural_network_core.so}
+   （注意：只在 /system/lib64 顶层找会漏掉 ✗ —— 在 ndk 子目录里 ✓）
+★镜像里【没有】头文件✗★（只有 .so ✓）⇒ 头文件要另取（SDK / OpenHarmony 仓库 ✓）
+```
+
+### 121.2 MindSpore Lite 转换器（做 .ms 用 ✓ 已在 hu60tx ✓）
+
+```
+位置：~/mslite/mindspore-lite-2.7.0-linux-x64/tools/converter/converter/converter_lite ✓
+两个依赖坑（都已解决 ✓）：
+   ① 缺 libmindspore_converter.so ✗ ⇒ 它在 tools/converter/lib/ ✓ ⇒ 加进 LD_LIBRARY_PATH ✓
+   ② 缺 libpython3.11.so.1.0 ✗ ⇒ ★uv python install 3.11★ ✓
+      （路径 ~/.local/share/uv/python/cpython-3.11-linux-x86_64-gnu/lib ✓）
+首次跑通后的能力（--help 实测 ✓）：
+   ★--fmk = TF | TFLITE | CAFFE | MINDIR | ★ONNX★ | OM | PYTORCH | MSLITE ✓★
+   --modelFile=*.onnx ✓ · --outputFile=*.ms ✓ · --saveType=MINDIR_LITE ✓
+   --inputShape / --inputDataType / --fp16 / --optimize ✓
+   （注意 --inputDataFormat 只对 4 维输入有效 ✓）
+```
+
+### 121.3 当前卡点：ONNX → .ms 转换失败 ✗（待调）
+
+```
+用 tiny.onnx（16.78 MB ✓ 单文件 ✓）试：
+   带 --inputShape="input_embed:1,64,2048" ⇒ "Parse param failed" ✗
+   不带 inputShape ⇒ "Convert model failed, ret=Common error code" ✗
+   用 4 维 shape ⇒ 同样 ✗
+⇒ 下一步：① 开详细日志（--help 里没列，试环境变量 GLOG_v / --configFile ✓）
+          ② 用一个【更简单】的 ONNX（单算子 ✓ 无外置权重 ✓）试，排除模型本身的问题 ✓
+          ③ 确认 tiny.onnx 的 opset / 权重是内联的 ✓
+```
+
+### 121.4 路线规划（若转换打通 ✓）
+
+```
+① converter_lite --fmk=ONNX ⇒ <name>.ms ✓（两个静态图：prefill S=64 / decode S=1 ✓）
+② 写 NNRt C++ 程序：
+     OH_NNModel_Construct → 加输入/输出张量 → OH_NNModel_Finish
+     OH_NNCompilation_ConstructWithOfflineModelFile(*.ms) → OH_NNCompilation_Build
+     OH_NNExecutor_Create → SetInput/GetOutput → Run
+   （头文件待取 ✓；设备侧链接 /system/lib64/ndk/libneural_network_runtime.so ✓）
+③ 自定义 IO：input_embed/attention_mask/position_ids + 各层状态进出 ⇒ 前向 ✓
+④ 解码循环 + int8 embedding 查表 + lm_head + 采样 ⇒ ★设备上聊天★
+★与 DDK 路线的关键差异★：NNRt 是【标准 OHOS NDK 接口】✓ 模型是 .ms ✓
+   —— 没有 ModelManager 那层不透明的约束 ✗（这是换路线的理由 ✓）
+```
