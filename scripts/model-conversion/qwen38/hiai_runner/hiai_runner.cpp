@@ -34,14 +34,28 @@ std::string EndsWith(const std::string &s, const std::string &suf) {
 }
 
 void Dump(const char *tag, const std::vector<NDTensorDesc> &descs) {
-    std::cout << "  " << tag << " 共 " << descs.size() << " 个：" << std::endl;
-    for (size_t i = 0; i < descs.size(); ++i) {
-        std::cout << "    [" << i << "] dims=[";
-        for (size_t j = 0; j < descs[i].dims.size(); ++j) {
-            std::cout << descs[i].dims[j] << (j + 1 < descs[i].dims.size() ? "," : "");
+    // ★防御式遍历★：NDTensorDesc 内含 std::vector ✓，直接按下标读容易越界崩溃 ✗（§83 踩过 ✓）
+    size_t n = 0;
+    try {
+        n = descs.size();
+    } catch (...) {
+        std::cout << "  " << tag << " size() 抛异常" << std::endl;
+        return;
+    }
+    std::cout << "  " << tag << " 共 " << n << " 个：" << std::endl;
+    for (size_t i = 0; i < n; ++i) {
+        try {
+            size_t r = descs[i].dims.size();
+            std::cout << "    [" << i << "] rank=" << r << " dims=[";
+            for (size_t j = 0; j < r; ++j) {
+                std::cout << descs[i].dims[j] << (j + 1 < r ? "," : "");
+            }
+            std::cout << "] dtype=" << static_cast<int>(descs[i].dataType)
+                      << " format=" << static_cast<int>(descs[i].format) << std::endl;
+        } catch (...) {
+            std::cout << "    [" << i << "] 读取抛异常（结构不完整 ✓）" << std::endl;
+            break;
         }
-        std::cout << "] dtype=" << static_cast<int>(descs[i].dataType)
-                  << " format=" << static_cast<int>(descs[i].format) << std::endl;
     }
 }
 
@@ -87,11 +101,17 @@ int main(int argc, char **argv) {
     built->CheckCompatibility(compatible);
     std::cout << "  CheckCompatibility: " << (compatible ? "兼容 ✓" : "不兼容 ✗") << std::endl;
 
-    // ② 打印真实 IO ✓（这一步就能看出 OMG 编出来的图接口 ✓）
-    std::vector<NDTensorDesc> inDesc = built->GetInputTensorDescs();
-    std::vector<NDTensorDesc> outDesc = built->GetOutputTensorDescs();
-    Dump("输入", inDesc);
-    Dump("输出", outDesc);
+    // ② 只取输入/输出的【个数】✓（★不做下标遍历✗★：demo 头文件与设备库的 ABI 可能不一致，
+    //    读 descs[i] 会段错误 ✓，而且 try/catch 抓不住段错误 ✓ —— §84 实测踩到 ✓）
+    std::vector<NDTensorDesc> inDesc, outDesc;
+    try {
+        inDesc = built->GetInputTensorDescs();
+        outDesc = built->GetOutputTensorDescs();
+        std::cout << "  输入个数 = " << inDesc.size() << " · 输出个数 = " << outDesc.size() << std::endl;
+    } catch (...) {
+        std::cout << "  取 descs 抛异常 ✓" << std::endl;
+    }
+    if (getenv("DUMP_IO")) { Dump("输入", inDesc); Dump("输出", outDesc); }
 
     // ③ 初始化执行器
     std::cout << "③ CreateModelManager + Init" << std::endl;

@@ -5056,3 +5056,57 @@ OMG fp32（q35_hiai_low.onnx ✓ 5.49 GB 权重）+ --save_weights_as_external_d
    c) api_config.json 的 tokenizerType 应为 6 ✓（qwen3 系列 ✓ 我们暂用 4 ✓）
 ③ 若 IO 清单对齐后仍失败 ⇒ 考虑【砍掉状态输入】的无状态 prefill 图 ✗（先跑通再优化 ✓）
 ```
+
+## 84. ★★★★★★ 铁证：官方图的形态是"不含 KV 缓存 + 引擎自带 attention 算子" ★★★★★★
+
+### 84.1 用修好的 C++ runner 直接测两个 omc（§62 的工具 ✓）
+
+```
+我们的 omc（包目录内相对路径 ✓）：
+  RestoreFromFile rc=0 ✓ · CheckCompatibility ★兼容✓★
+  ★输入 89 个 · 输出 85 个 · Init rc=1 ✗★
+官方 omc（models/Qwen3-8B/qwen3_8b_ceval_g256.omc ✓）：
+  RestoreFromFile rc=0 ✓ · CheckCompatibility 不兼容（但不影响它跑通 ✓）
+  ★输入 17 个 · 输出 5 个 · Init rc=0 ✓★
+★结构差异一目了然：我们把每层状态暴露成图输入/输出（24 层 × 2 ✓ ⇒ 89/85 ✓），
+  官方【完全不暴露】✗✓★
+（注：NDTensorDesc 含 std::vector ✗ ⇒ 用 ctypes 或下标遍历会段错误 ✓，
+  demo 头文件与设备库的 ABI 可能不一致 ✓；try/catch 抓不住段错误 ✓ —— 已改为默认只打个数 ✓）
+```
+
+### 84.2 ★官方 omc 里的 IO 名字（strings 直出 ✓）★
+
+```
+input_embed · attention_mask · position_ids · new_kv_cache_pos · ★embed_scales★
+★★没有 past_key*/past_value* ✗✗★★
+引擎内部算子名：executor_attention_op1_16_1_128_kvlen / executor_attention_op2_16_1_kvlen_128
+              InputConcatedData · transpose_x1 / transpose_x2
+我们 omc 里的名字：… · past_key0 … past_key23 · hidden_states ✗
+```
+
+### 84.3 ★这条发现意味着什么★
+
+```
+官方形态 = 【图里不含 KV 缓存】✓ + 【KV 由引擎自带的 executor_attention_op 管理】✓
+  —— 这正是 <name>.json 里那几个开关的用途：
+     is_kv_cache_merge ✓ · enable_dynamic_kv_cache ✓ · enable_lm_head_opt ✓ …
+⇒ ★hiai LLM 引擎只支持【标准注意力】结构的模型★ ✗
+   它的 attention 算子负责 KV 的读写与 cache 合并（kvlen 是参数 ✓）
+★而 qwen3_5 是【混合架构】：18 层线性注意力 ✗（没有 KV，只有卷积窗口 + 递归状态 ✓）
+  —— 引擎没有表达"线性注意力状态"的机制 ✗
+⇒ 所以要么：
+   a) 把线性层的状态【伪装成】KV 槽位 ✗ —— 引擎按自己的语义使用它们 ✓ 大概率不行 ✗
+   b) ★放弃引擎，回到 §62/§63 的路线：用 DDK 的 hiai C++ API 自己加载 omc +
+      自定 IO 自己写解码循环★ ✓ —— 不受引擎接口约束 ✓（runner 已经能 rc=0 装载我们的 omc ✓✓！）
+   c) 把模型改成"无状态"图 ✗ —— 引擎按 prefill_len/decode_len 驱动 ✓ 没有重喂全序列的机制 ✓
+```
+
+### 84.4 下一步（决策点）
+
+```
+★优先做 b)★：用 DDK hiai C++ API 直跑我们的 omc ✓
+  · runner 已验证：我们的 omc ★RestoreFromFile rc=0 · CheckCompatibility 兼容 ✓★
+  · 需要补齐：Init 失败的原因（输入 89 个 ✓ 我们自己按需喂 ✓ 不依赖引擎的 17 个 ✓）
+    —— 注意 runner 的 Init rc=1 ✓ 与引擎同源 ✓ ⇒ 要看 Init 的具体报错 ✓
+  · 之后自己写：填 input_embed（查表 ✓）/ mask / position → 取 hidden_states → lm_head → 采样 ✓
+```
