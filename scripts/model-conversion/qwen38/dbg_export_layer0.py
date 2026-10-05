@@ -7,7 +7,10 @@ torch.set_grad_enabled(False)
 cfg = AutoConfig.from_pretrained("/home/hu60/q38")
 tc = cfg.text_config if hasattr(cfg, "text_config") else cfg
 tc.num_hidden_layers = 1; tc.layer_types = list(tc.layer_types)[:1]
-m = Qwen3_5ForCausalLM(tc).eval()
+m = Qwen3_5ForCausalLM.from_pretrained("/home/hu60/q38", dtype=torch.float32).eval()
+m.model.layers = m.model.layers[:1]
+m.requires_grad_(False)                    # ★冻结★（否则 tracer 报 requires grad ✗）
+tc = m.config.text_config if hasattr(m.config, "text_config") else m.config
 layer = m.model.layers[0]
 S = 64
 
@@ -15,7 +18,7 @@ class L0(torch.nn.Module):
     def forward(self, input_embed, conv_state, rec_state):
         h = layer.input_layernorm(input_embed)
         tr = []
-        out, nconv, nrec = NL.linear_attention_layer(layer, h, conv_state, rec_state, 8, 2, 256, S, tr)
+        out, nconv, nrec = NL.linear_attention_layer(layer, h, conv_state, rec_state, 8, 2, 256, S, 1, tr)
         return (out, nconv, nrec) + tuple(v for _, v in tr)
 
 names = ["out", "new_conv", "new_rec", "mixed", "conv_in", "conv_out_sliced",

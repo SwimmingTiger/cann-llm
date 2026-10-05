@@ -4283,3 +4283,49 @@ export_hiai_q35.py 原来只 AutoConfig + Qwen3_5ForCausalLM(tc) ⇒ ★随机�
 ③ 重点怀疑清单（都还没排除）：reshape/permute 在 legacy 下的维度处理 ✓、
    delta rule 里 `_solve_unit_lower` 的静态循环 ✓、`torch.split` 的负维度 ✓
 ```
+
+## 67. ★★★★★ hiai 接口版导出【数值完全忠实】—— 单进程逐中间量验证通过 ★★★★★
+
+### 67.1 分段导出验证（dbg_segments.py ✓：同一进程、同一份真权重、同一批输入 ✓）
+
+```
+seg1 mixed（in_proj_qkv+transpose）              4.29e-06 ✓
+seg2 conv_out 4.77e-07 ✓ / new_conv 0.0 ✓
+seg3 query/key/value/beta/g/z                    全 0.0 ✓
+seg4 delta rule core 1.21e-08 ✓ / new_rec 2.38e-07 ✓
+seg5 out（gated norm + out_proj）                8.94e-07 ✓
+```
+
+### 67.2 整层 13 个中间量（dbg_export_layer0.py + dbg_l0_cmp.py ✓）
+
+```
+把整个线性注意力层的每一步都做成图输出 ✓，在同进程里 ORT vs Python：
+  out 1.67e-06 ✓ · new_conv 3.10e-06 ✓ · new_rec 7.15e-07 ✓
+  mixed 4.29e-06 ✓ · conv_in 4.29e-06 ✓ · conv_out_sliced 2.50e-06 ✓
+  query 1.43e-06 ✓ · key 2.50e-06 ✓ · value 1.91e-06 ✓ · g 1.19e-06 ✓ · beta 2.98e-07 ✓
+  core 3.91e-08 ✓ · normed 8.58e-06 ✓
+⇒ ★hiai 接口版（含 conv 窗口缓存 + 递归状态进出）数值上完全忠实★ ✓
+```
+
+### 67.3 两个方法论教训（都值得记 ✓）
+
+```
+① ★报错"图 vs 代码不一致"时，先查【比较方法】★ ✗：
+   · 跨进程比较时，两边若都 from_pretrained 同一检查点 ⇒ 权重一致 ✓（用指纹核对 ✓ §66）
+   · 但★跨轮次比较会撞上陈旧 ONNX★ ✗（上一轮导的图、这一轮改的代码 ✓）⇒ 一定要重导再比 ✓
+   · 最可靠的做法：★导出 + ORT + 参考三者写在同一个脚本、同一个进程里★ ✓
+② ★tracer 的 requires_grad 坑★：Parameter 带 requires_grad 时
+   torch.onnx.export 报 "Cannot insert a Tensor that requires grad as a constant" ✗
+   ⇒ 导出前 `model.requires_grad_(False)` ✓
+```
+
+### 67.4 下一步（正式推进目标 ①②③④）
+
+```
+① 用 hiai 接口导出【全 24 层】（真权重 fp32 ✓）—— 预计 onnx ~7 GB ✗（外置数据 ✓）
+   并做整模型对拍（hidden_states vs HF ✓；再用 lm_head 验 argmax ✓）
+② OMG --target=omc ⇒ omc + SubGraph_0.weight ✓
+③ 组装模型包（omc ✓ + <name>_64_2048.embedding_weights/dequant_scale ✓
+   + tokenizer.json ✓ + <name>.json/api_config.json/executor.json/context.json ✓）
+④ 设备上 backends/hiai.py 加载 ⇒ ★聊天★ ✓
+```
