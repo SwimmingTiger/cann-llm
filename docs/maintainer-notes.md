@@ -3709,3 +3709,39 @@ OMG 的 pre-check 已全过 ✓，但"生成 omc"阶段仍报：
      ⇒ 用"显式 mask + 我们的 patch" 把那条路径换掉 ✓（gemma4 的老办法 ✓）
 ③ 修 ascendc 路径问题（线性层图的报错 ✗）：检查 PYTHONPATH / --asc-dir / 平台插件目录 ✓
 ```
+
+## 55. 目标③ 又进一步：OMG 唯一拒绝的算子就是 `IsNaN` ✗，且"改写节点必崩、重接消费者才安全" ✓
+
+### 55.1 干净矩阵（微型图，全部秒级 ✓）
+
+```
+m1_raw        不做任何处理                 → 解析成功 ✓；pre-check ★fail 列表里只有 IsNaN 一个★ ✗
+                                          （total 220 · pass 219 · ★fail 1 = IsNaN★ ✓）
+m4_fix_only   只做形状修复                 → 解析成功 ✓（形状修复无害 ✓）
+m2/m3         lowering 之后                → ★解析失败✗★（cannot find output tensor …）
+逐个 lowering 单独试（§54）：只有 ★IsNaN 那一条★会让解析崩 ✗（LessOrEqual/ConstantOfShape 都安全 ✓）
+换写法也不行 ✗：Not(Equal) / Expand(False,Shape) / ★Less(x,x)（单算子）★ / 删节点+常量 全部崩 ✗
+★但★：把整段模式 `Where(IsNaN(x), 0, x)` 重接成 ★`Identity(x)`★ → 解析【成功】✓✓
+     （即：不能碰 IsNaN 节点本身，但可以把它【连同消费者一起】换掉 ✓）
+```
+
+### 55.2 IsNaN 的来源（图里长什么样）
+
+```
+节点名：/b/layers.0/self_attn/IsNaN   ⇒ 在注意力里 ✓
+上游：Softmax ← Add ← MatMul ← …（就是 attention 权重 ✓）
+下游：Where（`Where(IsNaN(attn), 0, attn)` —— 即 attention 的 NaN 保护 ✓）
+· transformers 源码里 grep `isnan` 只命中 import_utils.py（Python 的 if，不会被 trace ✓）
+· grep `nan_to_num` 只命中 loss 文件 ✗ ⇒ 不是它 ✓（我把 torch.nan_to_num 恒等化也没用 ✗）
+⇒ 具体来源还没查到 ✓；但★不需要查了★：直接在图级把整段模式重接掉即可 ✓
+```
+
+### 55.3 下一步（明确）
+
+```
+把"重接消费者"的做法★推广到所有 IsNaN★ ✓：
+  对每个 `IsNaN(x)` 的消费者 C：
+    · C = Where(cond, a, b) 且 cond 是它  ⇒ 输出等价于 b（非 NaN 时 IsNaN=False ⇒ 取 b ✓）
+      ⇒ 用 `Identity(b)`（b 是标量则 `Expand(b, Shape(x))` ✓）顶替 C 的输出 ✓
+  这样既删掉了 IsNaN ✓，又是【重接】而非【改写节点】⇒ OMG 解析不会崩 ✓
+```

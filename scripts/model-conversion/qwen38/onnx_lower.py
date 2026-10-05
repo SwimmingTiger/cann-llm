@@ -51,19 +51,17 @@ def lower_model(model: onnx.ModelProto, kinds=None) -> dict:
     used = {o for n in g.node for o in n.output}
     new_nodes = []
     for n in g.node:
-        if n.op_type == "IsNaN" and (_want is None or "IsNaN" in _want):
-            # 实测(§54)：任何"用算子替换 IsNaN"的写法(Not(Equal) / Expand(False,Shape))
-            # 都会让 OMG 解析器直接崩 -> "cannot find output tensor ..." + ParseFromMemory FAIL
-            # 而【删掉这个节点、把它的输出改成常量 initializer】就没事
-            # 语义上：我们的图全是有限运算 => 无 NaN（正是那个保护想表达的）
+        if n.op_type == "IsNaN":
+            # 实测(§54)：用【多个算子】替换 IsNaN(Not(Equal)/Expand(False,Shape) 等)
+            # 都会让 OMG 解析器崩 -> "cannot find output tensor ..." + ParseFromMemory FAIL
+            # ⇒ 用【单算子】等价写法：Less(x, x)
+            #   · 非 NaN 时 Less(x,x) 与 IsNaN(x) 都是 False（取值相同）
+            #   · NaN 时不同，但我们的图全是有限运算 => 无 NaN
+            #   · 单节点替换：同形状、同 dtype(bool)、不引入中间张量
             x = n.input[0]
             out = n.output[0]
-            shape = _shape_of(model, out) or _shape_of(model, x)
-            if shape is None:
-                new_nodes.append(n)                  # 拿不到形状就原样保留
-                continue
-            new_inits.append(numpy_helper.from_array(np.zeros(shape, dtype=np.bool_), out))
-            counts["IsNaN"] = counts.get("IsNaN", 0) + 1   # 节点被删 => 不进 new_nodes
+            new_nodes.append(helper.make_node("Less", [x, x], [out], name=(n.name or out + "_isnan") + "_less"))
+            counts["IsNaN"] = counts.get("IsNaN", 0) + 1
         elif n.op_type == "LessOrEqual" and (_want is None or "LessOrEqual" in _want):
             a, b, out = n.input[0], n.input[1], n.output[0]
             base = n.name or (out + "_le")
@@ -79,6 +77,33 @@ def lower_model(model: onnx.ModelProto, kinds=None) -> dict:
     if counts:
         del g.node[:]
         g.node.extend(new_nodes)
+
+    # ★NaN 保护消除★：Where(IsNaN(x), 0, x) → Identity(x)
+    #   实测(§55)：OMG 唯一拒绝的算子就是 IsNaN ✗，而且"改写 IsNaN 节点"会让它解析崩 ✗
+    #   ⇒ 直接把整个模式换成 Identity（支持算子 ✓）并删掉 IsNaN ✓
+    prod = {}
+    for n in g.node:
+        for o in n.output:
+            prod[o] = n
+    keep = []
+    drop = set()
+    for n in g.node:
+        if n.op_type == "Where" and len(n.input) == 3:
+            cond = prod.get(n.input[0])
+            if cond is not None and cond.op_type == "IsNaN" and cond.input[0] in (n.input[1], n.input[2]):
+                src = cond.input[0]
+                keep.append(helper.make_node("Identity", [src], [n.output[0]],
+                                             name=(n.name or n.output[0]) + "_id"))
+                drop.add(id(cond))
+                counts["nan_guard"] = counts.get("nan_guard", 0) + 1
+                continue
+        if id(n) in drop:
+            continue
+        keep.append(n)
+    if counts.get("nan_guard"):
+        del g.node[:]
+        g.node.extend(keep)
+        # 清掉不再被引用的 initializer / value_info 不必做（ONNX 允许未使用 ✓）
 
     # ★ConstantOfShape → Expand(标量, shape)★
     #   注意：它的 shape 输入常常【不是】常量 initializer ✗（实测 ✓），

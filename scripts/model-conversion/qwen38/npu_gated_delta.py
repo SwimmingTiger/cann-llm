@@ -245,6 +245,7 @@ def npu_chunk_gated_delta_rule(
 # ---------------------------------------------------------------- 安装 / 卸载
 
 _PATCHED = {}
+_NAN_PATCHED = False
 
 
 def install(modeling_module=None):
@@ -258,6 +259,12 @@ def install(modeling_module=None):
         setattr(modeling_module, name, new)
     # 参考实现上挂着"从 hub 取 kernel"的装饰器 ⇒ 模型内部引用的是被装饰后的名字，
     # 因此还要把模块里别处引用到的别名一并替换（见 README 的说明 ✓）
+    # ★导出期间把 torch.nan_to_num 变成恒等★（从源头去掉 IsNaN ✗，见 §55）
+    global _NAN_PATCHED
+    if not _NAN_PATCHED:
+        _PATCHED["nan_to_num"] = torch.nan_to_num
+        torch.nan_to_num = lambda x, *a, **k: x
+        _NAN_PATCHED = True
     # M-RoPE 分节：函数式替换（去 select_scatter ✗）
     rope_cls = getattr(modeling_module, "Qwen3_5TextRotaryEmbedding", None)
     if rope_cls is not None and "rope" not in _PATCHED:
@@ -271,9 +278,13 @@ def install(modeling_module=None):
 
 
 def uninstall(modeling_module=None):
+    global _NAN_PATCHED
     if modeling_module is None:
         from transformers.models.qwen3_5 import modeling_qwen3_5 as modeling_module
-    for name, old in _PATCHED.items():
-        if old is not None:
+    for name, old in list(_PATCHED.items()):
+        if name == "nan_to_num":
+            torch.nan_to_num = old
+            _NAN_PATCHED = False
+        elif old is not None:
             setattr(modeling_module, name, old)
     _PATCHED.clear()
