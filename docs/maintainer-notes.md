@@ -6816,3 +6816,48 @@ norm 里还剩三个可怀疑的特性 ✗→✓：
 ★与 DDK 路线的关键差异★：NNRt 是【标准 OHOS NDK 接口】✓ 模型是 .ms ✓
    —— 没有 ModelManager 那层不透明的约束 ✗（这是换路线的理由 ✓）
 ```
+
+## 122. ONNX→.ms 报"third party param"✗（参数未知）· NNRt 头文件待取 ✗
+
+### 122.1 转换器失败的真正原因（GLOG_v=2 抓到的 ✓）
+
+```
+converter_lite --fmk=ONNX --modelFile=tiny.onnx --outputFile=tiny
+  ★[ERROR] third_party_param_parser.cc DoParseShape] "Only support fixed shapes in third party param"✗★
+  [ERROR] third_party_param_parser.cc Parse] "Parse input shapes of third party param failed" ✗
+  [ERROR] converter.cc ParseParam] "Parse third party param failed." ✗
+⇒ ★这个 mslite 构建把 ONNX 走了【third party（第三方插件）】通道✗★
+   ⇒ 需要一份【配置文件】声明输入形状 + 插件 so 路径 ✓
+     （--configFile 的帮助原文："…disable op fusion ability and set plugin so path" ✓）
+   ⇒ 我们的模型【是固定形状】✓（1,64,2048 ✓）却仍报"只支持固定形状"✗
+     ⇒ 说明它没拿到我们的形状 ✓（而是拿了默认/动态的 ✗）⇒ ★缺的是配置文件的正确键名✗★
+★试过的都失败✗★：不传 --inputShape · 传 3 维 shape · 传 4 维 shape ·
+   4 维输入的极简模型（[1,1,64,64] ✓）⇒ 全部 "Common error code" ✗
+★插件 so 的 strings 里也挖不到配置键名✗★（只有 C++ 符号 ✓）
+   —— libmslite_converter_plugin.so 在 tools/converter/lib/ ✓
+```
+
+### 122.2 NNRt 头文件（本轮没取到 ✗）
+
+```
+· 线索确认 ✓：OpenHarmony 里在 foundation/ai/neural_network_runtime/ ✓
+  （头文件 neural_network_runtime.h / neural_network_core.h ✓ 见华为开发者文档 ✓）
+· 但 gitee 直链 404 ✗（仓库名/分支/路径与我的猜测不符 ✓）
+· ★本机的 web_fetch 工具拒绝外网域名✗★（"resolves to a non-public IP" ✗）
+  ⇒ 必须走 hu60tx 的 curl ✓
+· ★待办★：找到正确的 raw 链接（试 github.com/openharmony/.../raw/... ✓
+  或华为开发者文档页 ✓ 或镜像站 ✓）
+```
+
+### 122.3 下一步（按性价比）
+
+```
+① ★先确认 NNRt 接受哪些模型格式★（关键分叉 ✓）：
+   若它接受 ★.om / .omc★ ⇒ ★我们已有现成产物✓★，完全不需要 mslite 转换器 ✓✓
+   若只接受 .ms ⇒ 必须把 mslite 的 third-party 配置格式搞对 ✓
+   ⇒ 查 neural_network_core.h / neural_network_runtime.h 的注释 ✓
+     （OH_NNCompilation_ConstructWithOfflineModelFile 的说明 ✓）
+② 取头文件的可行路径：hu60tx 上 curl github raw / 华为文档页 / gitee 换分支 ✓
+③ 若 .ms 必须 ⇒ 用 mslite 的 python 包（mindspore_lite ✓ pip 可装 ✓）或
+   查 mslite 官方文档里 third_party 配置段的键名 ✓
+```
