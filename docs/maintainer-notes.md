@@ -5387,3 +5387,47 @@ embed_scales:1,-1,1                ← ★官方图有这个输入✗★（我�
   ⑦ 4 维张量上的乘加（rec 状态 ✓）
 ⇒ 一旦定位到"哪个算子让 OMG 失败 ✗ / 哪个让 Init 失败 ✗"，就能在导出里绕开它 ✓
 ```
+
+## 91. ★逐算子/逐外形 tiny 探针：11 个全部通过（OMG ✓ 且 Init rc=0 ✓）★ ⇒ 缩小到"图规模或 delta rule 特有组合"
+
+### 91.1 探针表（都用【完全相同的流水线】✓：legacy 导出 → OMG(fp16 权重 + 外置) → runner Init ✓）
+
+```
+算子探针（输入 [1,8,64] ✓）        OMG   Init
+  plain                             ✓    rc=0
+  log_min      （Softplus 的 lowering）✓   rc=0
+  expand       （ConstantOfShape lowering）✓ rc=0
+  gather       （3 维换序 ✓）        ✓    rc=0
+  slice1d      （1 维切片 ✓）        ✓    rc=0
+  slice3d      （3 维切片 ✓）        ✓    rc=0
+  concat       （窗口拼接 ✓）        ✓    rc=0
+  where        （掩码选择 ✓）        ✓    rc=0
+  ★softplus   （原样 ✓ 未 lower）★   ✓    rc=0   ← 注意：OMG 接受 Softplus ✓
+                                                     （§45 的 "activation.mode=9 not support" 是【引擎运行时】✗）
+外形探针                             OMG   Init
+  state1  （2 进 2 出 · 状态进出 ✓）   ✓    rc=0
+  big2048 （input[1,8,2048] + mask[1,1,8,64] ✓）✓ rc=0
+  （state2 / state8 因我探针代码的张量形状写错 ✗ 没能导出 ✓ 待补 ✓）
+⇒ ★单算子、状态进出、大张量、多进多出——统统不是 Init 的障碍✗★
+```
+
+### 91.2 现在剩余的差异只有两类（下一步二分）
+
+```
+① ★图的规模★：我们 4 层图的节点数远大于探针（几千 vs 几个 ✓）
+   —— 需要验证"规模/层数"本身是否会触发 Init 失败 ✓
+② ★delta rule 特有的算子组合★：
+   · chunked delta rule 里的 张量收缩（[B,H,S,Dk] × [B,H,Dk,Dv] 类 ✓ 3 维/4 维混合 ✓）
+   · 卷积窗口的 3 维拼接 + 分组卷积的等价实现 ✓
+   · 常量掩码（tril/strict_lower ✓ numpy 常量 ✓）+ 大量 Where/mul ✓
+③ 另外：★1 层版的 OMG 失败（FMK_CL kernel ✗）与 4/24 层能编过✓★ 这个反差也要解释 ✓
+   —— 可能是"单层时 delta rule 退化"造成的退化形状 ✓
+```
+
+### 91.3 下一步
+
+```
+a) 按层数递增：2 层 / 3 层（0,1 = 2 线性 ✓；0,1,2 = 2 线性 + 1 全 ✓）⇒ 看 OMG/Init 在哪一层翻转 ✓
+b) 2 层若同 4 层一样（OMG ✓ Init ✗）⇒ 说明与层数无关 ✓ ⇒ 集中打 delta rule 的算子组合 ✓
+c) 补做 state2 / state8 探针（修掉我探针里的形状 bug ✓）⇒ 确认"KV 形状状态进出"也没问题 ✓
+```
