@@ -6004,3 +6004,50 @@ s2_delta 日志里的关键行：
    · 可以试着把常量折进权重 ✓、把 Slice 换成 MatMul（乘 0/1 掩码矩阵 ✓）等 ✓
 ③ 已改掉 RealDiv ✓（对【设备运行时】也是好事 ✓ —— 除法在 NPU 上本来就不稳 ✓）
 ```
+
+## 105. 成功/失败的 DDK 日志只差一行（细节不暴露 ✗）⇒ 转向检查 Init 的 option
+
+### 105.1 日志垫片对比（同一个 runner ✓ 同一个 so ✓）
+
+```
+成功（单层 s4_full ✓）：Init rc=0
+   · dlopen libhiai_hcl_model_runtime.so fail（噪声 ✓ 两边都有 ✓）
+   · "DDK pipe is HCL."
+失败（两层串联 ✗）：Init rc=1
+   · 同样两条 ✓ + ★多一行 "ModelManagerInit PrepareModelManager failed, faile ret is 1"✗★
+⇒ ★DDK 不把失败细节吐到我们能看到的地方✗★（那些细节在 hilog ✓ 我们读不到 ✗）
+```
+
+### 105.2 ★下一个要查的（很可能就是答案 ✓）★
+
+```
+★我们的 runner 用【默认构造】的 ModelInitOptions 调 Init✗★：
+    ModelManager::Init(const ModelInitOptions &options)
+  ⇒ 官方模型能过 ✓（说明默认值本身可用 ✓）
+  ⇒ 但【我们的图更大/更复杂】✗ ⇒ 可能需要显式给出：
+     · interfaceType / modelDeviceConfig（soc 版本、device id ✓）
+     · modelPriority / 内存相关字段 ✓（workspace 大小 ✓）
+★具体字段名与语义在 DDK 头文件里★：
+    ~/q38/HiAIDemo/DDK_Demo/V2/include/**/model_manager.h 等 ✓
+  ⇒ 下一步：★把 ModelInitOptions 的字段全找出来 ✓ 逐个试★ ✓
+    （尤其：是否有"最大子图数""workspace 大小""输入输出张量上限"这类字段 ✓）
+     —— 若有"最大子图/张量数"✓ ⇒ 直接把上限调大 ⇒ ★问题当场解决✓★
+```
+
+### 105.3 走到这里的完整认知（供决策 ✓）
+
+```
+★已完全打通的部分★：
+  · 3 维化改写 + 数值对拍（argmax 1.0000 ✓）
+  · 两套静态图导出（prefill/decode ✓）· OMG 编译 ✓ · 官方形态产物（omc + SubGraph_0.weight ✓）
+  · 状态进出 / 深卷积 / l2norm / delta rule / gated norm / out_proj —— ★单层端到端 Init rc=0 ✓★
+★卡住的点★：多层（≥2 层的串联）时 ModelManager::Init 失败 ✗，DDK 不暴露原因 ✗
+  · 相关性：weight 文件数（子图代理）7 ✓ 过 / 13 ✗ 挂
+  · 但已排除：串联本身 ✗（纯 MatMul 串联能过 ✓）、2 维张量 ✗、RealDiv ✗、
+    hiai_version ✗、权重文件缺失 ✗、层数/状态数 ✗
+  · 24 层的真实子图数未知 ✗（weight 文件被合并成 1 个 ✓ ⇒ 代理指标失效 ✗）
+★两条可能出路★：
+  a) ★ModelInitOptions 里有上限类字段 ⇒ 调大 ✓★（下一步先查这个 ✓ 最省事 ✓）
+  b) 若没有 ⇒ 只能把每层图做到"几乎不产生子图"✗（工作量很大 ✗ 且不保证 ✓）
+        ⇒ 那时可考虑换执行路径（CPU/GGUF 已通 ✓ 或与厂商确认 DDK 的子图上限 ✓）
+```
