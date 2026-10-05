@@ -115,8 +115,14 @@ def _expl_rmsnorm(nrm, x):
               rsqrt(v+eps) → (v+eps).pow(-0.5) ✓（Pow ✓ 免费 ✓）
     """
     d = x.shape[-1]
+    # ★eps 的属性名在不同 RMSNorm 类里不一样✓★（实测：Qwen3_5RMSNorm 没有 variance_epsilon ✗）
+    eps = getattr(nrm, "variance_epsilon", None)
+    if eps is None:
+        eps = getattr(nrm, "eps", None)
+    if eps is None:
+        eps = 1e-6
     v = _sum_last(x * x) * (1.0 / float(d))
-    return x * (v + nrm.variance_epsilon).pow(-0.5) * nrm.weight
+    return x * (v + eps).pow(-0.5) * nrm.weight
 
 
 def _expl_gated_rmsnorm(nrm, x, gate):
