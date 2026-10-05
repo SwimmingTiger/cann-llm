@@ -118,21 +118,22 @@ def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads
     g = -la.A_log.float().exp() * torch.nn.functional.softplus(la.in_proj_a(hidden).float() + la.dt_bias)
 
     # ★卷积：把缓存窗口拼在序列前面★ ⇒ 新窗口 = 拼接后的最后 K-1 个 ✓（全静态切片 ✓）
-    x = torch.cat([conv_state, mixed], dim=2)                  # [B, conv_dim, K-1+S] ✓
-    if trace is not None:
-        trace.append(("conv_in", x))
-    y = npu_causal_conv1d_fn(x, la.conv1d.weight.squeeze(1), la.conv1d.bias,
-                             activation=getattr(la, "activation", None))
-    # ★切片下标一律用【正数】★ ✗✗：负下标切片在 opset>=10 的 ONNX 导出里语义会错
-    #   （"Only steps=1 can be constant folded for opset >= 10 onnx::Slice" ✓）—— §65 实测踩到 ✓
-    #   x 的长度是 (K-1)+S ✓ ⇒ 最后 K-1 个 = 从下标 S 开始 ✓
-    new_conv = x[:, :, seq:] if ksize > 1 else x[:, :, :0]
-    # ★只取【新 token】对应的输出★：状态那 K-1 个位置的卷积结果在上一步已经算过 ✓
-    #   （下标用 Python int ✓ 避免旧 tracer 把 shape 变成 Tensor ✗，§53）
-    y = y[:, :, (ksize - 1):]                       # ★正下标✓★：丢掉状态那 K-1 个位置 ✓
-    if trace is not None:
-        trace.append(("conv_out_sliced", y))
-    y = y.transpose(1, 2)                                      # [B, S, conv_dim] ✓
+    if "conv" in skip:                                         # ★探针用✓★：跳过卷积
+        y = mixed.transpose(1, 2)                              # [B, S, conv_dim] ✓
+        new_conv = conv_state * 1.0
+    else:
+        x = torch.cat([conv_state, mixed], dim=2)              # [B, conv_dim, K-1+S] ✓
+        if trace is not None:
+            trace.append(("conv_in", x))
+        y = npu_causal_conv1d_fn(x, la.conv1d.weight.squeeze(1), la.conv1d.bias,
+                                 activation=getattr(la, "activation", None))
+        # ★切片下标一律用【正数】★：负下标切片在 opset>=10 的 ONNX 导出里语义会错（§65 ✓）
+        #   x 的长度是 (K-1)+S ⇒ 最后 K-1 个 = 从下标 S 开始 ✓
+        new_conv = x[:, :, seq:] if ksize > 1 else x[:, :, :0]
+        y = y[:, :, (ksize - 1):]                              # 丢掉状态那 K-1 个位置 ✓
+        if trace is not None:
+            trace.append(("conv_out_sliced", y))
+        y = y.transpose(1, 2)                                  # [B, S, conv_dim] ✓
 
     kd = k_heads * k_dim
     vd = v_heads * v_dim
@@ -152,22 +153,26 @@ def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads
     #   ⇒ NPUCL 判 "dimCnt 2 != 3" ⇒ OMG 编译失败（§94 实测 ✓）
     #   decode(S=1) 用 chunk=1 ⇒ 退化为逐 token 递归更新 ✓ 且不补齐 ✓
     chunk = 64 if s >= 64 else max(s, 1)
-    core, new_rec = npu_chunk_gated_delta_rule(
+    if "delta" in skip:                                        # ★探针用✓★：跳过 delta rule
+        core, new_rec = value, rec_state
+    else:
+        core, new_rec = npu_chunk_gated_delta_rule(
         query, key, value, g, beta, chunk_size=chunk, initial_state=rec_state,
-        output_final_state=True, use_qk_l2norm_in_kernel=True, seq_len=s, batch=b)
+            output_final_state=True, use_qk_l2norm_in_kernel=True, seq_len=s, batch=b)
 
     # ★gated RMSNorm 要额外传 gate（z）★ ✓（类名形如 Qwen3_5RMSNormGated ⇒ 用 in 判断 ✓）
     if trace is not None:
         trace.append(("core", core))
-    if "rmsnormgated" in type(la.norm).__name__.lower():
-        core = la.norm(core, z)
-    else:
-        core = la.norm(core)
+    if "norm" not in skip:                                     # ★探针用✓★
+        if "rmsnormgated" in type(la.norm).__name__.lower():
+            core = la.norm(core, z)
+        else:
+            core = la.norm(core)
     # ★out_proj 要 [B,S,Hv*Dv]★ ✓（delta rule 给的是 [B,S,Hv,Dv] ✓，参考实现也 reshape ✓）
     core = core.reshape(b, s, v_heads * v_dim)
     if trace is not None:
         trace.append(("normed", core))
-    out = la.out_proj(core)
+    out = core if "out" in skip else la.out_proj(core)         # ★探针用✓★
     if trace is not None:
         trace.append(("out", out))
     return out, new_conv, new_rec
