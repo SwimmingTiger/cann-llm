@@ -5110,3 +5110,45 @@ input_embed · attention_mask · position_ids · new_kv_cache_pos · ★embed_sc
     —— 注意 runner 的 Init rc=1 ✓ 与引擎同源 ✓ ⇒ 要看 Init 的具体报错 ✓
   · 之后自己写：填 input_embed（查表 ✓）/ mask / position → 取 hidden_states → lm_head → 采样 ✓
 ```
+
+## 85. DDK `Init` 对我们的 omc 也失败（rc=1）；结合 §84 ⇒ 定位到"图内某个算子的输入张量尺寸不符"✗
+
+### 85.1 实测（runner + 日志垫片 ✓）
+
+```
+./hiai_runner4 qwen38_2b.omc（包目录内 ✓）
+  RestoreFromFile rc=0 ✓ · CheckCompatibility 兼容 ✓ · 输入 89 / 输出 85 · ★Init rc=1 ✗★
+带 WQFIX_LOG 垫片抓到的 DDK 消息（hilog 走不到 stderr ✓ 只能靠垫片 ✓）：
+  hiai_model_runtime.c LoadSo(324)::"dlopen libhiai_hcl_model_runtime.so fail: … No such file…" ✗
+  model_manager_impl.cpp CreateModelManager::"DDK pipe is HCL." ✓
+  model_manager_impl.cpp Init(167)::"★ModelManagerInit PrepareModelManager failed, ret is 1✗★"
+★注意★：官方 omc 在同一环境里 Init rc=0 ✓ ⇒ 那条 dlopen 失败是【噪声】✗（不是根因 ✓）
+★runner 里的 CPUCL/CANN 细分报错打在【引擎自己的日志】里 ✓，runner 拿不到 ✗（hilog 权限 ✓）
+```
+
+### 85.2 结合 §84 的完整结论
+
+```
+★两条路都被同一个东西挡住：我们图里某个算子的输入张量"声明尺寸 < 实际数据"✗★
+  · 引擎路：CPUCL 报 "Op:/Mul_1 opRunContext UpdateDataAndWeight failed"
+             （/input_layernorm/Mul_1 ✓ 的输入之一 onnx::Mul_17452 是初始izer ✓）
+  · DDK 路：PrepareModelManager failed（同源 ✓）
+而官方 omc（17 输入 / 5 输出 ✓ 不含 KV ✓）在同环境 100% 正常 ✓
+⇒ ★除了"图的 IO 形态"（§84），还叠加了"图内某个初始izer/张量尺寸不对"（本节）✗★
+★最可疑的来源：我们为了过 OMG 做的那几步图级改写✗★
+   onnx_lower（IsNaN→常量、ConstantOfShape→Expand、MatMul(标量)→Mul、Softplus→Log/Exp ✓）
+   + onnx_weights_to_fp16（插 Cast ✓）+ fix_static_shapes（改 value_info ✓）
+   —— 其中任何一步都可能留下"声明与实际不一致"的张量 ✓
+```
+
+### 85.3 下一步（三条，按性价比排序）
+
+```
+① ★逐项回退图级改写★：只保留 OMG pre-check 必需的那几步（Softplus ✓），
+   其余（fp16 Cast ✗ / fix_static_shapes ✗）先去掉 ⇒ 用 fp32 + 外置权重重编 ✓ 再看 Init ✓
+   （fp32 + 外置权重已验证能过 OMG ✓ ⇒ 不需要 fp16 那一步 ✓）
+② ★用 onnx.checker + 自写脚本核对所有 initializer 的 dims 与 data 长度是否一致★ ✓
+   （尤其是 name 形如 onnx::Mul_17452 的那些 ✓ —— torch 旧导出器会按需拆分/复制权重 ✓）
+③ 若还不行 ⇒ ★走"无状态 prefill 图"✗→✓ 再评估★：把状态全去掉 ✓ 只留 input_embed→hidden_states ✓
+   （引擎的 17/5 形态其实很接近这个 ✓ §84 ✓）
+```
