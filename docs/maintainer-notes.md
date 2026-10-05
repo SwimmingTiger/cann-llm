@@ -4844,3 +4844,58 @@ uv pip install --python ~/q38cuda/bin/python torch --index-url https://download.
     —— 注意 lora/kd 那些高阶配置我们填得很简 ✗ ⇒ 也许 stage1 需要更完整的 config.yaml ✓
  ③ 必要时把文档里 dopt_config.json 的推荐写法照抄一份（embedding/lm_head 的层策略 ✓）
 ```
+
+## 79. ★★★★★★ dopt 三阶段全部跑通：fake_quant_weight.pth + quant_params_file ★★★★★★
+
+```
+★fake_quant_weight.pth = 3763.8 MB ✓★（导出 ONNX 时用它替换权重 ✓）
+★quant_params_file    = 561.3 MB ✓★（后续 omc 转换用 ✓）
+trained_quant_weight.pth 3893.2 MB ✓（stage1 产物 ✓）
+trained.pth             3893.2 MB ✓（stage2 产物 ✓）
+日志："weight quant done!!!" ✓ · "quant params file build done" ✓
+stage1 耗时 195 秒 ✓
+```
+
+### 79.1 一路踩掉的四个坑（都是实测 ✓）
+
+```
+① fp16 配置 ✗：config.yaml 的 extra_training_config.fp16 我写成 False ✗ ⇒ CUDA OOM（5.62 GiB 上限 ✓）
+   ⇒ 改 True ✓ + PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ✓ ⇒ OOM 消失 ✓
+② 缺 --optimize-config ✗（§77 的发现 ✓）⇒ build_params 报 NoneType ✓
+③ dataset.train_files 为空 ✗ ⇒ is_valid_file_path(None) 崩 ✓
+   填 "wikitext2" 又撞新版 datasets 的 HF URI 校验 ✗（要求 namespace/name ✓）
+   ⇒ ★改成本地 dataset.json（80 条文本 ✓ 校准用 ✓）✓★ 最稳 ✓
+④ ★qwen3_5 的 M-RoPE 与 dopt 数据管线不兼容✗★：
+     dopt 喂 [B,S] 的 position_ids ✓，而 qwen3_5 的 rotary 要 [3,B,S] ✗
+     IndexError: too many indices for tensor of dimension 2 ✗
+   ⇒ ★用 sitecustomize.py 非侵入注入补丁✓★（~/q38/dopt_shim/sitecustomize.py ✓）：
+       2 维 position_ids 自动 expand 成 3 段 ✓（文本输入三段相同 ✓，与 §69 结论一致 ✓）
+     dopt 调用时加 PYTHONPATH=$D:~/q38/dopt_shim ✓ ⇒ ★一次通过✓★
+```
+
+### 79.2 关键环境（可复现 ✓）
+
+```
+venv：~/q38cuda（uv venv --python 3.10 ✓ + torch cu121 ✓ = torch 2.5.1+cu121 ✓ cuda True ✓ RTX 2060 ✓）
+      + transformers / datasets / accelerate / pyyaml / numpy / sentencepiece / protobuf ✓
+工作目录：~/q38/dopt_work/{config.yaml, dopt_config.json, train_output/} ✓
+调用（照官方 run.sh ✓，但用我们的 venv 与 shim ✓）：
+  PYTHONPATH=$D:~/q38/dopt_shim ~/q38cuda/bin/python $D/dopt/dopt_lm/opt_main.py \
+    --model-path /home/hu60/q38 --dopt-config <dopt_config.json> \
+    --optimize-config <config.yaml> --quant-stage stageN --block-size 128 --output-dir <train_output>
+```
+
+### 79.3 下一步（回到官方 build_model.py 一条龙，但需要补 qwen3_5 支持）
+
+```
+官方 §47 链路的最后一段是仓库的 scripts/model-conversion/qwen/build_model.py ✓
+  （导出 → onnxsim → OMG(--compress_conf ✓) → 装配 ✓ 一条龙 ✓ 还支持 --layers/--hidden 等切片 ✓）
+★但它的导出走 npu_tuned_export 的官方脚本（qwen2/qwen3/glm ✗ 没有 qwen3_5 ✗）★
+  ⇒ 方案：★给 npu_tuned_model 加一个 qwen35 的 wrapper✓★
+     （把我们已经验证过的 3 维实现接进去 ✓：npu_gated_delta ✓ + npu_attention ✓ + npu_layers ✓
+       + 纯浮点 RoPE ✓ + 状态槽位 ✓），并在 __init__.py 的 build_model 注册表里加一行 ✓
+  ⇒ 然后 build_model.py --hf-model … --quant-pth <fake_quant_weight.pth> --dopt-config … \
+        --arch qwen35 --name qwen38_2b --kv-len 2048 --seq-len 64 ✓
+  ⇒ 得到 ★官方形态的 omc + SubGraph_0.weight + embedding_weights/scale★ ✓
+  ⇒ 组装模型包 → 引擎加载 ⇒ 聊天 ✓
+```
