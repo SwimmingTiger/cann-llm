@@ -6356,3 +6356,40 @@ check_hiai_parity.py：
 ★另一刀（更省事 ✓）★：把 inputTensorDescs 显式填上（从 ONNX 读出每个输入的形状/dtype ✓）
    —— DDK 一直是"自己推断" ✓，显式给它也许能绕过推断的坑 ✓
 ```
+
+## 112. 强制 ExecuteDevice::CPU 也不行 ✗ ⇒ 与 NPU kernel 路径无关 ✓
+
+```
+runner 加实验开关（INIT_CPU=1 ⇒ modelDeviceOrder = {ExecuteDevice::CPU} ✓）：
+   2 层模型：★Init rc=1 ✗★（与不强制一样）
+   单层对照：Init rc=0 ✓
+⇒ ★失败与"走 NPU 还是 CPU"无关✗★ ⇒ 不是某个 NPU kernel 组合的问题 ✓
+```
+
+### 112.1 21 轮深挖的总结（可交付的成果 vs 卡点）
+
+```
+★实打实的成果★：
+  · 3 维化改写 + 逐层/整模型数值对拍工具链 ✓
+  · 两套静态图导出（prefill S=64 / decode S=1 ✓ chunk 随 S 自适应 ✓）
+  · ★查出并修掉一个真 bug：ConstantOfShape 降级把 int64 强转 float32✗★
+    ⇒ 图从【非法 ONNX】变合法 ✓（ORT 从"直接拒收"变成"能跑" ✓）
+    ⇒ 整模型的 OMG 子图代理数 13 → 1 ✓
+  · 修好对拍脚本的两处错配（4 层/KV=256 硬编码 ✓、position_ids 的维度与 dtype ✓）
+  · hiai_runner 工具链：Load ✓ / 逐级 Init 判据 ✓ / 多个实验开关（INIT_NCHW / INIT_CPU ✓）
+  · ★定位到"单层可 Init ✓ / ≥2 层不可 Init ✗"这个极窄的复现面★ ✓
+★卡点✗★：DDK ModelManager::Init 对 ≥2 层的图返回 1 ✗ 且【不吐原因】✗
+  已排除：串联本身 · 2 维 · RealDiv · hiai_version · 权重文件 · 层数/状态 · formatMode
+        · 子图数（13→1 后仍失败）· ONNX 合法性 · CPU/NPU 设备选择
+★尚未试的最后一招✗→✓★：显式填 inputTensorDescs（DDK 目前靠自己推断 ✓）
+```
+
+### 112.2 建议（供决策）
+
+```
+① ★试最后一招：显式填 inputTensorDescs★（从 ONNX 读形状+dtype ✓ 逐个塞进 options ✓）
+   —— 便宜（改 runner 十几行 ✓）⇒ 若还不行 ⇒ 说明 DDK 这条路对 ≥2 层图确实走不通 ✗
+② 换执行路径：★CPU / GGUF（已跑通 ✓ 慢但能聊天 ✓）★ 或 NNRt
+③ 归档：把上面的成果整理成文档/脚本 ✓（3 维化 + OMG 官方形态 + 单层 Init ✓ + 修复记录 ✓）
+④ 向厂商确认 ModelManager::Init 对多层图的约束（最快拿到确定性答案 ✓）
+```

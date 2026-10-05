@@ -132,6 +132,13 @@ int main(int argc, char **argv) {
         options.buildOptions.formatMode = FormatMode::USE_ORIGIN;          // ★★
         options.buildOptions.precisionMode = PRECISION_MODE_FP16;          // ★
         options.buildOptions.modelDeviceConfig.fallBackMode = FallBackMode::ENABLE;
+        // ★实验开关★：INIT_CPU=1 ⇒ 把执行设备强制成 CPU ✓
+        //   ⇒ 若 Init 就过了 ⇒ 说明问题在【NPU 侧的算子/kernel 组合】✗
+        const char *cpu = getenv("INIT_CPU");
+        if (cpu && cpu[0] == '1') {
+            options.buildOptions.modelDeviceConfig.modelDeviceOrder = {ExecuteDevice::CPU};
+            std::cout << "  [Init] ★强制 modelDeviceOrder = {CPU}★" << std::endl;
+        }
         std::cout << "  [Init] formatMode=USE_ORIGIN · precision=FP16 ✓" << std::endl;
     }
     Status ret = manager->Init(options, built, nullptr);
