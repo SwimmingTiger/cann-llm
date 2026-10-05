@@ -6960,3 +6960,47 @@ core 库里的字符串（直出 ✓）：
       OH_NNCompilation_ConstructWithOfflineModelFile ⇒ 看哪个被接受 ✓
    ⇒ ★这个实验能一次性回答"NNRt 路线可行吗"✓★
 ```
+
+## 125. ★★★ NNRt 直接暴露 NPU ✓✓✓（device[0] = NPU_ohos…KirinX90_v2_0）★ —— Build 仍失败 ✗
+
+### 125.1 本轮写出的最小 NNRt 程序并运行（★首次真正跑通 NNRt API ✓★）
+
+```
+文件：scripts/model-conversion/qwen38/nnrt_probe/nnrt_probe.cpp ✓
+编译：aarch64-unknown-linux-ohos-clang++ -I<TMP>/nnrt_inc nnrt_probe.cpp \
+        /system/lib64/ndk/libneural_network_core.so /system/lib64/ndk/libneural_network_runtime.so
+运行：LD_PRELOAD=<libuname.so> ./nnrt_probe [模型路径]
+★实测输出★：
+   ① OH_NNDevice_GetAllDevicesID rc=0 ✓ count=1
+      ★device[0] id=5337627887595434492
+         name = NPU_ohos.boot.hardware.KirinX90_v2_0★   type=3
+   ⇒ ★★NNRt 把 NPU 设备直接暴露给我们了✓✓★★ —— 这是"换 NNRt 路线"最有力的依据 ✓
+② 试加载：
+   我们的 omc（models/f24/seg.omc ✓）：ConstructWithOfflineModelFile ⇒ 非空 ✓ ·
+       SetDevice rc=0 ✓ · ★Build rc=1 ✗★（OH_NN_FAILED ✓ 通用失败 ✓）
+   已有 .ms（.tmp/q35_body_L4.ms ✓）：★同样 Build rc=1 ✗★
+⇒ ★构造阶段不校验（两者都给非空指针 ✓）⇒ 真正的门槛在 Build ✓★
+   而两个文件都过不了 ⇒ 说明它们【不是】这台设备认的"厂商离线模型"✗
+   （与头文件注释一致：离线模型必须由★设备厂商的转换器★产出 ✓）
+```
+
+### 125.2 顺带确认的接口细节
+
+```
+· OH_NNCompilation_SetCache 需要 ★3 个参数★ ✗（我按 2 个写 ⇒ 编译失败 ✓ 已记下 ✓）
+· OH_NN_ReturnCode：0=SUCCESS · ★1=FAILED★ · 2=INVALID_PARAMETER · 3=MEMORY_ERROR
+                   4=OPERATION_FORBIDDEN · 5=NULL_PTR · 6=INVALID_FILE ✓
+  ⇒ 我们拿到的是 1（通用失败 ✗，无细节 ✓）
+· 需要 LD_PRELOAD=libuname.so（与 DDK 路线同样的 OHOS 库兼容处理 ✓）
+```
+
+### 125.3 下一步
+
+```
+① ★把模型做成"厂商离线模型"★ —— 两条路都在试：
+   a) ★mslite 厂商插件（libmslite_converter_plugin.so ✓）★：卡在 [third_party_model]
+      配置格式 ✗（已知键名 input_shapes / output_shapes ✓ 但配置写法还没试对 ✓）
+   b) DDK 的 OMG 产物（omc ✓）⇒ ★已实测 Build 失败 ✗★ ⇒ 此路基本排除 ✗
+② 修好 SetCache 调用（3 参数 ✓）并把错误码打全 ✓，看能不能拿到更具体的失败原因 ✓
+③ 另注意：NNRt 的认证机制只针对超 RAM 上限的模型 ✓ ⇒ 先用小模型（如 L4 ✓）试 ✓
+```
