@@ -18,26 +18,53 @@ import onnx
 from onnx import TensorProto, helper, numpy_helper
 
 
-def lower_model(model: onnx.ModelProto) -> dict:
-    """就地改写，返回 {算子名: 替换次数} ✓。"""
+def _shape_of(model: onnx.ModelProto, name: str):
+    """从 input/output/value_info 查静态形状（拿不到返回 None）。"""
+    g = model.graph
+    for vi in list(g.value_info) + list(g.input) + list(g.output):
+        if vi.name == name:
+            t = vi.type.tensor_type
+            if not t.HasField("shape"):
+                return None
+            dims = [d.dim_value for d in t.shape.dim]
+            if any(v <= 0 for v in dims):
+                return None
+            return dims
+    return None
+
+
+def lower_model(model: onnx.ModelProto, kinds=None) -> dict:
+    """就地改写，返回 {算子名: 替换次数} ✓。
+
+    kinds 给定时只处理其中列出的算子（用于二分排查 ✓）。
+    """
+    _want = set(kinds) if kinds else None
+    # ★先做一次 shape inference★：否则 IsNaN 的输出形状查不到 ⇒ 我们的"删节点+常量"
+    #   lowering 会拿不到形状而跳过 ✗（§54 实测 ✓）
+    try:
+        model.CopyFrom(onnx.shape_inference.infer_shapes(model, strict_mode=False))
+    except Exception:                            # noqa: BLE001
+        pass
     g = model.graph
     counts: dict[str, int] = {}
     new_inits: list = []
     used = {o for n in g.node for o in n.output}
     new_nodes = []
     for n in g.node:
-        if n.op_type == "IsNaN":
+        if n.op_type == "IsNaN" and (_want is None or "IsNaN" in _want):
+            # 实测(§54)：任何"用算子替换 IsNaN"的写法(Not(Equal) / Expand(False,Shape))
+            # 都会让 OMG 解析器直接崩 -> "cannot find output tensor ..." + ParseFromMemory FAIL
+            # 而【删掉这个节点、把它的输出改成常量 initializer】就没事
+            # 语义上：我们的图全是有限运算 => 无 NaN（正是那个保护想表达的）
             x = n.input[0]
             out = n.output[0]
-            base = n.name or (out + "_isnan")
-            eq = base + "_eq"
-            while eq in used:
-                eq += "_"
-            used.add(eq)
-            new_nodes.append(helper.make_node("Equal", [x, x], [eq], name=base + "_eq"))
-            new_nodes.append(helper.make_node("Not", [eq], [out], name=base + "_not"))
-            counts["IsNaN"] = counts.get("IsNaN", 0) + 1
-        elif n.op_type == "LessOrEqual":
+            shape = _shape_of(model, out) or _shape_of(model, x)
+            if shape is None:
+                new_nodes.append(n)                  # 拿不到形状就原样保留
+                continue
+            new_inits.append(numpy_helper.from_array(np.zeros(shape, dtype=np.bool_), out))
+            counts["IsNaN"] = counts.get("IsNaN", 0) + 1   # 节点被删 => 不进 new_nodes
+        elif n.op_type == "LessOrEqual" and (_want is None or "LessOrEqual" in _want):
             a, b, out = n.input[0], n.input[1], n.output[0]
             base = n.name or (out + "_le")
             gt = base + "_gt"
@@ -61,7 +88,7 @@ def lower_model(model: onnx.ModelProto) -> dict:
     new_nodes = []
     k = 0
     for n in g.node:
-        if n.op_type == "ConstantOfShape":
+        if n.op_type == "ConstantOfShape" and (_want is None or "ConstantOfShape" in _want):
             val = 0.0
             for attr in n.attribute:
                 if attr.name == "value":

@@ -3670,3 +3670,42 @@ OMG 的 pre-check 已全过 ✓，但"生成 omc"阶段仍报：
 怀疑点：图级 lowering 的产物（Expand 标量初始化器 / 结构）让 OMG 的 ONNX 解析器不适 ✗
 下一步：用 `--mode 1`（model → json）单独验解析 ✓；再逐项排查 lowering 产物 ✓
 ```
+
+## 54. 目标③ 继续推进：OMG 的"解析失败"根因锁定在 `IsNaN` 的 lowering 上
+
+### 54.1 二分结果（都是微型图，秒级 ✓，逐一变量）
+
+```
+变体（在"只含 1 个全注意力层"的微型图上做 ✓）              OMG 结果
+  bs_full_raw   不做任何 lowering                        ★解析成功✓★（只报 Pre-check has errors ✓）
+  bs_leonly     只改 LessOrEqual  → Not(Greater)          解析成功 ✓
+  bs_cosonly    只改 ConstantOfShape → Expand(标量,shape)  解析成功 ✓
+  ★bs_isonly    只改 IsNaN → Not(Equal(x,x))★            ★解析失败✗★（cannot find output tensor …）
+  bs_isonly2    IsNaN → Expand(False, Shape(x))          ★解析失败✗★
+  bs_isonly4    改成"删节点 + 常量输出"（未触发）          解析成功 ✓
+```
+
+⇒ ★只要把 `IsNaN` 用【算子】替换，OMG 的解析器就崩✗★（换哪种写法都一样 ✗）；
+   而 **不动它 / 删掉它** 都能正常解析 ✓。
+
+### 54.2 本轮顺带确认的两件事
+
+```
+· `onnx.checker` 说三张图都【合法】✓ ⇒ 是 OMG 解析器的怪癖 ✗，不是 ONNX 语法问题 ✓
+· OMG 的 `--mode 1`（model→json）需要另一套参数 ✗，不适合用来验解析 ✓
+· ★线性注意力层那张图解析是【成功】的✓★（它报的是 ascendc 内核路径错 ✗：
+    "file path '…/tools_omg/../platform/kirinx90/lib64/…'" ⇒ 属于环境/配置问题 ✗，
+    与 §53 的解析问题【不是同一个】✓）⇒ 待修 ✓
+```
+
+### 54.3 下一步（已想好的两个方向）
+
+```
+① ★换一个"单算子、同形状、同 dtype"的等价写法★：
+     IsNaN(x) ≈ Less(x, x)     （非 NaN 时两者都是 False ✓；NaN 时才是 True ✗，
+                                 但我们的图全是有限运算 ⇒ 无 NaN ✓ 与 §53 的处置一致 ✓）
+     —— 单节点替换，不像 Not(Equal) 那样引入中间张量 ✓
+② 或者从源头消除 IsNaN：它来自 transformers 的注意力 mask 代码 ✓
+     ⇒ 用"显式 mask + 我们的 patch" 把那条路径换掉 ✓（gemma4 的老办法 ✓）
+③ 修 ascendc 路径问题（线性层图的报错 ✗）：检查 PYTHONPATH / --asc-dir / 平台插件目录 ✓
+```
