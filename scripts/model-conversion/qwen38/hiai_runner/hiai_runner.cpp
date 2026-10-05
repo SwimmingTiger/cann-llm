@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -140,6 +142,33 @@ int main(int argc, char **argv) {
             std::cout << "  [Init] ★强制 modelDeviceOrder = {CPU}★" << std::endl;
         }
         std::cout << "  [Init] formatMode=USE_ORIGIN · precision=FP16 ✓" << std::endl;
+    }
+    // ★★★ 实验：显式填 inputTensorDescs ★★★
+    //   为什么：DDK 默认自己推断 IO ✓；我们的图是【3 维】张量 ✗
+    //   ⇒ 显式用 ★Format::ND★（Nd Tensor ✓）而不是默认的 NCHW ✗
+    //   输入规格文件格式（每行一个）：name dim0,dim1,... DTYPE
+    const char *isf = getenv("HW_INPUTS_FILE");
+    if (isf && isf[0]) {
+        std::ifstream fin(isf);
+        std::string line;
+        while (std::getline(fin, line)) {
+            if (line.empty()) continue;
+            std::istringstream iss(line);
+            std::string nm, dimstr, dt;
+            iss >> nm >> dimstr >> dt;
+            NDTensorDesc d;
+            std::stringstream ds(dimstr);
+            std::string tok;
+            while (std::getline(ds, tok, ',')) d.dims.push_back(atoi(tok.c_str()));
+            d.format = Format::ND;                       // ★关键：ND 而不是 NCHW ✓★
+            if (dt == "INT32") d.dataType = DataType::INT32;
+            else if (dt == "INT64") d.dataType = DataType::INT64;
+            else if (dt == "FLOAT16") d.dataType = DataType::FLOAT16;
+            else d.dataType = DataType::FLOAT32;
+            options.buildOptions.inputTensorDescs.push_back(d);
+            std::cout << "  [Init] 显式输入 " << nm << " dims=" << dimstr
+                      << " dtype=" << dt << " format=ND ✓" << std::endl;
+        }
     }
     Status ret = manager->Init(options, built, nullptr);
     std::cout << "  Init rc=" << static_cast<int>(ret) << std::endl;

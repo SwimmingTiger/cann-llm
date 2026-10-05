@@ -6393,3 +6393,63 @@ runner 加实验开关（INIT_CPU=1 ⇒ modelDeviceOrder = {ExecuteDevice::CPU} 
 ③ 归档：把上面的成果整理成文档/脚本 ✓（3 维化 + OMG 官方形态 + 单层 Init ✓ + 修复记录 ✓）
 ④ 向厂商确认 ModelManager::Init 对多层图的约束（最快拿到确定性答案 ✓）
 ```
+
+## 113. ★最后一招也不成 ✗ ⇒ DDK 直跑路线在"≥2 层"上到此为止，转入归档★
+
+### 113.1 最后一招（用户指定 ✓）
+
+```
+从 DDK 头文件查到枚举（util/base_types.h ✓）：
+    enum class Format { NCHW = 0, NHWC, ★ND★, RESERVED };          ← ND = Nd Tensor ✓
+    enum class DataType { UINT8, FLOAT32, FLOAT16, INT32, INT8, INT16, BOOL, INT64, … };
+★实现★：runner 加 HW_INPUTS_FILE 支持 ✓ —— 读一份"name dim0,dim1,… DTYPE"规格文件 ✓
+   逐个填 options.buildOptions.inputTensorDescs ✓，并显式用 ★Format::ND★（而不是默认 NCHW ✗）
+★实测★（2 层模型 ✓）：
+   显式输入 input_embed 1,64,2048 FLOAT32 format=ND ✓
+   past_key_in0 1,6144,3 ✓ · past_value_in0 1,16,128,128 ✓ · …（逐个打印确认 ✓）
+   ⇒ ★Init rc=1 依旧 ✗★（不带规格也是 rc=1 ✗）
+```
+
+### 113.2 ★结论：DDK `ModelManager` 直跑路线在 ≥2 层图上走不通✗（原因不暴露 ✓）★
+
+```
+★22 轮累计排除的假设（全部有实测 ✓）★：
+   串联本身 ✗ · 2 维张量 ✗ · RealDiv ✗ · hiai_version(IR/v310/v300) ✗
+   权重文件缺失 ✗ · 层数/状态数/权重内容 ✗ · formatMode=USE_NCHW ✗
+   子图数（整模型 13→1 后仍失败 ✗）· ONNX 合法性（非法→合法后仍失败 ✗）
+   ExecuteDevice（强制 CPU ✗）· 显式 inputTensorDescs + Format::ND ✗
+★唯一确定的事实★：
+   · 官方 36 层（17 进/5 出，图内无 KV）⇒ Init rc=0 ✓
+   · 我们【单层】（3 进/1 出，有状态）⇒ Init rc=0 ✓
+   · 我们【≥2 层】（8~89 进/8~85 出，有状态）⇒ Init rc=1 ✗
+   · DDK 从不吐失败原因 ✗（细节在 hilog ✓ 读不到 ✗）
+```
+
+### 113.3 ★本次工作的可交付成果（用户确认算硬成果 ✓）★
+
+```
+① ★修掉一个真 bug（最有价值）★：onnx_lower.py 的 ConstantOfShape→Expand 降级
+   把原本 int64 的常量强转成 float32 ✗ ⇒
+     · 图变成【非法 ONNX】✗（ORT 直接拒收 ✓；Concat 混合类型 ✓）
+     · int64(8B)→float32(4B) ⇒ ★正是 DDK "param[size] is less than[dataSize]" 的来源✗★
+   修法：保留原 dtype ✓（val_arr.astype(val_arr.dtype) ✓）
+   收益：图合法 ✓（ORT 从"拒收"到"能跑" ✓）· 整模型 OMG 子图代理数 13 → 1 ✓
+        （虽然 Init 仍失败 ✗，但这是确定性的改进 ✓）
+② ★新增 fix_mixed_dtypes pass★（onnx_lower.py ✓ 并在 lower_hiai.py 调用 ✓）：
+   自做类型传播 ✓ + 修混合类型算子 ✓ + 清空全部 value_info（避免任何陈旧类型声明 ✗）
+③ ★修好对拍装置★（check_hiai_parity.py ✓）：
+   硬编码 4 层/KV=256 ✓ 要匹配导出 ✓；position_ids 改 2 维 int32 ✓；喂前统一转 int32 ✓
+④ ★hiai_runner 实验工具链★（scripts/model-conversion/qwen38/hiai_runner/ ✓）：
+   Load 判据 ✓ · Init rc 判据 ✓ · 开关：INIT_NCHW ✓ / INIT_CPU ✓ / HW_INPUTS_FILE(Format::ND) ✓
+⑤ ★两套静态图导出链路完好★：prefill(S=64) / decode(S=1 ✓ chunk 随 S 自适应 ✓)
+   + OMG 官方外置权重形态（omc + SubGraph_0.weight ✓ 已验证 ✓）
+⑥ ★极窄的复现面★：单层可 Init ✓ / ≥2 层不可 ✗ —— 这是给厂商提问的最佳材料 ✓
+```
+
+### 113.4 建议的下一步（供用户决定）
+
+```
+① 拿 ⑥ 去问厂商/论坛（复现面极窄 ✓ 附 omc 与规格 ✓）—— 最快拿到确定性答案 ✓
+② 换执行路径：CPU/GGUF（已跑通 ✓）或 NNRt
+③ 把 ①~⑥ 整理成正式文档/脚本进仓库 ✓（本文件即原始记录 ✓）
+```
