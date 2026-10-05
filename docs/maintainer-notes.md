@@ -3284,3 +3284,70 @@ g4_export.py 的 12 层导出留下 ★seg.onnx 218 KB + 152 个 onnx__* 文件�
   SubGraph_0.weight 形态 ✓ —— Qwen3-8B 就是这么来的 ✓）
   dopt 量化 → 官方导出 → OMG(--compress_conf) → SubGraph_0.weight → converter_lite ✓
 ```
+
+## 47. ★★★★★ 官方 dopt(W4) + OMG + hiai 链路：端到端跑通 ★★★★★
+
+从 HF 检查点出发，**我们自己**产出了一个能在设备 NPU（hiai 引擎）上聊天的 W4 模型包 ✓。
+
+```
+模型：Qwen/Qwen2.5-1.5B-Instruct（W4 / group 128 / act 16）
+实测：bot> 2 ✓
+      '用一句中文说明你是什么模型。' ⇒ "我是一个由阿里云开发的文本生成模型。" ✓
+      [in 74 tok · out 12 tok · prefill 603 ms · decode 6.0 tok/s] ✓
+产物：SubGraph_0.weight 3104 MB + qwen2_1p5b_w4.omc 3.0 MB
+      + embedding_weights 233 MB(int8) + embedding_dequant_scale 0.6 MB + tokenizer 7 MB = 3.2 GB
+      ★与 models/Qwen3-8B 完全同形态★ ✓ ⇒ 再次印证 §46「大模型 = 图 + 外置权重」✓
+```
+
+### 47.1 完整配方（转换机 = RTX 3080 Ti）
+
+```bash
+# 0) ★先看显存★：dopt 必须 CUDA。实测踩坑：GPU 被别的进程占用
+#    （当时是游戏占 9.4 GB / 12 GB）⇒ stage1 直接 CUDA OOM ✗
+nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
+
+# 1) 官方示例仓库（量化模板 + 导出脚本都在里面）
+git clone --depth 1 https://gitcode.com/HarmonyOS_Samples/cannkit_samplecode_lm_engine_cpp.git
+#   → CANN_LLM/CANN_LLM_Engine_Model/npu_tuned_export/export_model_single_{qwen2,qwen3,glm}.py
+#   → 同目录还有 model_info_target.yaml 模板 ✓
+
+# 2) HF 检查点（1.5B ≈ 3.1 GB，转换机可直连 HF ✓）
+#    config.json · model.safetensors · tokenizer.json · tokenizer_config.json · vocab.json · merges.txt
+
+# 3) dopt 三阶段（DDK 里：tools/tools_dopt/dopt_pytorch_py3/dopt/dopt_lm/opt_main.py）
+#    config.yaml 关键项：★quant_param_2: False★（kirinx90；写 True ⇒ 权重负半轴被钳 0 ⇒ 输出恒定垃圾 ✗）
+#    首跑会"先生成 dopt_config.json 再退出" ✓（31100 B）
+#    再用仓库脚本填量化策略：
+#      scripts/model-conversion/set_quant_strategy.py output_dir/dopt_config.json
+#      ⇒ ★196 个 Quant_act_weight_eco + 2 个 float★（28 层 × 7 个 Linear = 196 ✓ 完全对上）
+./run.sh stage1 && ./run.sh stage2 && ./run.sh stage3
+#    实测耗时（1.5B/3080Ti）：stage1 2m39s · stage2 20s · stage3 2m24s ✓
+#    产物：fake_quant_weight.pth 3087.6 MB + quant_params_file 581.6 MB
+#    ★验权重没被钳位★：check_quant_clamp.py ⇒ 198 张量 · 负值 43.98% · 全非负 0 个(0%) ✓ 正常
+
+# 4) 导出 + onnxsim + OMG + 装配：一条命令（仓库脚本 build_model.py）
+python3 scripts/model-conversion/qwen/build_model.py \
+    --hf-model <HF 目录> --quant-pth <fake_quant_weight.pth> --dopt-config <dopt_config.json> \
+    --export-dir <npu_tuned_export> --omg-dir <tools_omg> --asc-dir <tools_ascendc> \
+    --name qwen2_1p5b_w4 --workdir <工作目录> --kv-len 2048
+#    ★它保证 KV 长度三处一致★：yaml / OMG --input_shape / executor.json ⇒ 实测都是 2048 ✓
+#    （KV 是编译期属性：改了必须重走导出+OMG ✓）
+
+# 5) 设备侧补两个文件（转换机上没有仓库 src/）
+PYTHONPATH=src python3 -m cann_llm.modelpkg <模型目录>
+#    ⇒ 写 api_config.json + <model>.json（采样参数 / 停止符 / chat template；
+#       <model>.json 必须与 .omc 同名 ✓）
+
+# 6) 跑
+scripts/start_chat.sh -d <模型目录> -p '1+1='
+```
+
+### 47.2 意义与边界
+
+```
+· ★我们从此能自己产出"hiai 能吃的 W4 模型包"★ ✓（不必依赖官方发布的模型包 ✓）
+· W4 打包 + 外置权重 = 目前最省内存的形态 ✓（Qwen3-8B 5.1 GB 同族 ✓）
+· 边界：官方流程只支持 qwen2 / qwen3 / glm 架构 ✗ ⇒ gemma4 走不了这条 ✗
+  （gemma4 若要"少段/省内存"，只能回到 §§41–46 那几条自建路线 ✓）
+· 想给设备加新模型（架构在支持列表内、尺寸在本机能力边界内 §44）现在有可复现路径 ✓
+```
