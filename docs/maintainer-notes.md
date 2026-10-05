@@ -4792,3 +4792,55 @@ lm_head_size:
 ★注★：文档也提到 stage2 会产出 embedding_weights / embedding_quant_scale ✓
         ⇒ 与我们自己造的 embedding 包可以对照 ✓（说不定直接用它的更好 ✓）
 ```
+
+## 78. CUDA 环境打通 ✓ · OOM 解决 ✓ · 三阶段官方语义拿到 ✓ —— stage1 未产出待查 ✗
+
+### 78.1 CUDA venv（不动 ~/q38env ✓）
+
+```
+uv venv ~/q38cuda --python 3.10 ✓
+uv pip install --python ~/q38cuda/bin/python torch --index-url https://download.pytorch.org/whl/cu121 ✓
+  ⇒ ★torch 2.5.1+cu121 | cuda True | NVIDIA GeForce RTX 2060 ✓★
+  （驱动：NVIDIA-SMI 615.71.09 · CUDA UMD 13.4 ✓ ⇒ 兼容 cu121 ✓）
+再装：transformers / datasets / accelerate / pyyaml / numpy / sentencepiece / protobuf ✓
+```
+
+### 78.2 OOM 的根因是我的配置写错了 ✗
+
+```
+第一次跑：torch.OutOfMemoryError（5.62 GiB 可用 ✓ 已分配 5.48 GiB ✗）
+★原因★：我把 config.yaml 的 extra_training_config.fp16 写成了 False ✗
+        官方样例是 ★fp16: True★ ✓
+修法：改 True ✓ + 设 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ✓ ⇒ ★OOM 消失✓★
+```
+
+### 78.3 ★官方三阶段的确切语义（文档原文 ✓）★
+
+```
+★所有执行阶段皆只支持 GPU 环境★ ✓
+阶段一：输出 ★dopt_config.json + trained_quant_weight.pth★（阶段二会加载后者）
+        首跑会打印 "generate plugin quang config please set quant strategy firstly" ✓
+        然后必须手工改 dopt_config.json 的 quant_strategy（默认 float ✗）：
+           decode 层：Quant_act_weight_eco ✓   lm_head 层：Quant_lm_head ✓
+           embedding 层：Quant_Embed_MinMax ✓
+        中间层可加 weight/input 高阶配置：权重 4bit ✓（不建议其他位宽）、
+           激活 8 或 16bit ✓（推荐 16 ✓）、groupsize ∈ {64,128,256} ✓（推荐 128 ✓）
+阶段二：加载 trained_quant_weight.pth ⇒ 输出 ★trained.pth★
+阶段三：加载 trained.pth ⇒ 输出 ★fake_quant_weight.pth + quant_params_file
+        + embedding_weights + embedding_quant_scale★
+        （fake_quant_weight.pth 用于导 ONNX 时替换权重 ✓；
+          quant_params_file 用于 omc 转换 ✓；
+          embedding 两个文件用于推理 ✓ —— 与我们自己造的可以对照/替换 ✓）
+```
+
+### 78.4 当前状态与下一步
+
+```
+实测：stage1 跑过（OOM 修好后 ✓）但没有产出 trained_quant_weight.pth ✗
+      ⇒ 到 stage2 时报 FileNotFoundError: train_output/trained.pth ✗（= 阶段二的输入缺失 ✓）
+下一步：
+ ① 把 stage1 单独跑并看★完整日志★（不是 tail -5 ✗）⇒ 找它为什么没产出 ✓
+ ② 检查 dopt_config.json 是否被正确读取（我们已用 set_quant_strategy.py 填了 186 个 ✓）
+    —— 注意 lora/kd 那些高阶配置我们填得很简 ✗ ⇒ 也许 stage1 需要更完整的 config.yaml ✓
+ ③ 必要时把文档里 dopt_config.json 的推荐写法照抄一份（embedding/lm_head 的层策略 ✓）
+```
