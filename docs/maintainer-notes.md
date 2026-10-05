@@ -6470,3 +6470,51 @@ runner 加实验开关（INIT_CPU=1 ⇒ modelDeviceOrder = {ExecuteDevice::CPU} 
    已排除清单（11 项 ✓）/ 希望获得的 4 条信息（错误码含义 · 模型约束清单 · 主机侧校验工具 · 官方链路参数）
 ⇒ 卡点从"我们独自深挖"变成"有材料可交给掌握工具链细节的人" ✓
 ```
+
+## 115. ★★★ 重大收敛：元凶锁定到【gated RMSNorm 这个组件】★★★
+
+### 115.1 两层串联 × 逐块切片（本轮最关键的实验 ✓）
+
+```
+用 probe_chain_stages.py（两层串联 ✓ 每层用 skip 切块 ✓）：
+   切片                     内容                          OMG   model计数   ★Init rc★
+   k0_proj                 只有 in_proj_qkv              ✗      —          （编不过 ✗）
+   k1_conv                 + 深卷积 + silu                ✗      —          （编不过 ✗）
+   ★k2_delta★              + delta rule（★无 norm★）      ✓      ★9★        ★rc=0 ✓★
+   ★k3_norm★               + gated RMSNorm                ✓      ★13★       ★rc=1 ✗★
+   k4_full                 + out_proj（完整层 ✓）         ✓      13         rc=1 ✗
+⇒ ★★两层串联本身没问题✓（k2_delta 就过了 ✓）★
+   ⇒ ★★是【gated RMSNorm】把这个能过的图弄挂了✗★★
+   且它一下把子图代理数从 9 抬到 13 ✗
+```
+
+### 115.2 但换成"显式算子版"仍然挂 ✗（排除了算子层面的原因 ✓）
+
+```
+norm 的原实现（Qwen3_5RMSNormGated ✓ 从 transformers 源码读出 ✓）：
+    variance = hidden_states.pow(2).mean(-1, keepdim=True)          # ★ReduceMean✗★
+    hidden_states = hidden_states * torch.rsqrt(variance + eps)     # ★RSqrt✗★
+    hidden_states = self.weight * hidden_states                     # weight = [128]（广播 ✓）
+    hidden_states = hidden_states * silu(gate)                      # ★gate 路径 + silu✓★
+★改写为 NPU 友好版（npu_layers._expl_gated_rmsnorm ✓）★：
+    v = (x*x).sum(-1, keepdim=True) * (1/D)      # ReduceSum ✓ + 常量乘 ✓
+    x = x * (v + eps).pow(-0.5)                  # Pow(-0.5) ✓（与 l2norm 同款 ✓）
+    x = x * weight                               # 广播 ✓
+    return x * g * sigmoid(g)                    # silu(g) ✓
+⇒ ★实测：k3_norm 显式版仍然 ★Init rc=1 ✗★（model 计数也仍 13 ✗）★
+   ⇒ ★不是 ReduceMean / RSqrt 这两个算子的问题✗★
+```
+
+### 115.3 下一步（把 norm 再拆开 ✓）
+
+```
+norm 里还剩三个可怀疑的特性 ✗→✓：
+   a) ★gate（z）路径★：norm 多消费了一个张量 z ✓（= in_proj_z(hidden) ✓）
+      ⇒ 试"只做 rmsnorm、不做 silu(gate)"的变体 ✓ ⇒ 若过 ✓ ⇒ 问题在 gate 路径 ✓
+   b) ★weight 的广播★：weight 形状 [128] ✓ 要广播到 [B,S,Hv,Dv] 的最后一维 ✓
+      ⇒ 这是图里少见的"1 维张量参与 4 维广播"✗ —— 与 §103 的"2 维/维度"线索呼应 ✓
+      ⇒ 试把 weight 变成 [1,1,1,128] 常量 ✓（显式 reshape ✓）看是否翻转 ✓
+   c) 输出 dtype/精度切换（原实现有 .to(float32) / .to(input_dtype) 往返 ✓）
+★做法★：在 k3_norm 这个【能编译 ✓ 且必失败 ✗】的最小载体上，逐个改这三项 ✓
+   —— 每项都是十几秒的 OMG + 秒级的 Init 判据 ✓，很快能定位 ✓
+```

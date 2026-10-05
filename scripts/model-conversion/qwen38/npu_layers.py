@@ -97,6 +97,27 @@ def full_attention_layer(layer, hidden, mask, cos, sin, past_key, past_value, kv
 
 
 # ---------------------------------------------------------------- 线性注意力层（卷积窗口 + 递归状态）
+
+def _expl_gated_rmsnorm(nrm, x, gate):
+    """★用 NPU 支持的算子显式实现 Qwen3_5RMSNormGated★（§115 ✓）。
+
+    为什么必须改写：原实现用 ★ReduceMean✗★ + ★RSqrt✗★ ——
+      OMG 日志显示这类算子在 NPU kernel 库里没有实现 ✗ ⇒ 回退 CPU 子图 ✗
+      ⇒ ★两层串联时 ModelManager::Init 直接失败✗★（§115 实证：去掉 norm 就能过 ✓）
+
+    等价改写（全部是已验证支持的算子 ✓）：
+      mean(-1)          →  sum(-1) * (1/D)        （ReduceSum ✓ + 常量乘 ✓）
+      rsqrt(v + eps)    →  (v + eps).pow(-0.5)    （Pow ✓ —— l2norm 那边同样改法 ✓）
+      silu(g)           →  g * sigmoid(g)         （sigmoid 已在用 ✓）
+    """
+    d = x.shape[-1]
+    v = (x * x).sum(-1, keepdim=True) * (1.0 / float(d))       # ReduceSum ✓
+    x = x * (v + nrm.variance_epsilon).pow(-0.5)               # Pow(-0.5) ✓
+    x = x * nrm.weight                                         # [D] 广播 ✓
+    g = gate.to(torch.float32)
+    return x * g * torch.sigmoid(g)                            # silu(g) ✓
+
+
 def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads, hd, seq: int = 0,
                            batch: int = 0, trace: list | None = None, skip: tuple = ()):
     """skip: 用于★探针二分★，可跳过 ('conv','delta','norm','out') 里的部件 ✓（生产路径不传 ✓）。"""
