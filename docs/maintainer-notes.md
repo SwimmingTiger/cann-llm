@@ -4642,3 +4642,42 @@ scripts/model-conversion/qwen38/run_cycle.sh ✓ —— 一键跑完整四步 �
    ⇒ 可试把 kv_len 从 2048 降到 512 ✓（省掉 KV 带来的内存 ✓）看是否能压到 4 GB 以下 ✓
       —— 若成功且引擎能加载 ✓，就证明"fp16 Cast"是元凶 ✓
 ```
+
+## 75. 找到 `--weight_merge false`，但"外置权重形态"其实来自 `--compress_conf`（dopt 路线）
+
+### 75.1 OMG 的权重相关选项（实测 `omg --help` ✓）
+
+```
+--weight           Weight file（Caffe 用）
+--weight_data_type FP16(default) / FP32 —— 仅当原始权重是 FP32 且【没有 compress_conf】时生效 ✓
+--weight_merge     ★true(default): 权重合并进 IR 模型；false: 不合并★ ✓
+--compress_conf    压缩配置文件 ✓
+--output_type      各输出张量的类型 ✓
+--is_output_fp16   DEPRECATED ✓
+```
+
+### 75.2 实测：`--weight_merge false` 试了两个版本
+
+```
+fp32 图（q35_hiai_low.onnx ✓ 5.49 GB 权重）→ rc=1 ✗（仍撞 4 GB 保存溢出 ✗）
+fp16 图（q35_hiai_fp16.onnx ✓ 2.75 GB 权重）→ ★rc=0 · 成功标志=1 · omc 2884.7 MB ✓★
+   ★但 omc 还是【单体 2.88 GB】✗，没有拆出 SubGraph_0.weight ✗★
+⇒ 结论：★"omc 3 MB + SubGraph_0.weight 3.1 GB"那种官方形态不是 weight_merge 决定的 ✗★
+   对照 §47 的官方链路（scripts/model-conversion/int8/build_with_omg.sh ✓）：
+     omg --model <onnx> --framework 5 … --weight_data_type FP16 \
+         ★--compress_conf "$COMPRESS"★ --platform=kirinx90 --target=omc
+   ⇒ ★是 `--compress_conf`（dopt 产出的 compress.json ✓）带来的外置/压缩形态✓★
+```
+
+### 75.3 下一步（回到官方 dopt 路线 —— 这是唯一与能跑的 W4 包同构的路 ✓）
+
+```
+① 跑 dopt（DDK 自带 ~/ddk/tools/tools_dopt ✓；仓库有 run_dopt.sh / set_quant_strategy.py ✓）
+   · 目标：产出 fake_quant_weight.pth + quant_params_file + dopt_config.json + compress.json ✓
+   · 风险：需要 CUDA ✗，hu60tx 是 RTX 2060 6 GB；2B 模型 fake-quant 内存约 7.5 GB ✗
+     对策：切片跑（build_model.py 支持 --layers ✓）或看 dopt 能否 CPU ✓
+② 用 build_model.py 一条龙（导出 → onnxsim → OMG(--compress_conf ✓) → 装配 ✓）
+   —— 它的产物形态与能跑的 W4 包【完全一致】✓（§47 已验证 ✓）
+③ 若 dopt 实在跑不动 ⇒ 退路：用我们的图 + 手工做一个 compress_conf ✓
+   （至少先拿到外置权重的形态 ✓ 再看引擎是否接受 ✓）
+```
