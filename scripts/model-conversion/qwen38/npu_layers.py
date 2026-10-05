@@ -47,9 +47,14 @@ def full_attention_layer(layer, hidden, mask, cos, sin, past_key, past_value, kv
     k = att.k_norm(k)
     q, k = A._apply_rope_3d(q, k, cos, sin)                    # partial rope 0.25 ✓
 
+    # ★顺序很关键★：先把本步的新 K/V 写进缓存（官方语义：past_key_in{i} 是本步【之前】的缓存 ✓），
+    #   再在【更新后的缓存】上做注意力 ✓ —— 否则本步的 token 根本参与不了注意力 ✗（§65 实测踩到 ✓）
+    new_k = torch.cat([k.reshape(b, kv_heads, s, hd).permute(2, 1, 0, 3), past_key[s:]], dim=0)
+    new_v = torch.cat([v.reshape(b, kv_heads, s, hd).permute(2, 1, 0, 3), past_value[s:]], dim=0)
+
     # 缓存边界：官方布局 [kv_max, kv_heads, B, hd] ➜ 3 维 [B*kv_heads, kv_max, hd] ✓
-    ck = past_key.permute(2, 1, 0, 3).reshape(b * kv_heads, kv_max, hd)
-    cv = past_value.permute(2, 1, 0, 3).reshape(b * kv_heads, kv_max, hd)
+    ck = new_k.permute(2, 1, 0, 3).reshape(b * kv_heads, kv_max, hd)
+    cv = new_v.permute(2, 1, 0, 3).reshape(b * kv_heads, kv_max, hd)
 
     if kv_heads != heads:                                      # GQA ✓
         rep = heads // kv_heads
@@ -65,9 +70,6 @@ def full_attention_layer(layer, hidden, mask, cos, sin, past_key, past_value, kv
     out = _from_heads(out, b, s, heads, hd)
     out = att.o_proj(out * torch.sigmoid(gate))
 
-    # ★缓存更新：静态 slice + Concat★（新 token 放前面 ✓ 位移式 ✓，免 ScatterND ✓）
-    new_k = torch.cat([k.reshape(b, kv_heads, s, hd).permute(2, 1, 0, 3), past_key[s:]], dim=0)
-    new_v = torch.cat([v.reshape(b, kv_heads, s, hd).permute(2, 1, 0, 3), past_value[s:]], dim=0)
     return out, new_k, new_v
 
 
@@ -90,10 +92,13 @@ def linear_attention_layer(layer, hidden, conv_state, rec_state, heads, kv_heads
     x = torch.cat([conv_state, mixed], dim=2)                  # [B, conv_dim, K-1+S] ✓
     y = npu_causal_conv1d_fn(x, la.conv1d.weight.squeeze(1), la.conv1d.bias,
                              activation=getattr(la, "activation", None))
-    new_conv = x[:, :, -(ksize - 1):] if ksize > 1 else x[:, :, :0]
+    # ★切片下标一律用【正数】★ ✗✗：负下标切片在 opset>=10 的 ONNX 导出里语义会错
+    #   （"Only steps=1 can be constant folded for opset >= 10 onnx::Slice" ✓）—— §65 实测踩到 ✓
+    #   x 的长度是 (K-1)+S ✓ ⇒ 最后 K-1 个 = 从下标 S 开始 ✓
+    new_conv = x[:, :, seq:] if ksize > 1 else x[:, :, :0]
     # ★只取【新 token】对应的输出★：状态那 K-1 个位置的卷积结果在上一步已经算过 ✓
     #   （下标用 Python int ✓ 避免旧 tracer 把 shape 变成 Tensor ✗，§53）
-    y = y[:, :, -(seq if seq else y.shape[-1] - (ksize - 1)):]
+    y = y[:, :, (ksize - 1):]                       # ★正下标✓★：丢掉状态那 K-1 个位置 ✓
     y = y.transpose(1, 2)                                      # [B, S, conv_dim] ✓
 
     kd = k_heads * k_dim

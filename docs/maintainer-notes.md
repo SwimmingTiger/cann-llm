@@ -4200,3 +4200,50 @@ ONNX Runtime vs ★未打补丁的 HF 参考实现★（缓存置零 ✓ mask �
 ② 怀疑顺序：卷积窗口的对齐 ✓ → delta rule 的 initial_state 语义 ✓ → 全注意力层的缓存/掩码 ✓
 ③ 对齐后再走 OMG ⇒ omc ⇒ 组装模型包（§60 形态 ✓）⇒ 引擎加载 ✓
 ```
+
+## 65. 逐层数学★全部对齐★ ✓（含一个关键 bug 修复）—— 但导出图仍有一处差异 ✗
+
+### 65.1 逐层对拍（Python 路径 vs 未打补丁的参考实现 ✓）
+
+```
+层 0 linear_attention  最大差 1.4305e-06  ✓
+层 1 linear_attention  最大差 1.9073e-06  ✓
+层 2 linear_attention  最大差 1.4901e-06  ✓
+层 3 full_attention    最大差 1.6689e-06  ✓      ← 修 bug 前是 2.0459e+00 ✗
+线性层逐步对拍（dbg_linear_steps.py ✓）：
+  ① 卷积输出 2.98e-08 ✓  ③ delta rule 输出 2.96e-09 ✓  ③ 递归状态 3.60e-08 ✓
+  ④ out_proj 输出 3.82e-07 ✓
+```
+
+### 65.2 ★本轮抓到并修掉的关键 bug：注意力必须先更新缓存再算★
+
+```
+原来我写成：先在【旧缓存】上做注意力 ✗ —— 本步的新 token 根本没参与注意力 ✗
+  （测试里缓存置零 ⇒ 输出直接全 0 ✗，一眼看出 ✓）
+正确语义（官方 ✓）：past_key_in{i} 是本步【之前】的缓存 ✓
+  ⇒ ① 先算 new_k/new_v = cat([本步新 K/V, past[S:]]) ✓
+     ② 再在【更新后的缓存】上做注意力 ✓（掩码 [B,1,S,kv] 正好对齐更新后的缓存 ✓）
+```
+
+### 65.3 顺手改掉的一个隐患
+
+```
+★切片下标一律用正数★：`x[:, :, -(K-1):]` / `y[:, :, -S:]` 这类负下标切片
+   在 opset>=10 的 ONNX 导出里语义会错 ✗（导出时一直警告
+   "Constant folding - Only steps=1 can be constant folded for opset >= 10 onnx::Slice" ✓）
+   ⇒ 改成 `x[:, :, seq:]` 与 `y[:, :, K-1:]` ✓
+```
+
+### 65.4 仍剩的差异：★导出图 vs Python 不一致✗★
+
+```
+1 层图（q35_hiai_L1b.onnx ✓）在 ORT 里跑 vs Python 的 layer_forward：
+  lm_logits(其实是 hidden) 5.27 ✗ · past_key0(卷积窗口) 6.51 ✗ · past_value0(递归状态) 2.56e-02 ✗
+而同一份代码在 Python 里对参考实现是 1.4e-06 ✓ ⇒ ★问题出在导出/追踪，不在数学★ ✓
+（注意：--no-embed-head 时第 0 路输出其实是 hidden_states，名字沿用了 lm_logits ✗ —— 只是命名 ✓）
+下一步的二分思路（已想好）：
+  ① 把线性层拆开导（只导 in_proj_qkv+conv ✓ / 只导 delta rule ✓）看哪一段在图上失真 ✗
+  ② 或者把整层的中间量也做成图输出（临时改 Wrap ✓）⇒ 直接比 ORT 的中间量 ✓
+  ③ 重点怀疑：Python 层循环与 npu_chunk_gated_delta_rule 里的常量（_perm_indices 缓存 ✓、
+     下三角解的前代循环 ✓）在 legacy 追踪下的语义 ✓
+```
