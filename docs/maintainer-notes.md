@@ -7691,3 +7691,52 @@ C 换路：CPU/GGUF（已跑通 ✓ 非 NPU ✗）
    ⇒ 按目标要求回报用户并定方向（CPU/GGUF ✓ / 厂商 ✓ / 其它 ✓）
 ③ 若支持表很大（只是我用法不对 ✓）⇒ 继续按 §139 的权威约定逐个修 ✓
 ```
+
+## 141. NNRt 算子支持查询 + ★路线判定：NNRt 在线建图硬性不匹配✗★
+
+### 141.1 本轮加的权威查询 API
+
+```
+OH_NNModel_GetAvailableOperations(model, deviceID, const bool **isSupported, uint32_t *opCount)
+   —— 头文件说明：必须在 OH_NNCompilation_Construct 之前调用 ✓（Finish 之后 ✓）
+★实测（真实 2 层模型 ✓）★： rc=0 但 ★opCount=0★ ✗
+   ⇒ 拿不到逐算子支持表 ✗（可能因为图里有非法算子 ⇒ 直接被判空 ✓）
+```
+
+### 141.2 ★★路线判定依据（都来自 §140/§141 的有效实验 ✓）★★
+
+```
+★NNRt 在线建图在 NPU 上能编译的算子极少数✗★：
+   通过 ✓：MATMUL(19)（最小表实测 Build=0 ✓）· POW(25) · PAD(24)（真实模型里过 ✓）
+   失败 ✗：ADD(1) · MUL(22) · SUB(38) · DIV(11) · MAXIMUM(20) · MINIMUM(97) · PAD(24 最小表) ·
+          SIGMOID(28) · EXP(60) · NEG(84) · SQRT(33) · RELU(47) · TANH(39) · ABS(58) ·
+          RSQRT(44) · TRANSPOSE(41) · SLICE(29) · RESHAPE(45) · CAST(6) · CONCAT(7) ·
+          UNSQUEEZE(55) · SPLIT(32) · REDUCE_MEAN(42) · LOG(80) · GATHER(16) · WHERE(62)
+   ⇒ 全部是 AddOperation 返回 2（INVALID_PARAMETER）✗
+★关键对照★：ADD/MUL 与 MATMUL 用【完全相同的最小表骨架】✗
+   （同样的张量数/形状/常量/PARAM 写法 ✓）⇒ 只有 MATMUL 过 ✓ ⇒ ★不是我的用法问题✗★
+★已排除的所有假说✗★（都有实验 ✓）：
+   参数个数 0/1/2 ✗ · 参数 dtype(INT32/F32) ✗ · 不同秩广播 ✗ · 形状不一致 ✗ ·
+   张量顺序 ✗ · 缺 PARAM 字段 ✗（这个是 §135 的真因 ✓ 已修 ✓）· 游离张量 ✗
+★后端事实★：NNRt 的 NPU 后端 = ★hiai HCL 服务★（§128 ✓ libhiai_nn_proxy → IHiaiHcl ✓）
+   ⇒ HCL 有自己的图/算子约束 ✗ ⇒ ★与 DDK 路线撞的是同一堵墙✗★
+```
+
+### 141.3 结论与决策
+
+```
+★结论★：★NNRt 在线建图路线【硬性不匹配】✗★ ——
+   它虽然能编译 MATMUL/POW/PAD ✓（我们已证明 Build=0 ✓），
+   但 transformer 必需的 ADD/MUL/SIGMOID/… 全部被 NPU 后端拒绝 ✗
+   ⇒ 无法承载 Qwen3.8 的图 ✗
+★同时【离线模型】路径也已判定不通✗★（§129 ✓ omc/.ms/.om 全部 Build=1 ✓）
+★两条 NPU 通路都撞在【hiai HCL 的模型/算子约束】上✗★：
+   · DDK 直跑：ModelManager::Init rc=1（≥2 层图 ✗ 不吐原因）
+   · NNRt 在线：AddOperation rc=2（绝大多数算子 ✗）
+   · NNRt 离线：Build rc=1（任何我们造得出的模型格式 ✗）
+★剩下的可行路径★：
+   ① ★CPU/GGUF★（已跑通 ✓ 能聊天 ✓ 只是不在 NPU 上 ✗）
+   ② ★厂商侧★：把三份复现材料交厂商（DDK 的 §120 ✓ / NNRt 在线算子表 ✓ /
+      NNRt 离线模型格式 ✓）—— 这已经是一份非常清晰的厂商问题单 ✓
+   ③ 其它（重新审视 hiai LLM 引擎 + 官方 dopt 路线 ✗ 需动态 seq ✓ 与我们静态图冲突 ✗）
+```

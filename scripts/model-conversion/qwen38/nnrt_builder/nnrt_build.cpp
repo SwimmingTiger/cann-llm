@@ -115,6 +115,23 @@ int main(int argc, char **argv) {
     MO.data = mouts.data(); MO.size = (uint32_t)mouts.size();
     printf("  Specify=%d\n", (int)OH_NNModel_SpecifyInputsAndOutputs(m, &MI, &MO));
     printf("  Finish=%d\n", (int)OH_NNModel_Finish(m));
+    // ★★直接问设备：每个算子支不支持（权威 ✓ §140 下一步 ✓）★★
+    {
+        const bool *sup = nullptr; uint32_t opCnt = 0;
+        OH_NN_ReturnCode rg = OH_NNModel_GetAvailableOperations(m, npu, &sup, &opCnt);
+        printf("  ★GetAvailableOperations rc=%d opCount=%u★\n", (int)rg, opCnt);
+        if (rg == 0 && sup) {
+            // 按算子类型统计 ✓
+            std::vector<uint32_t> seen(300, 0), okc(300, 0);
+            for (size_t i = 0; i < N.size() && i < opCnt; ++i) {
+                int op = N[i].op;
+                if (op < 0 || op >= 300) continue;
+                seen[op]++; if (sup[i]) okc[op]++;
+            }
+            for (int op = 0; op < 300; ++op)
+                if (seen[op]) printf("     op=%-3d 支持 %u / %u\n", op, okc[op], seen[op]);
+        }
+    }
     OH_NNCompilation *c = OH_NNCompilation_Construct(m);
     printf("  SetDevice=%d\n", (int)OH_NNCompilation_SetDevice(c, npu));
     int rb = OH_NNCompilation_Build(c);
