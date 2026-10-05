@@ -47,6 +47,7 @@ def main() -> int:
     import npu_attention
     import npu_gated_delta as N
     import npu_layers
+    from npu_layers import _expl_rmsnorm   # ★NPU 友好 norm✓★（§118 ✓）
 
     torch.set_grad_enabled(False)
     # ★必须加载真实权重★（原来只读了 config ⇒ 建出的是随机初始化模型 ✗，
