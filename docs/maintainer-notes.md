@@ -5949,3 +5949,58 @@ op name [/Mul_15]  type [Mul]    is not supported …
 ★改法★：把每个 2 维张量统一 ★unsqueeze 成 3 维★ ✓（用前 unsqueeze(0) ✓ 用完 squeeze ✓）
    —— 保证图里【所有】张量要么 1 维要么 3 维 ✓ 绝不出 2 维 ✗
 ```
+
+## 104. 消除 RealDiv ✓ 但子图数不变 ✗ · 重要的新观察：★串联使子图翻倍，并联不会★
+
+### 104.1 本轮做的两件事
+
+```
+① ★确认 2 维张量不是原因✗★：往干净的 MatMul 串联里注入 2 维中间量（reshape 到 [64,64] 再
+   reshape 回去 ✓，含 2 维上的 Exp 与 Select+Sub ✓）⇒ ★weight 文件数仍是 1 ✗★、
+   也没有任何 "not supported" 报错 ✓ ⇒ 2 维假设否定 ✓
+② ★按阶段数子图（weight 文件数当代理 ✓）★：
+     s0_proj（只有 in_proj_qkv）     1 ✓
+     s1_conv（+ 深卷积 + silu）       1 ✓
+     ★s2_delta（+ delta rule）        5 ✗（一下 +4）★
+     ★s3_norm（+ gated RMSNorm）      7 ✗（+2）★
+     s4_full（+ out_proj）            7 ✓（不加）
+   ⇒ ★每层的子图主要来自【delta rule +4】与【gated RMSNorm +2】✗★
+```
+
+### 104.2 按日志找"不被支持的算子"，并修掉其中一个 ✓
+
+```
+s2_delta 日志里的关键行：
+  ★op [/Div] · [/Div_1] → type [RealDiv] is not supported ✗★
+  op [/Mul_10] · [/Mul_13] → Mul ✗（配合 dimCnt 2 != 3 / 2 != 0 ✓）
+源头（npu_gated_delta.py:83 的 l2norm ✓）：
+  旧：return x / (x.pow(2).sum(dim=dim, keepdim=True) + eps).sqrt()   # ★两个除法✗★
+  新：return x * (x.pow(2).sum(dim=dim, keepdim=True) + eps).pow(-0.5)  # ★Pow 在支持列表里✓★
+⇒ ★RealDiv 报错行从 >0 变成 0 ✓★（改对了 ✓）
+⇒ ★但 weight 文件数【没变】✗（s2 仍 5 · s3 仍 7 · s4 仍 7）★
+   ⇒ 说明子图切分【不是】由"不支持的算子"决定的 ✗（至少不只是 ✓）
+```
+
+### 104.3 ★重要的新观察★
+
+```
+· 两层【并联】（v2_indep ✓）：7 个子图 ✓ ⇒ ★并联不会翻倍★
+· 两层【串联】（dep 等 ✓）：13 个子图 ✗ ⇒ ★串联几乎翻倍（7 → 13）★
+⇒ 子图是按【算子簇】切的 ✓；串联会制造新的簇 ✗，并联共享 ✓
+   ⇒ 这解释了两条相关性（7 能过 ✓ / 13 不能 ✗）
+★但真 24 层整模型的 weight 文件数只有 1✗★（权重被合并 ✓）
+   ⇒ ★所以"weight 文件数"这个代理指标在整模型上失效✗★
+   ⇒ 要换成【omc 里的真实子图数】：可以用 `--target=omc` 后从 omc 二进制里找
+      "SubGraph" 结构标记 ✓ 或找 OMG 是否提供打印子图的方式 ✓
+```
+
+### 104.4 下一步
+
+```
+① ★找真实子图数的读法★（omc 二进制里的结构 ✓ / 或 OMG 日志里的分图信息 ✓）
+   ⇒ 拿到 24 层的真实子图数 ✓ 才能判断"上限"假设 ✓
+② ★降低 delta rule 的子图贡献（+4 ✗）★：
+   · 我们的 3 维化实现里有大量 Slice/Reshape/Transpose/Concat/Exp/Pow/常量 ✓
+   · 可以试着把常量折进权重 ✓、把 Slice 换成 MatMul（乘 0/1 掩码矩阵 ✓）等 ✓
+③ 已改掉 RealDiv ✓（对【设备运行时】也是好事 ✓ —— 除法在 NPU 上本来就不稳 ✓）
+```

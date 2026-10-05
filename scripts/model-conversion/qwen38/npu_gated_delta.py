@@ -80,7 +80,10 @@ def strict_upper(c: int, device) -> torch.Tensor:
 
 def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
     """与参考实现一致（纯基础算子 ✓）"""
-    return x / (x.pow(2).sum(dim=dim, keepdim=True) + eps).sqrt()
+    # ★不用除法✗★：OMG 日志明确说 RealDiv 在我们的 NPU kernel 库里没有实现
+    #   （"op name [/Div] type [RealDiv] is not supported in npucl store" ✗ §103/§104 ✓）
+    #   ⇒ 改成 ★x * (·)^(-0.5)★ ✓：Pow 在支持列表里 ✓（不出现于 unsupported 清单 ✓）
+    return x * (x.pow(2).sum(dim=dim, keepdim=True) + eps).pow(-0.5)
 
 
 # ---------------------------------------------------------------- ⓪ 分块前代（数值稳定）
