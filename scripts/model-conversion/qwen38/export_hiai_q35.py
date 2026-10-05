@@ -133,16 +133,12 @@ def main() -> int:
             inputs.append(torch.zeros(kv, kv_heads, b, hd))
             inputs.append(torch.zeros(kv, kv_heads, b, hd))
         else:
-            ksize = getattr(tc, "linear_conv_kernel_dim", 4)
-            n_k = getattr(tc, "linear_num_key_heads", heads)
-            n_v = getattr(tc, "linear_num_value_heads", heads)
-            d_k = getattr(tc, "linear_key_head_dim", hd)
-            d_v = getattr(tc, "linear_value_head_dim", hd)
-            conv_dim = 2 * n_k * d_k + n_v * d_v                          # = 2*key_dim + value_dim ✓
-            # ★卷积窗口是 [B, conv_dim, K-1]★（conv 输入的最近 K-1 个 ✓，§63）
-            inputs.append(torch.zeros(b, conv_dim, max(ksize - 1, 0)))
-            inputs.append(torch.zeros(b, n_v, d_k, d_v))                  # 递归状态 ✓
-            print("  线性层状态：conv[%d,%d,%d] · rec[%d,%d,%d,%d]" % (b, conv_dim, max(ksize-1,0), b, n_v, d_k, d_v))
+            # ★线性层的状态也用【官方 KV 形状】的缓冲★ ✗✗（§73）
+            #   原因：引擎按官方约定给每层分配 [kv_max, kv_heads, B, head_dim] ✓，
+            #   尺寸对不上就会 CPUCL 报 "param[size] is less than[dataSize]" ✗（§72）
+            #   内部只用到缓冲的前一小段 ✓（1 维切片存取 ✓）
+            inputs.append(torch.zeros(kv, kv_heads, b, hd))
+            inputs.append(torch.zeros(kv, kv_heads, b, hd))
         in_names.extend([f"past_key_in{i}", f"past_value_in{i}"])
         out_names.extend([f"past_key{i}", f"past_value{i}"])
 

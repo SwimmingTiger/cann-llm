@@ -4563,3 +4563,44 @@ B. ★无状态版图★（最稳 ✓）：把每层状态全部去掉 ✓ —�
    引擎按 prefill_len 喂整段 ✓ ⇒ 只要引擎支持"每步重喂全序列"就能生成 ✓
    （慢 ✗ 但能先跑通聊天 ✓，之后再补状态 ✓）
 ```
+
+## 73. 状态形状假设被证伪 ✗ —— `/Mul_1` 的 size 不符另有原因
+
+### 73.1 本轮做的（把一轮流程脚本化 ✓）
+
+```
+scripts/model-conversion/qwen38/run_cycle.sh ✓ —— 一键跑完整四步 ✓：
+   导出（1.2 MB 图 · 52 输入/49 输出 ✓）→ lower（Softplus 18 + ConstantOfShape 18 ✓）
+   → fp16（186 权重 ✓ 2.75 GB ✓）→ OMG（rc=0 · 成功标志=1 · omc 2884.7 MB ✓）
+★注意★：omc 比之前大了（2753.6 → 2884.7 MB ✓），因为线性层的两个状态槽位
+   现在也按【官方 KV 形状】声明（每层每槽 ≈4 MB ✓）✓
+★教训★：远程跑多步命令一定要写成脚本传过去 ✗ —— 内联 heredoc 遇到引号就崩 ✓（本轮踩了 ✓）
+```
+
+### 73.2 状态形状改法（已实现 ✓ 但没解决问题 ✗）
+
+```
+做法：线性层的 past_key_in{i}/past_value_in{i} 也声明成官方 KV 形状 [kv_max,kv_heads,B,hd] ✓，
+      内部【拉平成 1 维】再切片取出 conv 窗口与递归状态 ✓，
+      算完用【1 维 Concat + 常量零】填回同样长度 ✓（全 ≤3 维 ✓）
+实测：★错误一模一样✗★（仍卡在 /Mul_1 的 "param["size"] is less than["dataSize"]" ✓）
+⇒ 说明问题【不是】每层状态形状 ✗（该假设被证伪 ✓）
+```
+
+### 73.3 新线索与下一步方向
+
+```
+现象：CPUCL（CPU 兼容通路）在 Prepare 阶段、第一个算子 /Mul_1 就报
+      param["size"] < dataSize ✗ —— 即【模型元数据里某个输入的 size 比实际张量小】✗
+怀疑（按可能性排序）：
+ ① ★fp16 的 Cast 插入方式与引擎的权重元数据不符✗★
+    官方 W4 包走的是 dopt 量化（我们这台是 onnx_weights_to_fp16.py 的"激活侧 Cast" ✓）
+    ⇒ 可试：不做 Cast 插入，改为【权重直接存 fp16】（MatMul 输入输出都显式 Cast ✓ 与现在等价但更简单 ✓）
+    或干脆把图压到 4 GB 以下【不靠 fp16】(例如把 embedding/lm_head 留在包外 ✓ —— 我们本来就是 --no-embed-head ✓
+    但权重仍有 5.49 GB ✗ ⇒ 必须量化 ✓ ⇒ 也许要走 dopt 或 ONNX 级 int8 ✓)
+ ② /Mul_1 是不是 rope 的常量折叠产物 ✗（名字太靠前 ✓）
+    ⇒ 可以导一版【去掉 rope】的图（只导线性层做检验 ✓）看错误是否移动 ✓
+ ③ CPUCL 与 NPUCL 的差异：我们 OMG 编的是 kirinx90（NPU ✓），
+    而引擎这次走的是 CPUCL ✗ ⇒ 检查 api_config.json/executor.json 里是否需要指定后端 ✓
+    （官方包里有个 "inferType": 0 ✓ 也许还有别的字段控制 ✓）
+```
