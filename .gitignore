@@ -41,3 +41,23 @@ examples/*/bin/
 /lib/
 /python3/
 
+# ★NNRt/DDK 实验产物（体积巨大或为本机编译产物 ⇒ 一律不入库 ✓ 2026-10-06 事故后补 ✓）
+# 事故：git add -A 把 448MB 权重 blob、16MB×3 模型文件、9 个 ELF 可执行文件提交进了历史 ✗
+*.bin
+*.ms
+*.om
+*.weights
+scripts/model-conversion/qwen38/nnrt_probe/nnrt_online
+scripts/model-conversion/qwen38/nnrt_probe/nnrt_probe
+scripts/model-conversion/qwen38/nnrt_probe/nnrt_ops
+scripts/model-conversion/qwen38/nnrt_probe/cov
+scripts/model-conversion/qwen38/nnrt_probe/one_op
+scripts/model-conversion/qwen38/nnrt_probe/shapes
+scripts/model-conversion/qwen38/nnrt_probe/shapes2
+scripts/model-conversion/qwen38/nnrt_probe/two_ops
+scripts/model-conversion/qwen38/nnrt_probe/ap_*
+scripts/model-conversion/qwen38/nnrt_builder/nnrt_build
+# 探针实验产生的生成物（可随时重跑生成 ✓）
+scripts/model-conversion/qwen38/nnrt_builder/*_graph.txt
+scripts/model-conversion/qwen38/nnrt_builder/real_*.txt
+scripts/model-conversion/qwen38/nnrt_builder/[a-z]_*.txt
