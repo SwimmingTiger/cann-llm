@@ -122,7 +122,12 @@ def _expl_rmsnorm(nrm, x):
     if eps is None:
         eps = 1e-6
     v = _sum_last(x * x) * (1.0 / float(d))
-    return x * (v + eps).pow(-0.5) * nrm.weight
+    # ★Qwen3_5RMSNorm 是 Llama 式 (1 + weight)★✓（§158 定位 ✓）
+    #   HF：`self.weight = nn.Parameter(torch.zeros(dim))` ⇒ 前向 `output * (1.0 + weight)` ✓
+    #   原来只乘 `nrm.weight` ✗ ⇒ weight≈0 时输出被压到 ~0 ✗
+    #   （实测：范数 1.05 vs HF 2.71 ✓ 余弦 0.33 ✓ —— 正是这条）
+    #   注：★Qwen3_5RMSNormGated 不是这套★✓（它 weight 初始化为 ones ✓ 前向就是 `weight * x` ✓）
+    return x * (v + eps).pow(-0.5) * (1.0 + nrm.weight)
 
 
 def _expl_gated_rmsnorm(nrm, x, gate):
