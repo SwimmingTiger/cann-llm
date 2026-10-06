@@ -8102,3 +8102,94 @@ libai_infra_rpc_server.so（26 KB）：
   以及 NNRt 客户端形态为何天然偏系统应用 ✓（当前 Build 失败的归因见 §147.3 ✓）。
 ★另记★：canon 路线（cann/hiai 引擎）之所以不受影响 ✓，是因为它们【同进程内加载】✓，
   不经 hiai RPC 去要 /dev/npu* ✓（hiai 引擎 13.3 tok/s 实测 ✓）。
+
+## 149. ★★★NNRt 真正的判据：在线 vs 离线两条路径（源码 + hilog 实证）★★★
+
+### 149.1 事实一：设备有两个 NNRt 设备，名字不同（实测 ✓）
+
+```
+NNRt wrapper：NNDeviceGetName(device_id) ⇒
+    ★device 0 的名字 = "HIAI_F"★                          ← 离线（厂商模型）那条
+    另一个 id 的名字 = "NPU_ohos.boot.hardware.KirinX90_v2_0" ← 在线那条
+设备属性：ohos.boot.hardware = KirinX90 ✓（运行时把它拼成上面那个长名字 ✓）
+```
+
+### 149.2 事实二：delegate 按前缀选路径（源码 ✓ mindspore-lite/src/litert/delegate/nnrt/nnrt_delegate.cc）
+
+```c
+bool NNRTDelegate::CheckNPUPrefix(const std::string prefix) const {
+  NNDeviceGetName(nnrt_device_info_.device_id_, &device_name);
+  if (strncmp(prefix.c_str(), device_name, prefix.size()) != 0) {
+    MS_LOG(WARNING) << "strncmp: " << device_id << " failed, device_name: " << device_name;
+    return false;
+  }
+  return true;
+}
+bool NNRTDelegate::IsKirinNPUWithOnlineInference()  const { return CheckNPUPrefix("NPU_");   }
+bool NNRTDelegate::IsKirinNPUWithOfflineInference() const { return CheckNPUPrefix("HIAI_F"); }
+
+Status NNRTDelegate::Build(...) {
+  bool is_kirin_online = IsKirinNPUWithOnlineInference();
+  if (is_kirin_online) {          // 「Path: Kirin NPU with online inference」
+     if (xpu_backend_set_ == false) { ERROR "Config should use 'backend:CPU' for heterogeneous execution."; }
+     ...
+  }
+  ...                            // 否则离线：BuildOfflineModel（@234）→ InitNNCompilation（@262）→
+                                 //   NNCompilationSetDevice(@699) → NNCompilationBuild(@772)
+}
+
+★结论（代码级 ✓）★：走在线还是离线，取决于【模型/上下文带的 device_id 指向哪个设备名】✓，
+   不是看图的算子 ✓ 也不是权限 ✗。
+```
+
+### 149.3 事实三：两次运行的 hilog 对照（实测 ✓ 决定性 ✓）
+
+```
+★成功★ ch400.ms（401 节点纯 MatMul 链 ✓）：
+   W CheckNPUPrefix# strncmp: 0 failed, device_name: HIAI_F     ← 仅是离线检查的告警 ✓
+   ★没有后续错误 ✓ ⇒ 走在线路径并成功 ✓★
+★失败★ t1_s8_npu.ms（3 维 1 层真图 ✓）：
+   W CheckNPUPrefix … device_name: HIAI_F                       ← 同上
+   E NNRt: ★OH_NNCompilation_Build failed, fail to build compilation★
+   E nnrt_delegate.cc:772 InitNNCompilation# Build NNCompilation failed, ret: 1
+   E nnrt_delegate.cc:262 ★BuildOfflineModel# Init NNCompilation failed★
+   E scheduler.cc:542/655/417 → lite_session.cc:616 CompileGraph failed
+   E model_impl.cc:243 Build# Init session failed
+   W CheckNPUPrefix … device_name: NPU_ohos.boot.hardware.KirinX90_v2…
+   E model_c.cc:259 OH_AI_ModelBuildFromFile# failed, ret: Common error code
+⇒ ★我们的 .ms 落到了【离线】路径 ✗，而本机的离线编译直接失败（ret=1）✗★
+```
+
+### 149.4 事实四：转换器的行为（今天实测 ✓）
+
+```
+· 预编译 converter_lite（~/mslite/…）：--fmk=ONNX【不带 config】⇒
+    ERROR third_party_param_parser.cc:64 "Only support fixed shapes in third party param" ✗
+    ⇒ 连最朴素的 Add ONNX 也失败 ✗ ⇒ ★它在这条路上强制走三方参数解析✗★
+· 换成【源码编译】的 converter_lite（§146 那个 ✓）：同一条命令★报同一个错✗★
+    ⇒ 与转换器版本无关 ✓ 是 --fmk=ONNX 这条入口本身就要 [third_party_model] 配置 ✓
+· 给了 [third_party_model] 配置 ⇒ CONVERT RESULT SUCCESS:0 ✓（我们所有 .ms 都是这么来的 ✓）
+```
+
+### 149.5 已证伪/已撤回的旧说法（避免再被误导 ✓）
+
+```
+✗「卡在 hiai 服务的 uid 白名单」（§147 旧结论）—— 实测 Invalid uid 在成功运行里同样出现 ✓ 已撤回 ✓
+✗「≥4 维算子被拒是我们的原因」（§57 的推论）—— 当前 3 维代码的 OMG 日志里
+   strided_slice/reshape/expanddims 拒绝数为 0 ✓（只有广播级告警 ✓）⇒ 不是当前失败原因 ✗
+✗「BroadcastTo 是元凶」—— 注入实验证明含 BroadcastTo 的小模型 NNRt Build 0 ✓ 已证伪 ✓
+✗「图规模上限」—— 401 节点链 Build 0 ✓ 已证伪 ✓
+✓ 当前唯一被证据支持的判据：★device_id → 设备名 → 在线/离线路径★（§149.2 ✓）
+```
+
+### 149.6 下一步（按证据排序 ✓）
+
+```
+① ★查清 device_id 从哪来★：模型元数据？context？还是 [third_party_model] 生成的 subgraph 标记？
+   目标：让我们的 .ms 落到【在线】路径 ✓（像 ch400/tiny 那样 ✓）
+   —— 这条最可能一步解决 ✓（源码就在 /src/…/nnrt_delegate.cc，可直接读 subgraph 划分与 device 选择 ✓）
+② 若 .ms 无法改：在【设备侧】显式指定 NNRt device_id / 或让 context 带 'backend:CPU' 的异构图配置 ✓
+   （Build() 里 is_kirin_online 分支要求 xpu_backend_set_ ✓ 这不难满足 ✓）
+③ 保留今天打通的链路（OMG --target=om 权重内联 → THIRDPARTY）作为【离线路径】的备用 ✓；
+   一旦本机离线编译可用（需 HIAI_F 设备/hiai_foundation ✓）即可直接用 ✓
+```
