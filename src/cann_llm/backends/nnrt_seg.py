@@ -64,11 +64,26 @@ class _Seg:
         if self.kv_names:
             self.kv_elems = ins[self.kv_names[0][0]][3]
         self.kv = [bytearray(self.kv_elems * 4) for _ in self.kv_names]
-        # 首段输入名 / 其余段输入名
-        self.hidden_name = "input_ids" if is_first else "input_embed"
+        # ★首段输入名★（§153 适配 ✓）：
+        #   · gemma4 式：首段在【设备上】做 embedding ⇒ 输入名 input_ids，喂 token id ✓
+        #   · qwen3_5 式：段图从 embedding 开始（主机侧算 embedding ✓ 与 nnrt_llm 同思路 ✓）
+        #     ⇒ 首段输入名是 input_embed ✓，喂【embedding 行】✓（dtype 按图声明 ✓）
+        if is_first:
+            if "input_ids" in ins:
+                self.hidden_name = "input_ids"
+                self.first_is_token = True
+            elif "input_embed" in ins:
+                self.hidden_name = "input_embed"
+                self.first_is_token = False
+            else:
+                raise ModelLoadError(
+                    "首段 %s 里既没有 input_ids 也没有 input_embed ✗" % be.model_dir)
+        else:
+            self.hidden_name = "input_embed"
+            self.first_is_token = False
         if self.hidden_name not in ins:
             raise ModelLoadError(
-                "段 %s 里没有输入 %s（首段应为 input_ids、其余段应为 input_embed）"
+                "段 %s 里没有输入 %s（首段应为 input_ids/input_embed、其余段应为 input_embed）"
                 % (be.model_dir, self.hidden_name))
         # 末段输出 lm_logits，其余段输出 hidden（导出时名字沿用了 lm_logits）
         self.logits_name = "lm_logits" if "lm_logits" in {t[0] for t in be._outputs} else None
