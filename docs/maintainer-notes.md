@@ -8391,3 +8391,53 @@ matmulout  = MatMul(a,w) * Sigmoid(b)⇒ Build 0 ✓
    · 或走单 .ms + 主机侧词表（像 gemma4 那样把 lm_head/embedding 放主机 ✓）
 ③ 保底：hiai/cann 引擎路线依旧可用（13.3 tok/s 实测 ✓）
 ```
+
+## 153. 全 24 层（1.33 GB）在【设备侧 DMA 大页堆】上撞墙；规模边界：4 层(937 MB) 可过
+
+### 153.1 全模型链已完成，但设备 load 失败（实测 ✓）
+
+```
+全模型链（hu60tx ✓）：
+  q35_hiai_low.onnx → Neg lowering（48 → 0 ✓）→ q35_full_nn.onnx（51 入/49 出 ✓）
+  → OMG --target=om --weight_merge ⇒ ★seg.om 1331.3 MB（权重内联 ✓）★
+  → converter_lite --fmk=THIRDPARTY（源码编译版 ✓）⇒ ★full_npu.ms 1331.3 MB ✓★
+设备侧（仓库 nnrt 后端 + 设备 python ✓）：
+  ✗ ModelLoadError 离线模型加载失败 rc=-1
+hilog 真因：
+  W AI_INFRA dma_heap_alloc "aodHeapFd open failed" · ★"npuHugePageHeapFd open failed"★
+  E NNRt  [BackendManager] ★RegisterBackend failed, fail to create backend★（×3）
+  E MS_LITE nnrt_delegate.cc:237 "BuildOfflineModel# not third party model"
+  E MS_LITE → Compile model failed → Build -1
+⇒ ★设备侧 DMA 大页堆开不出来 ⇒ NPU 后端注册失败✗★（尺寸相关的资源上限 ✓）
+```
+
+### 153.2 规模边界（全部实测 ✓）
+
+```
+✓ 可过：1 层（S=8·kv=64 · 235 MB）· ★4 层（S=64·kv=2048 · 937.7 MB）★ —— Build 0 ✓ + 仓库后端 load 成功 ✓
+✗ 失败：24 层（1.33 GB）× DMA 大页堆
+△ 4 层 Predict：`weightSize:0` + `dma_heap_alloc SetBufferName failed errno 9` ⇒ RunSync 失败 ✗
+   （建图成功、执行期分配失败 ✓）
+```
+
+### 153.3 `--large-mem` 本环境不可用（记录 ✓ 不是没试 ✓）
+
+```
+驱动 `scripts/large_mem_run.sh` 在本机接不上 lldb ✗：
+  · 应用侧正常（打印"附着到 pid=… ✓ 已预加载 libhiai_ir.so、libsec_shared.z.so ✓ 等调试器放行"）
+  · ★lldb 侧 "Failed to connect port"（重试 40 次）✗★
+手动验证：`bin/huawei-debug-lldb-server gdbserver --native-regs 127.0.0.1:5099 --attach <pid>`
+  ⇒ ★"Attached to process … / Connection established."✓★ ⇒ gdbserver 本身没问题 ✓
+⇒ 失败在 【lldb → gdbserver】这一段 ✓（把驱动里的 sleep 0.3→3、重试 40→300 也一样 ✗）
+⇒ 用户上次能跑 `--large-mem`（hiai/cann ✓）⇒ 说明是【本环境/调用方式】的差异 ✓，待查 ✓
+```
+
+### 153.4 下一步（按证据排序 ✓）
+
+```
+① ★分段★（gemma4 的成法 ✓）：把 24 层切成 5 段（每段 ~5 层 ✓ 单段负载 ~270 MB ✓）
+   ⇒ 绕开大页堆上限 ✓；配套 nnrt_seg 需要 tokenizer.json + seg*/ 子目录 ✓
+   ⇒ 这也是通向【真能对话】的那条路 ✓（末段给 lm_logits ✓ 首段吃 input_ids/input_embed ✓）
+② 4 层 Predict 的执行期分配（weightSize:0 + DMA ✗）：等 `--large-mem` 可用后再试 ✓
+③ 保底：hiai/cann 引擎路线（13.3 tok/s ✓）始终可用 ✓
+```
