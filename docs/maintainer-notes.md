@@ -7866,3 +7866,58 @@ OH_NNModel_GetAvailableOperations(model, deviceID, const bool **isSupported, uin
 成功 5 / 跳过 0 / 等模块加载 1（那 1 处是 libhiai_ir.so —— hiai 路径永远不加载它 ✓ 无害）
 ⇒ 权重拷贝（SubGraph_0.weight 4.4 GB）经过的两个内存族 securec 门都被打开 ✓
 ```
+
+## 144. ★★CANN 后端 --large-mem 适配：门不在 CANN 引擎里，而在共用 libsec_shared 的 ASM 优化版★★
+
+### 144.1 从运行中 CANN 进程取证（/proc/<pid>/maps ✓ 236 个库）
+
+```
+用户命令：python3 -m cann_llm.cli.chat -d ../models/Qwen3-8B -b cann --large-mem
+★AI 栈★：libcann_llm_engine.so（/system/lib64/ndk/ ✓ 引擎本体）
+        libneural_network_core.so · libhiai_foundation.so · libai_fmk_base.so …
+        /system/lib64/chipset-sdk-sp/libsec_shared.z.so ✓（补丁打在这里 ✓）
+★未加载★：libhiai_ir.so ✗ · libhiai_llm_engine.so ✗ · libmindspore_lite_ndk.so ✗
+   ⇒ 用户日志里的"成功 3 / 等模块加载 3"= 上面这三个库对应的补丁 ✓（对 CANN 都无关 ✓）
+```
+
+### 144.2 ★IDA 反编译（x570）★：CANN 引擎自己没有门 ✓，漏的是共用库的 OptAsm
+
+```
+用惯用法 0xFFFFFFFF80000001（securec 的 ERANGE 分支）逐个库判别：
+   libcann_llm_engine.so                  族 1 个（hiai::FileUtil::RealpathUtil）⇒ ★门 0 处★ ✓
+   libai_fmk_hcl_model_runtime_impl.so    族 1 个 ⇒ 门 0 处（早先字节命中的是通用写法 ✗）
+   libai_infra_memory_manager_client.so   族 0 个 ✗
+   libgraph.so                            族 0 个 ✗
+★libsec_shared.z.so（共用）★：17 个 securec 族函数 · 5 处 lsr+cbnz 门：
+   memcpy_s        +0x3E50  09 03 00 b5   ← 已有补丁 ✓
+   ★memcpy_sOptAsm +0x3F58  69 42 00 b5   ← ★此前漏了✗（内存族 ✓ 立即数与 memcpy_s 不同 ✓）★
+   memset_s        +0x51DC  89 01 00 b5   ← 已有补丁 ✓
+   ★memset_sOptAsm +0x526C  c9 2d 00 b5   ← ★此前漏了✗（内存族 ✓）★
+   strncpy_s       +0xD368  49 03 00 b5   ← 字符串族（destMax 是小缓冲）⇒ 与权重无关 ✓
+   memmove_s       +0x5138（反极性 b.hs，已有补丁 ✓）
+   memcpy_sOptTc / memset_sOptTc ⇒ ★反编译显示它们【不做 destMax 校验】✗★（只有 a4<=n ✓）⇒ 无需补 ✓
+★为什么这两处重要★：名字里的 OptAsm = 汇编优化版 —— 大块权重拷贝最可能走它 ✓
+```
+
+### 144.3 落地改动（3 处）
+
+```
+① src/cann_llm/large_mem.py PATCHES += 2 条（libsec_shared +0x3F58 / +0x526C ⇒ nop ✓）—— 共 8 处
+② large_mem.preload_targets(libs=None) / rendezvous(preload=None)：
+     ★支持按后端定制预载清单★（None ⇒ 全局 PRELOAD_LIBS ✓；空元组 ⇒ 不预载 ✓）
+     —— CANN 只需共用 securec，不必把 hiai 的 LLM 引擎拉进 CANN 进程 ✓
+③ src/cann_llm/backends/cann.py：在 ctypes.CDLL(CANN 引擎) 之前
+   rendezvous(preload=("libsec_shared.z.so",)) ✓（首次接上"报到—等放行" ✓ 零开销 ✓）
+④ tests：+4 条（OptAsm 两处的精确字节 ✓ CANN 引擎不该有补丁项 ✓ cann.py 调用顺序+预载清单 ✓
+   rendezvous 的 preload 覆盖与空清单行为 ✓）
+★验证★：tests/test_large_mem.py 31 passed ✓；全套 258 passed / 8 skipped ✓
+```
+
+### 144.4 用户重启 CANN 后会看到
+
+```
+[large-mem] ✓ libsec_shared.z.so +0x03E50 / +0x051DC / +0x05138 已就位
+[large-mem] ✓ libsec_shared.z.so +0x03F58 / +0x0526C 已就位          ← ★新增 2 处★
+[large-mem] 补丁结果：成功 5 / 跳过 0 / 等模块加载 3（共 8 处）
+                 ↑ 那 3 处是 libhiai_ir.so + libhiai_llm_engine.so×2 —— ★CANN 路径不需要它们✓★
+```

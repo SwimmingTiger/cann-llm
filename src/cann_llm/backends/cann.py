@@ -121,6 +121,12 @@ class _NdkBindings:
         if not os.path.exists(lib_path):
             raise BackendUnavailableError(
                 f"找不到 CANN NDK 库 {lib_path}；本后端需要鸿蒙设备（NPU）环境")
+        # ★--large-mem：加载引擎【之前】先"报到—等放行"★（没设环境变量时零开销 ✓）
+        #   为什么 CANN 也要接：CANN 引擎自己【没有】securec 门（IDA 反编译确认 ✓），
+        #   它走的是共用的 libsec_shared —— 那几处必须在权重开始拷贝【之前】补好 ✓
+        #   预载清单只给共用 securec：不必把 hiai 的 LLM 引擎拉进 CANN 进程 ✓
+        from ..large_mem import rendezvous as _large_mem_rendezvous
+        _large_mem_rendezvous(preload=("libsec_shared.z.so",))
         try:
             self.lib = ctypes.CDLL(lib_path, mode=ctypes.RTLD_LOCAL)
         except OSError as e:

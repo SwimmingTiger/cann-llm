@@ -107,6 +107,26 @@ PATCHES: Tuple[LargeMemPatch, ...] = (
         "`if (!s || n >> 31 || …) { … else return 34; }`；"
         "0x30590C `lsr x9, x8, #31` → 0x305910 `cbnz x9` ✓",
     ),
+    # ---- 下面两处：libsec_shared 的 ASM 优化版（★CANN 后端适配时发现★ 2026-10-06）----
+    # ★为什么必须加★：CANN 后端的引擎 libcann_llm_engine.so 自己【没有】门（IDA 确认 ✓），
+    #   它走的是共用的 libsec_shared —— 而这一对 OptAsm 版同样带 destMax ≥ 2 GiB 门 ✗
+    #   反编译：memset_sOptAsm 伪代码 `if (!s || n >> 31 || a4 > n) { … return 34; }` ✓ 同族 ✓
+    #   （memcpy_sOptTc / memset_sOptTc 实测【不做】destMax 校验 ⇒ 不需要补 ✓）
+    LargeMemPatch(
+        "libsec_shared.z.so", 0x3F58,
+        b"\x69\x42\x00\xb5", b"\x1f\x20\x03\xd5",
+        "securec memcpy_sOptAsm（ASM 优化版，内存族）",
+        "IDA 确认：memcpy_sOptAsm(a1, n, src, a4) @0x3F3C，伪代码同样含 "
+        "`n - 0x80000000 >= 0xFFFFFFFF80000001 … `（ERANGE 34）⇒ 与 memcpy_s 同族 ✓ "
+        "★注意立即数与 memcpy_s 的不同（69 42 00 b5 vs 09 03 00 b5）⇒ 必须按实测字节校验 ✓",
+    ),
+    LargeMemPatch(
+        "libsec_shared.z.so", 0x526C,
+        b"\xc9\x2d\x00\xb5", b"\x1f\x20\x03\xd5",
+        "securec memset_sOptAsm（ASM 优化版，内存族）",
+        "IDA 确认：memset_sOptAsm(s, n, c, a4) @0x524C，伪代码 "
+        "`if (!s || n >> 31 || a4 > n) { … else return 34; }` ✓",
+    ),
 )
 
 #: lldb 侧脚本名（与 `large_mem_lldb.py` 同目录）
@@ -137,29 +157,37 @@ PRELOAD_LIBS = ("libhiai_ir.so", "libsec_shared.z.so", "libhiai_llm_engine.so")
 _rendezvous_done = False
 
 
-def preload_targets(verbose: bool = True) -> List[str]:
-    """把补丁目标的库先 dlopen 起来；返回成功的库名。失败不报错（尽力而为）。"""
+def preload_targets(verbose: bool = True, libs=None) -> List[str]:
+    """把补丁目标的库先 dlopen 起来；返回成功的库名。失败不报错（尽力而为）。
+
+    ``libs=None`` ⇒ 用全局 :data:`PRELOAD_LIBS`；
+    后端可以传自己的清单 —— 例如 CANN 只需要共用 securec，
+    不必把 hiai 的 LLM 引擎也拉进 CANN 进程 ✓
+    """
     import ctypes
+    names = tuple(PRELOAD_LIBS if libs is None else libs)
     got = []
-    for name in PRELOAD_LIBS:
+    for name in names:
         try:
             ctypes.CDLL(name)
             got.append(name)
         except OSError:
             pass
     if verbose and got:
-        print("[large-mem] 已预加载 %s（让 4 处补丁一次到位）" % "、".join(got), flush=True)
+        print("[large-mem] 已预加载 %s（让补丁在 attach 时一次到位 ✓）" % "、".join(got),
+              flush=True)
     return got
 
 
-def rendezvous(log=None) -> bool:
+def rendezvous(log=None, preload=None) -> bool:
     """★第一次 build 之前"报到—等放行"★（`--large-mem` 专用；幂等，可重复调用）
 
     没有设 :data:`RENDEZVOUS_ENV` 时**立刻返回**（普通运行零开销 ✓）。
 
     有值时的顺序（顺序很重要）：
 
-    1. 先 :func:`preload_targets` —— 让 ``libhiai_ir.so`` 这时就在 ✓
+    1. 先 :func:`preload_targets` —— 让补丁目标的库这时就在 ✓
+       （``preload`` 给后端自定义清单；``None`` ⇒ 全局 :data:`PRELOAD_LIBS` ✓）
     2. 等 lldb 侧脚本创建"放行文件"（它是在 `command script import` 时打完补丁后
        创建的 ✓）—— 最多等 :data:`WAIT_ENV` 秒，超时就自己走（绝不永久卡住 ✗）
 
@@ -171,14 +199,17 @@ def rendezvous(log=None) -> bool:
         return False
     _rendezvous_done = True
     say = log or (lambda msg: print(msg, flush=True))
+    libs = tuple(PRELOAD_LIBS if preload is None else preload)
 
     if os.path.exists(release):
         # 调试器已经先跑过了（补丁就位）⇒ 不必等，直接走 ✓
         say("[large-mem] 调试器已就位（放行标记已存在），直接继续 ✓")
-        preload_targets(verbose=False)
+        if libs:
+            preload_targets(verbose=False, libs=libs)
         return True
 
-    preload_targets()
+    if libs:
+        preload_targets(libs=libs)
     wait = float(os.environ.get(WAIT_ENV) or 30)
     import time
     t0 = time.time()

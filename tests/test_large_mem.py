@@ -31,7 +31,7 @@ def _script_wrapper():
 
 class TestPatchTable(unittest.TestCase):
     def test_shape(self):
-        self.assertEqual(len(large_mem.PATCHES), 6)
+        self.assertEqual(len(large_mem.PATCHES), 8)
         for p in large_mem.PATCHES:
             self.assertEqual(len(p.expect), 4, p.what)
             self.assertEqual(len(p.patch), 4, p.what)
@@ -57,9 +57,10 @@ class TestPatchTable(unittest.TestCase):
             seen.add(key)
 
     def test_nop_patches(self):
-        """五处「跳向错误路径」的 cbnz ⇒ nop 即可（引擎里那两处同处理 ✓）。"""
+        """七处「跳向错误路径」的 cbnz ⇒ nop 即可
+        （libsec_shared 导出 2 处 + 引擎 2 处 + libsec_shared OptAsm 2 处 + libhiai_ir 1 处 ✓）。"""
         nops = [p for p in large_mem.PATCHES if p.patch == NOP]
-        self.assertEqual(len(nops), 5)
+        self.assertEqual(len(nops), 7)
 
     def test_memmove_patch_is_branch_not_nop(self):
         """★memmove_s 极性相反：必须是无条件跳转，不能是 nop★"""
@@ -124,6 +125,57 @@ class TestHiaiEngineGates(unittest.TestCase):
         i = src.index("_large_mem_rendezvous()")
         j = src.index("ctypes.CDLL(lib_path")
         self.assertLess(i, j, "rendezvous 必须在加载引擎之前调用 ✗")
+
+
+class TestCannGates(unittest.TestCase):
+    """★CANN 后端适配（2026-10-06）★
+
+    实测：/proc/<pid>/maps（CANN 进程 236 个库）显示
+      · libcann_llm_engine.so 已加载，但 IDA 反编译表明它自己【没有】securec 门 ✓
+      · 门都在共用的 libsec_shared.z.so 里，其中 ASM 优化版那两处此前漏了 ✗
+    """
+
+    def test_sec_shared_optasm_gates(self):
+        sec = {p.offset: p for p in large_mem.PATCHES
+               if p.module == "libsec_shared.z.so"}
+        self.assertIn(0x3F58, sec)   # memcpy_sOptAsm
+        self.assertIn(0x526C, sec)   # memset_sOptAsm
+        self.assertEqual(sec[0x3F58].expect, b"\x69\x42\x00\xb5")
+        self.assertEqual(sec[0x526C].expect, b"\xc9\x2d\x00\xb5")
+        for off in (0x3F58, 0x526C):
+            self.assertEqual(sec[off].patch, NOP)
+
+    def test_cann_engine_has_no_gate_of_its_own(self):
+        """CANN 引擎自己不该出现补丁项（门在共用库里 ✓）—— 防止以后误加 ✓"""
+        mods = {p.module for p in large_mem.PATCHES}
+        self.assertNotIn("libcann_llm_engine.so", mods)
+
+    def test_cann_backend_reports_in_before_loading_engine(self):
+        src = open(os.path.join(os.path.dirname(__file__), "..", "src", "cann_llm",
+                                "backends", "cann.py"), encoding="utf-8").read()
+        i = src.index("_large_mem_rendezvous(")
+        j = src.index("ctypes.CDLL(lib_path")
+        self.assertLess(i, j, "rendezvous 必须在加载 CANN 引擎之前调用 ✗")
+        # 预载只给共用 securec（不把 hiai 引擎拉进 CANN 进程 ✓）
+        self.assertIn('preload=("libsec_shared.z.so",)', src)
+
+    def test_rendezvous_preload_override(self):
+        """rendezvous(preload=…) 用给定清单；preload=() 则不预载 ✓"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            rel = os.path.join(d, "go")
+            with mock.patch.dict(os.environ, {large_mem.RENDEZVOUS_ENV: rel}, clear=False):
+                open(rel, "w").write("go\n")              # 调试器已就位 ⇒ 不等待 ✓
+                with mock.patch.object(large_mem, "preload_targets") as pt:
+                    large_mem._rendezvous_done = False
+                    self.assertTrue(large_mem.rendezvous(preload=("libsec_shared.z.so",)))
+                    pt.assert_called_once_with(verbose=False,
+                                               libs=("libsec_shared.z.so",))
+                with mock.patch.object(large_mem, "preload_targets") as pt2:
+                    large_mem._rendezvous_done = False
+                    self.assertTrue(large_mem.rendezvous(preload=()))
+                    pt2.assert_not_called()                 # 空清单 ⇒ 不预载 ✓
+            large_mem._rendezvous_done = False
 
 
 class TestStripFlag(unittest.TestCase):
