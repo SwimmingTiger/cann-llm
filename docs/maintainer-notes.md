@@ -8265,3 +8265,57 @@ E MS_LITE nnrt_delegate.cc:772/262 → BuildOfflineModel# Init NNCompilation fai
 本次失败发生在【设备 NPU 编译期】的权重尺寸计算（CalcWeigtSize ✓）✗，
   此时还没有大分配 ✓ ⇒ ★`--large-mem` 对本失败不适用✗★（但对 gemma4 那种 1.5 GB/段的大模型加载是必需的 ✓）。
 ```
+
+## 151. ★★真图在 NPU 上首次 Build 0：切掉"衰减门"即可通过；门控本身单跑却没问题（上下文相关）★★
+
+### 151.1 突破：cutB ⇒ 真 Qwen3.8 层在设备 NPU 上 Build 0 + load model succ ✓
+
+```
+做法：找到真图里 `/Mul_4 = Mul(/Neg_output_0, /Softplus_output_0)` ✓
+  · cutA = 把【Softplus 侧】换成常量（并剪掉死子图 ✓ 7 个死节点 ✓）⇒ ★仍失败✗★
+            但失败节点从 /Mul_4 变成 ★/Mul_20★ ✓（说明失败会"漂移"到下一个同类 Mul ✓）
+  · cutB = 把【Neg 侧】换成常量（剪掉 2 个死节点 ✓）⇒ ★★Build 0 (SUCCESS) ✓★★
+            hilog：`load model succ: modelName=default_ndk modelId=196/197/205/207` ✓
+      ⇒ ★真图（3 维 1 层 · 235 MB · 3 入 3 出）真的在 NPU 上加载成功✓★
+```
+
+### 151.2 但"元凶就是 Neg"也被证伪（✗ 见下）
+
+```
+试过的等价改写：把 `Mul(Neg(a), b)` 推成 `Neg(Mul(a, b))`（语义完全等价 ✓ 只改了 1 处 ✓）
+⇒ ★仍失败✗★，失败节点叫 `/Mul_4_pre`（就是我新建的那个 Mul ✓）
+⇒ 加上 §150 的最小复现（`Neg(a)*b` 单跑 Build 0 ✓）⇒ ★"Neg 是元凶"站不住✗★
+```
+
+### 151.3 本轮补做的 Mul 形态矩阵（★四种全部 Build 0 ✓★）
+
+```
+sigmul     = Sigmoid(a) * b          ⇒ Build 0 ✓
+twoact     = Sigmoid(a) * Tanh(b)    ⇒ Build 0 ✓（两个都是中间激活 ✓）
+actconst   = Sigmoid(a) * 常量       ⇒ Build 0 ✓
+matmulout  = MatMul(a,w) * Sigmoid(b)⇒ Build 0 ✓
+⇒ ★Mul 的"输入来源/是否常量/是否双激活"【都不是】判据✗★（都与真图里的失败不相容 ✓）
+```
+
+### 151.4 现在的准确认识（不夸大 ✓）
+
+```
+已确证 ✓：
+  · 纯算子图（含 401 节点纯链 ✓）能在 NPU 上 Build 0 + 真跑（hilog load model succ ✓）
+  · ★真 Qwen3.8 层【也能】Build 0 —— 只要把那处 `Neg × softplus` 门控从图里去掉✓★
+  · 转换链完全通（源码 THIRDPARTY 转换器 + 权重内联 .om ✓）
+已证伪 ✗：权限 · ≥4 维 · BroadcastTo · 图规模 · rank-0 常量 · 低秩广播 · 状态尺寸 ·
+        Mul 的输入来源/常量性/双激活 · "Neg 是元凶" · OMG 名称对应
+仍未定 ✗：★真图里【哪个具体结构】让 NPUCL 在 CalcWeigtSize 上失败★
+         （失败会在同类 Mul 间"漂移"⇒ 更像【优化/融合阶段的相互作用】✗ 而非单个算子 ✓）
+```
+
+### 151.5 下一步（并行推进 ✓）
+
+```
+① ★换等价门控写法★：把该门控改成 NPUCL 明确接受的形式（如用 Sigmoid/Softplus 的另一种恒等变形 ✓），
+   每改一次就跑一遍全链（秒级复现 ✓ 4 分钟一轮 ✓）⇒ 找到能过且数值对的写法 ✓
+② 若 ① 多轮无果：把该门控【整体挪到主机侧】（像 gemma4 把 lm_head 放主机一样 ✓）——
+   即图里不出现该计算 ✓，由 cann-llm 在 CPU 侧补 ✓（需改 nnrt_seg 的段接口 ✓ 可行性待评估 ✓）
+③ 并行保底：hiai/cann 引擎路线（已验证 13.3 tok/s ✓）继续可用 ✓
+```
