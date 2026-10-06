@@ -8757,3 +8757,31 @@ ONNX(g2_0_low/via ORT) vs Python      : ★余弦 1.000000★ ⇒ 导出忠实 �
    · 设备侧规模边界实测 ✓（470 MB 可执行 / 706 MB 不行 ✓）
    · 一批被证伪的假设（权限 ✗ 维度 ✗ 广播 ✗ 规模 ✗ 掩码 ✗ 跨段 ✗ 工具链忠实性 ✗）✓
 ```
+
+### 160.4 收尾路线的当场核验（本轮实测 ✓）
+
+```
+★hiai/cann 引擎在设备上实测可用✓★：
+   LD_PRELOAD=…/libuname.so PYTHONPATH=src /data/service/hnp/bin/python3 -m cann_llm.cli.chat \
+     -b hiai -d models/Qwen3-8B -p "你好" --max-tokens 2 --no-stream
+   ⇒ ★prefill 166 ms · decode 77 ms（25.9 tok/s）✓★ · 输出 `<think>` ✓（合理 ✓）
+   （历史记录 13.3 tok/s ✓ ⇒ 该路线不仅可用 ✓ 而且够快 ✓）
+`models/Qwen3-8B/` 就是这条路线上的量化模型（final_quant_model.embedding_weights ✓ executor.json ✓
+   api_config.json ✓ SubGraph_0.weight ✓）✓；仓库 CLI 的默认后端就是 hiai ✓（src/cann_llm/cli/chat.py ✓）
+```
+
+## 161. 目标收束（对照目标原文逐条 ✓）
+
+```
+目标①"解决 NNRt/OH_AI 设备侧 NPUCL 的 CalcWeigtSize 失败" ★达成✓★
+   ⇒ 根因：Mul 的某个操作数源自 Neg ✓ ⇒ Neg(x) → Mul(x,-1) lowering（§151/§152 ✓ 已落仓库 ✓）
+目标②"使设备上 OH_AI_ModelBuildFromFile 返回 0 并能 Predict" ★达成✓★
+   ⇒ 2 层段（470 MB）Build 0 ✓ Predict rc=0 ✓；12 段=整 24 层在设备上逐段执行、产出 248320 维 logits ✓
+目标③"拿到可复现的导出配方后推到全模型（需要时用 --large-mem）" ★达成✓★
+   ⇒ 分段导出配方完整可复现（§154-159 ✓）；--large-mem 在本环境不可用（lldb 接入 ✗ 已记录 ✓），
+     改用【分段到 470 MB 以下】绕开设备资源上限 ✓（实测边界：470 MB 可执行 / 706 MB 不行 ✓）
+目标④"若 NNRt 走不通 ⇒ 以 hiai/cann 收尾并记录结论" ★达成✓★
+   ⇒ NNRt 机制全通 ✓ 但数值保真受厂商离线工具链限制（~0.83 余弦 ✗ §160.2 ✓）⇒ 记为不可用于真实推理 ✓
+   ⇒ hiai/cann 当场核验可用 ✓（25.9 tok/s ✓ §160.4 ✓）
+全程不 push ✓（所有提交都在本地 ✓）
+```
