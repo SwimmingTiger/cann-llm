@@ -8193,3 +8193,59 @@ Status NNRTDelegate::Build(...) {
 ③ 保留今天打通的链路（OMG --target=om 权重内联 → THIRDPARTY）作为【离线路径】的备用 ✓；
    一旦本机离线编译可用（需 HIAI_F 设备/hiai_foundation ✓）即可直接用 ✓
 ```
+
+## 150. ★★NNRt 设备侧真因推进：NPUCL 在真实图里对某个 Mul 做 CalcWeigtSize 失败（最小复现全部通过）★★
+
+### 150.1 事实：设备侧失败点（hilog ✓ 本次新捕获 ✓）
+
+```
+E AI_NPUCL compile_task.cc CalcWeigtSize(133)::★/Mul_4 Mul CalcWeigtSize failed!★
+E AI_NPUCL op_build.cc OpCalcWeightSize(160)::Mul OpCalcWeightSize failed.
+E AI_NPUCL optimize_assistant.cc OpCalcWeightSize(609)::"OpCalcWeightSize failed. Node: /Mul_4."
+E AI_NPUCL sub_graph_optimizer.cc Optimize(457)::"Failed to build npu sub graph: SubGraph_0"
+E AI_FMK  hcl_model_builder_impl.cpp BuildModel(570)::"BuildModelByHcl failed"
+E NNRt    OH_NNCompilation_Build failed, fail to build compilation.
+E MS_LITE nnrt_delegate.cc:772/262 → BuildOfflineModel# Init NNCompilation failed → Build -1
+⇒ ★失败在【设备的 NPU 编译器（NPUCL）】里 ✗，不在 msLite、不在权限、不在转换器 ✓★
+```
+
+### 150.2 本轮踩过的两个假设（★都已被证伪✗，记录下来免得重走★）
+
+```
+假设①「Mul 的 rank-0 标量常量让 NPUCL 算不出权重尺寸」✗
+   做法：把 feeding Mul 的 3 个 rank-0 Constant 改成 [1] ✓ → 重跑 OMG/转换/设备
+   结果：★同一节点仍失败✗★（`/Mul_4 CalcWeigtSize failed` 一字不差 ✓）
+假设②「低秩操作数的广播（[16] × [1,8,16]）让 NPUCL 失败」✗
+   做法：把 7 处低秩操作数 reshape 成同秩 ✓ → 重跑 → 仍失败 ✗
+   ⇒ 于是做【最小复现】逐个排除：
+      · mr.onnx  = Neg(x) * Log(1+Exp(Min(x,20)))，x=[1,8,16]      ⇒ ★Build 0 ✓★
+      · mra.onnx = Neg(a) * b，a=[16],     b=[1,8,16]             ⇒ ★Build 0 ✓★
+      · mrb.onnx = Neg(a) * b，a=[1,1,16], b=[1,8,16]             ⇒ ★Build 0 ✓★
+      · mrc.onnx = Neg(a) * b，a=[1,8,16], b=[1,8,16]             ⇒ ★Build 0 ✓★
+   ⇒ ★该算子模式与该广播形状【单独都是好的】✗★ ⇒ 失败是【上下文相关】✓（真图里才触发 ✓）
+```
+
+### 150.3 另一条事实：OMG 会重编号节点名（避免误判 ✓）
+
+```
+把 35 个 Mul 全部改名成 QZM_00.. ✗ → 重跑 OMG → ★OMG 日志里没有任何 QZM_ 前缀✗★
+⇒ ★OMG 输出的节点名是它自己的 `/<OpType>_<序号>` ✗★ ⇒ 日志里的 `/Mul_4` 表示
+   "OMG 图里第 5 个 Mul" ✓（恰好与 ONNX 导出顺序一致 ✓，但不能想当然对应 ✓）
+```
+
+### 150.4 现状与下一步（假设已收敛 ✓）
+
+```
+已排除：权限 ✗ · 4 维算子 ✗ · BroadcastTo ✗ · 图规模 ✗ · rank-0 常量 ✗ · 低秩广播 ✗
+        · 转换器路线（THIRDPARTY/权重内联 ✓ 已通 ✓）· 纯算子模式本身 ✗
+仍成立：★真图（3 维 1 层 ✓ 235 MB ✓）在设备 NPUCL 上因某个 Mul 的权重尺寸计算失败✗★
+下一步候选：
+ ① 用【真图 + 最小改动】定位：把真图里每个 Mul 的【两个输入之一替换成常量】逐个试 ✗
+    （成本高 ✗）⇒ 更省的做法：按【子图/层内顺序】二分（把真图截成前半/后半 ✓）
+ ② 读 hiaiserver/NPUCL 的上下文：`CalcWeigtSize` 的上游是 `OpCalcWeightSize` ✓，
+    它按【算子权重张量】估值 ✓ ⇒ 也许问题是某个 Mul 的第二输入来自【大张量】而非常量 ✗
+    ⇒ 试验：把真图里所有"两个输入都是激活"的 Mul 改成 `Mul(x, sigmoid 门)` 之外的形式 ✗
+ ③ ★先量一下规模效应★：真图把 seq 从 8 降到 1、kv 从 64 降到 8 再试 ✗
+    （若小图过 ⇒ 是"权重尺寸上限"类问题 ✓，与 §123 的认证机制可能同源 ✓）
+ ④ 若以上都撞墙：回到【已验证可跑】的路（hiai 引擎 13.3 tok/s ✓ / cann ✓）
+```
