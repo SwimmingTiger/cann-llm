@@ -35,6 +35,8 @@ def main() -> int:
     ap.add_argument("--seq", type=int, default=64, help="本次喂入的 token 数（prefill 长度 ✓）")
     ap.add_argument("--kv-len", type=int, default=2048, help="KV/状态的缓存长度（编译期常量 ✓）")
     ap.add_argument("--layers", type=int, default=0, help="只导前 N 层（0=全部 ✓，调试用 ✓）")
+    ap.add_argument("--start", type=int, default=0,
+                    help="★分段导出的起始层★：与 --layers 合用表示导 [start, start+layers) ✓（§153 ✓）")
     ap.add_argument("--out", default="q35_hiai.onnx")
     ap.add_argument("--no-embed-head", action="store_true",
                     help="不导 embedding / lm_head（先把图跑通 ✓）")
@@ -53,12 +55,19 @@ def main() -> int:
     # ★必须加载真实权重★（原来只读了 config ⇒ 建出的是随机初始化模型 ✗，
     #   和另一进程里的参考模型根本不是同一个 ⇒ 对拍永远不可能一致 ✓ —— §66 实测踩到 ✓）
     model = Qwen3_5ForCausalLM.from_pretrained(args.hf, dtype=torch.float32).eval()
-    if args.layers:
-        model.model.layers = model.model.layers[: args.layers]
+    # ★分段导出（§153：全模型 24 层在设备侧撞 DMA 大页堆 ✗ ⇒ 按 gemma4 的成法切段 ✓）★
+    #   `--start K --layers N` ⇒ 只导 [K, K+N) 这些层 ✓；段内 KV/状态名是【段内局部下标】✓
+    #   （与 nnrt_seg 的 past_key_in{i}/past_key{i} 逐段配对约定一致 ✓）
+    _start = int(getattr(args, "start", 0) or 0)
+    _total = len(model.model.layers)
+    _stop = (_start + args.layers) if args.layers else _total
+    if _start or args.layers:
+        model.model.layers = model.model.layers[_start:_stop]
     tc = model.config.text_config if hasattr(model.config, "text_config") else model.config
-    if args.layers:
-        tc.num_hidden_layers = args.layers
-        tc.layer_types = list(tc.layer_types)[: args.layers]
+    if _start or args.layers:
+        tc.num_hidden_layers = len(model.model.layers)
+        tc.layer_types = list(tc.layer_types)[_start:_stop]
+        print("SEGMENT: layers[%d:%d] ⇒ 本段 %d 层 ✓" % (_start, _stop, len(model.model.layers)))
     tc.kv_cache_max_len = args.kv_len
     _w = model.model.layers[0].linear_attn.in_proj_qkv.weight
     print("FINGERPRINT in_proj_qkv |sum|=%.6f shape=%s dtype=%s" % (float(_w.abs().sum()), tuple(_w.shape), _w.dtype))
