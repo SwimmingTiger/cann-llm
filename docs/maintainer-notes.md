@@ -8906,3 +8906,59 @@ text, ids, stat = r.generate("你好", max_new=4)
 ★还能做的（未做 ✓）★：① 用 seq=8 全套（约 10% 收益 + 减少填充污染 ✓）；
    ② 预填充按 64 token 成块喂（长 prompt 才明显 ✓）；③ 进一步压 NPU 每调用开销需厂商侧手段 ✗
 ```
+
+## 164. ★随包 python 装 numpy（鸿蒙平台专有一步）★ + 修掉会吞掉真因的报错
+
+### 164.1 先纠正一处我判断错的结论（★随包 python 是 musl，不是 glibc★）
+
+```
+★证据（决定性 ✓）★：
+   · ELF PT_INTERP = ★/lib/ld-musl-aarch64.so.1★ ✓（musl 加载器 ✓）
+   · 运行时 /proc/self/maps：映射的是 /system/lib/ld-musl-aarch64.so.1 ✓
+     且 ★maps 里没有 libmusl_compat★ ✓（"glibc 构建靠 libmusl_compat 垫片"说的是
+     scripts/start_chat.sh 会【跳过】的那些 python ✗ —— 不是随包这个 ✓）
+   · sysconfig：MULTIARCH=★aarch64-linux-ohos★ ✓ EXT_SUFFIX=★.cpython-314.so★ ✓
+⇒ ★随包 python = 鸿蒙原生的 musl CPython 3.14 ✓★（我先前照搬脚本告警文字说它 glibc ✗ 是错的 ✓）
+```
+
+### 164.2 numpy 在鸿蒙上装不上的真正原因（平台标签 ✗，不是 libc ✗）
+
+```
+现象：pip install numpy 成功装完 2.5.3 ✓ 但 import 失败 ✗：
+   `No module named 'numpy._core._multiarray_umath'` ✗
+   并提示扩展文件 "seem incompatible with … the platform 'linux'" ✗
+原因：本平台是 ★aarch64-linux-ohos★ ✓，PyPI 上没有 ohos 标签的轮子 ✗
+   ⇒ pip 选了 ★musllinux_1_2_aarch64★ 轮子 ✓（libc 同为 musl ✓ 二进制本身没问题 ✓）
+   ⇒ 但它的扩展名是 `_multiarray_umath.cpython-314-aarch64-linux-musl.so` ✗，
+     而该解释器接受的后缀是 `['.cpython-314.so', '.abi3.so', '.so']` ✓
+   ⇒ ★纯粹是文件名平台标签对不上✗★
+修法：把扩展名里的 `-aarch64-linux-musl` 去掉 ✓（19 个扩展模块 ✓）
+   ⇒ 已固化成 ★scripts/install_numpy.sh★ ✓（可重复执行 ✓ pip 已满足 ⇒ 只补改名 ✓ 并自检 ✓）
+实测：numpy 2.5.3 ✓ 可导入 ✓ 矩阵乘自检 [3. 3.] ✓ BLAS = scipy-openblas ✓
+```
+
+### 164.3 ★修掉"会吞掉真因"的报错（先修它，才看得见 164.2 ✗）★
+
+```
+原来 _load_host_table 是 `except Exception: return None` ✗ —— 它把【缺 numpy】的 ImportError
+一起吞掉 ✓，上层于是报成"首段要 input_embed，但没找到主机侧嵌入表" ✗ ⇒ 完全指错方向 ✓
+（实测：随包 python 缺 numpy，报错却怪清单/嵌入表 ✗）
+新语义（已提交 ✓）：
+   · ★只有"压根没有 emb_manifest.json"才返回 None✓★（表示该模型不需要主机侧表 ✓）
+   · 清单在、后续任何一步失败 ⇒ ★一律抛 ModelLoadError 并把真因带出来✗★：
+       JSON 不合法 ✓ / 缺 shape ✓ / 缺权重文件（附清单路径与它指向的路径 ✓）/
+       ★缺 numpy（附解释器路径 + 一指禅到 scripts/install_numpy.sh ✓）★ / 文件打不开 ✓
+   · ★并且在 load() 就快速失败✓★（不再等第一次 generate 才冒一句含糊话 ✗）
+配套：新增 tests/test_nnrt_seg_host.py（6 passed / 1 skipped ✓：无清单→None ✓
+   缺权重/坏 JSON/缺 shape/缺 numpy 各自报得清楚 ✓ 有 numpy 时验行取值与 matmul ✓）
+```
+
+### 164.4 现在的产品路径（实测 ✓ 一条命令 ✓）
+
+```sh
+cd <repo>
+sh scripts/start_chat.sh -b nnrt -d ../models/qwen38_seg_fix -p "你好" --max-tokens 4 --no-stream
+#   ✓ Python 3.14.7（随包 ✓ 已带 numpy ✓）· ✓ nnrt 引擎 · ✓ 模型目录
+#   bot> 抓 blessed第二百五oly        ← 能跑 ✓（文本无语义 ✓ 见 §160 ✓）
+★不需要任何环境变量✓★（不用 PYTHON= ✗、不用 LD_PRELOAD ✗ —— 脚本自己挑解释器 ✓）
+```

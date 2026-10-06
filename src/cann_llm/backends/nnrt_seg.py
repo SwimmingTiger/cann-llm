@@ -28,6 +28,7 @@ import json
 import os
 import re
 import struct
+import sys
 from typing import Dict, List, Optional, Tuple
 
 from ..errors import GenerationError, ModelLoadError
@@ -224,20 +225,51 @@ class _HostTable:
 
 
 def _load_host_table(d: str):
-    """读 ``emb_manifest.json`` + 它的权重文件 ✓；没有就返回 None ✓（不报错 ✓）。"""
+    """读 ``emb_manifest.json`` + 它的权重文件 ✓。
+
+    ★语义（§164 修 ✓）：只有"压根没有清单"才返回 None ✓★（表示这个模型不需要主机侧词表表 ✓）；
+    清单在、但后续任何一步失败 ⇒ ★一律抛 ModelLoadError 并把真因带出来✗✗★。
+
+    为什么必须这样：原来这里是 `except Exception: return None` ✗ —— 它会把
+    ★缺 numpy★ 的 ImportError 一起吞掉 ✗，于是上层报成"没找到主机侧嵌入表" ✗，
+    完全指错方向（实测踩到 ✓：随包 python 没装 numpy，报错却怪清单 ✗）。
+    """
     man = os.path.join(d, "emb_manifest.json")
     if not os.path.isfile(man):
-        return None
+        return None                                          # ★真的没有清单 ⇒ 不需要表 ✓★
     try:
         with open(man, encoding="utf-8") as fh:
             info = json.load(fh)
-        path = os.path.join(d, info.get("file", "emb_f16.bin"))
+    except OSError as e:
+        raise ModelLoadError("主机侧词表表清单读不了 ✗：%s（%s）" % (man, e)) from e
+    except ValueError as e:
+        raise ModelLoadError("主机侧词表表清单不是合法 JSON ✗：%s（%s）" % (man, e)) from e
+    try:
         rows, cols = info["shape"]
-        if not os.path.isfile(path):
-            return None
+    except (KeyError, TypeError, ValueError) as e:
+        raise ModelLoadError(
+            "主机侧词表表清单缺 shape ✗：%s（内容 %r）" % (man, info)) from e
+    path = os.path.join(d, info.get("file", "emb_f16.bin"))
+    if not os.path.isfile(path):
+        raise ModelLoadError(
+            "主机侧词表表清单在、但它指向的权重文件不在 ✗：%s\n"
+            "  （清单 %s 里 file=%r ⇒ 期望 %s ✓）"
+            % (path, man, info.get("file"), path))
+    try:
         return _HostTable(path, rows, cols)
-    except Exception:                                        # noqa: BLE001
-        return None
+    except ImportError as e:                                 # ★缺 numpy 必须说清楚 ✓★
+        raise ModelLoadError(
+            "主机侧词表表需要 numpy，但当前解释器里没有 ✗：%s\n"
+            "  · 解释器：%s\n"
+            "  · 两条路任选：\n"
+            "      ① 给这个解释器装 numpy：★`sh scripts/install_numpy.sh`★ ✓\n"
+            "         （鸿蒙平台必须用这个脚本 ✗ 不能只跑 pip ✓：随包解释器是 aarch64-linux-ohos ✓\n"
+            "          而 PyPI 没有 ohos 标签的轮子 ⇒ pip 装的扩展名带 `-aarch64-linux-musl` ✗\n"
+            "          与该解释器接受的后缀不符 ⇒ 导入仍会失败 ✓ 脚本会顺手把标签去掉 ✓ 见 §164 ✓）\n"
+            "      ② 或用 PYTHON=/path/to/python3 指定一个已带 numpy 的解释器 ✓"
+            % (e, sys.executable)) from e
+    except OSError as e:
+        raise ModelLoadError("主机侧词表表打不开 ✗：%s（%s）" % (path, e)) from e
 
 
 class SegmentedLlmRunner:
@@ -276,7 +308,15 @@ class SegmentedLlmRunner:
         self.last_has_logits = self.segs[-1].logits_name is not None
         self.host_tab = None
         if not self.last_has_logits or not self.segs[0].first_is_token:
+            # ★加载期就快速失败✓★（§164 ✓）：缺 numpy / 缺清单 / 缺权重文件都在这里报清楚 ✓，
+            #   而不是等到第一次 generate 才冒一句"没找到嵌入表" ✗
             self.host_tab = _load_host_table(self.dir)      # ★fp16 表 ✓ 供 embedding/lm_head 两侧复用✓★
+            if self.host_tab is None:
+                raise ModelLoadError(
+                    "这个分段模型需要★主机侧词表表★（首段吃 input_embed ✓ / 末段只出 hidden ✓），"
+                    "但 %s 里没有 emb_manifest.json ✗ ⇒ 跑不了 ✓\n"
+                    "  · 该文件与 emb_f16.bin 一起由导出流程产出 ✓（见 docs/maintainer-notes.md §162 ✓）"
+                    % self.dir)
         if self.last_has_logits:
             self.vocab = self.segs[-1].be._outputs[
                 self.segs[-1].be._index_of_output("lm_logits")][3]
@@ -293,7 +333,10 @@ class SegmentedLlmRunner:
         seg = self.segs[0]
         n = seg.hidden_elems
         if self.host_tab is None:
-            raise GenerationError("首段要 input_embed，但没找到主机侧嵌入表 ✗")
+            raise GenerationError(
+                "首段要 input_embed，但 runner 没有主机侧词表表 ✗\n"
+                "  · 正常路径下这个错【应该在 load() 就报出来】✓；走到这里说明是手工构造的 runner ✓\n"
+                "  · 请用 SegmentedLlmRunner(dir).load() ✓（它会带出真因：缺 numpy / 缺清单 / 缺权重 ✓）")
         row = self.host_tab.row(token_id)
         cols = min(len(row), n)
         buf = [0.0] * n
@@ -307,7 +350,9 @@ class SegmentedLlmRunner:
         取第 64 个 token 的 hidden ✓ —— 正是下一步 logits 该用的那个 ✓。
         """
         if self.host_tab is None:
-            raise GenerationError("末段没有 lm_logits，但没找到主机侧词表 ✓")
+            raise GenerationError(
+                "末段没有 lm_logits，但 runner 没有主机侧词表表 ✗\n"
+                "  · 正常路径下这个错【应该在 load() 就报出来】✓；走到这里说明是手工构造的 runner ✓")
         cols = self.host_tab.cols
         h = struct.unpack("<%df" % (len(hidden_bytes) // 4),
                           hidden_bytes[:(len(hidden_bytes) // 4) * 4])
