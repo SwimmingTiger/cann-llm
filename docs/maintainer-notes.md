@@ -7974,3 +7974,53 @@ hiai ⇒ 7 处（libsec_shared 5 + 引擎 2）⇒ ★成功 7 / 跳过 0 / 等 0
 nnrt ⇒ 6 处（libsec_shared 5 + ir 1）  ⇒ ★成功 6 / 跳过 0 / 等 0★ ✓（ir 现在能预载上了 ✓）
 未设/未知 ⇒ 8 处（全表 = 旧行为 ✓ 安全回退）
 ```
+
+## 146. ★★★跑通「厂商离线模型 → .ms → NNRt/NPU」：权重内联的 .om 是关键；小模型已在 NPU 上 Build+Predict 成功★★★
+
+### 146.1 结论（本轮实测 ✓）
+
+```
+★流水线（唯一可行的那条）★：
+   ① ONNX【权重内联】（不要外置 .weights ✗）
+   ② OMG  --target=om（★不要 --save_weights_as_external_data✗★）⇒ seg.om（权重随图 ✓）
+   ③ 源码编译的 converter_lite --fmk=THIRDPARTY + [third_party_model] 配置 ⇒ <name>.ms
+   ④ 设备侧 OH_AI（MindSpore Lite NDK）+ NNRt(devicetype=60) ⇒ Build + Predict ✓
+★实测对照★：
+   · tiny（16.779 MB，权重内联 ✓）：NNRt ⇒ ★BuildFromFile=0 · ModelPredict=0 ✓★（NPU 上跑通 ✓）
+   · 我们的 L4（937.7 MB，权重内联 ✓）：NNRt ⇒ -1 ✗（CPU ⇒ 0 ✓）⇒ ★模型侧问题✗，非流水线 ✓★
+   · 反例（指南 §6 早就记录 ✓ 我复现了 ✗）：把【厂商 LLM 引擎用的 .omc + 外挂 SubGraph_0.weight】
+     包成 .ms ⇒ 转换 SUCCESS 但设备 Build -1 ✗（因为 .omc 只有图、权重外挂 ✓ 且是给引擎用的 ✓）
+```
+
+### 146.2 在 hu60tx 上构建 THIRDPARTY 转换器（配方 + 本轮踩的坑 ✓）
+
+```
+① 源码：git clone --depth 1 https://gitcode.com/openharmony/third_party_mindspore.git（379 MB ✓）
+   ★实际布局 mindspore-src/source/mindspore-lite★（配方里的 <MSLITE_SRC>/mindspore-lite 是占位符 ✗）
+② 容器：debian:12（cmake 3.25.1 · gcc 12.2 ✓ 配方的组合 ✓）
+   挂载：~/q38/third_party_mindspore → /src；★后来补挂 ~/q38 → /q38★（否则容器看不到 OMG 产物 ✓）
+   依赖：build-essential cmake python3 python3-dev python3-numpy python3-yaml python-is-python3 …
+   ★重建容器后必须补 python3-dev★（否则运行时缺 libpython3.11.so.1.0 ✗）
+③ 补丁：cmake/compile_link_option.cmake 里 -Werror → -Wno-error ✓（留 .bak ✓）
+④ 构建：cmake … -DCMAKE_INSTALL_PREFIX=/src/output/tmp -DPLATFORM_X86_64=on -DMSLITE_ENABLE_TRAIN=off
+        echo <sha> > build/.commit_id ; cmake --build . --target install -- -j8
+   ★install 最后失败✗★：`file INSTALL cannot find …/minddata/libminddata-lite.so`
+     ⇒ 与配方说的 .commit_id 坑不同 ✓ 但同样**无害** ✓：converter_lite 已经编好了 ✓
+   产物在【构建树】里：/src/build/tools/converter/converter_lite/converter_lite ✓
+⑤ 运行它需要把【所有含 .so 的目录】都加进 LD_LIBRARY_PATH ✓（含 .mslib/*/lib 那一堆 ✓
+   以及 /usr/lib/x86_64-linux-gnu 提供 libpython3.11 ✓）
+★另一个坑★：容器里生成的 .ms 属主是 root ✗ ⇒ 宿主机读不到 ⇒ `docker exec … chmod 644` ✓（配方也提过 ✓）
+★还有一个坑（我自己踩的 ✗）★：OMG 用【修过 dtype 的 ONNX】会失败 ✗（rc=1 只说"看预检报告"）
+   ⇒ 改用【原始 ONNX】⇒ rc=0 ✓。而 dtype 修复对 THIRDPARTY 路线【无关】✓（它不喂 ONNX 给转换器 ✓）
+```
+
+### 146.3 下一问：我们的 L4 为什么上不了 NPU（模型侧 ✗）
+
+```
+排除项 ✓：流水线 ✓（tiny 同管线在 NPU SUCCESS ✓）· 权重内联 ✓ · 配置 IO 正确 ✓（CPU 报 11 入/9 出 ✓）
+可疑项 ✗：① 体积（937 MB 厂商模型 ⇒ 可能撞 NNRt 的认证/RAM 上限 ✓ §123 记过该机制 ✓）
+        ② 算子（OMG 日志里有 "BroadcastTo … not supported in npucl store" ✗ ⇒ NPU 侧要回退 ✗
+           而 NNRt 的 NPU 路径可能不接受含回退算子的模型 ✗）
+        ③ 状态张量多（11 入/9 出，含 8 个 past_* ✓）
+★下一步★：按①/②二分 —— 编 1 层 / 更短 seq / 去掉 BroadcastTo 的版本逐个上设备试 ✓
+```
