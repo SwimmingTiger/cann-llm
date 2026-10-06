@@ -8441,3 +8441,55 @@ hilog 真因：
 ② 4 层 Predict 的执行期分配（weightSize:0 + DMA ✗）：等 `--large-mem` 可用后再试 ✓
 ③ 保底：hiai/cann 引擎路线（13.3 tok/s ✓）始终可用 ✓
 ```
+
+## 154. 分段路线就绪（8 段全部 Build/load ✓）；剩下的墙很干净：**NPU 执行**（小模型能跑，我们的图不能）
+
+### 154.1 本轮打通的部分（全部实测 ✓）
+
+```
+① 导出器分段修复 ✓（已提交）：
+   qwen3_5 是 18 线性 + 6 全注意力混合层 ✓ ⇒ 段起点落在全注意力层（3/7/11/15/19/23）时
+   原代码硬取 layers[0].linear_attn ✗ 会崩 ⇒ 改为"段内第一个线性层" ✓
+② ★24 层切 8 段（每段 3 层 · 680.6 MB ✓）★：8/8 段 OMG rc=0 ✓ → THIRDPARTY 转 .ms 8/8 SUCCESS ✓
+   ⇒ 每段 680 MB ✓ 落在"已证可加载"的 4 层 937 MB 以内 ✓
+③ ★设备侧逐段 load 成功✓★：seg0（706 MB）load 用时 ★3.0s★ ✓ 7 入 / 7 出 ✓
+   SegmentedLlmRunner.load() 也能把 8 段全部加载 ✓（此前卡在末段命名 ✗，见 154.3）
+④ 传输：5.2 GB 布局（seg0..seg7 + tokenizer.json ✓）已到设备 ✓
+⑤ ★CPU 侧 predict rc = 0 ✓★ ⇒ ★我们的管线（load / 填输入 / predict / 读输出）完全正确✓★
+```
+
+### 154.2 ★剩下的唯一墙：NPU 执行✓★（两个对照把责任划得很清楚）
+
+```
+★ch400（401 节点纯 MatMul 链 ✓）NPU predict ★rc = 0 ✓★ ⇒ 设备与 NPU 环境正常 ✓
+★我们的图（1 层 235 MB ✓ / 段 706 MB ✓ / 4 层 937 MB ✓）NPU predict 一律 -1 ✗★
+hilog：`HIAI_HCL_ModelManager_RunV3 failed` → `OH_NNExecutor_RunSync failed` → Predict -1 ✗
+⇒ ★能建图 ✓ 能加载 ✓ CPU 能跑 ✓，就是【NPU 执行】不行✗★ —— 与尺寸无关 ✗（706 MB 段同样失败 ✓）
+   `weightSize:0` 也出现在能跑的 ch400 上 ✗ ⇒ 它不是判据 ✓
+   `dma_heap_alloc SetBufferName failed, errno 9` 只在我们的图上出现 ✓ ⇒ 仍是最像的原因 ✓
+```
+
+### 154.3 顺带修掉两个仓库侧假设（已提交 ✓）
+
+```
+① 首段输入名 `input_ids` 写死 ✗ ⇒ 支持 `input_embed`（qwen3_5 段图从 embedding 开始 ✓，与 nnrt_llm 同思路 ✓）
+   实测：seg0 load 成功 ✓（first_is_token=False ✓）
+② `_Seg.run` 硬写 `position_ids` ✗ ⇒ 纯线性注意力段没有该输入 ✓ 改为按需写 ✓
+   （修后 run 能走到真正的 OH_AI_ModelPredict ✓）
+③ 末段命名：我们的段输出 `hidden_states` ✗ 而非 `lm_logits` ✓（词表头在主机侧 ✓
+   与 gemma4 的 Gemma4SegRunner 同思路 ✓：主机侧 embed_tokens + 分块 lm_head ✓）
+   ⇒ 要真跑起来需要写一个 qwen3_5 版的 SegRunner（模板：gemma4_runner.py ✓）
+```
+
+### 154.4 下一步（按代价排序 ✓）
+
+```
+① ★NPU 执行这一关★：优先查 `dma_heap_alloc SetBufferName failed, errno 9`（EBADF）——
+   它是唯一"我们特有、ch400 没有"的信号 ✓；对应到设备侧 DMA 堆权限/资源 ✓
+   （若能定位到具体 ioctl/节点 ✓ ⇒ 也许有配置或调用方式的差异 ✓）
+② `--large-mem`：本环境 lldb 接不上 ✗（gdbserver 手动可 attach ✓，问题在 lldb→gdbserver ✓）
+   ⇒ 用户上次能跑（hiai/cann ✓）⇒ 值得再查调用方式 ✓（但本次失败不像内存问题 ✗）
+③ 写 qwen3_5 版 SegRunner（主机侧 embed + lm_head 分块 ✓ 模板 gemma4_runner.py ✓）
+   ⇒ 才能做"整链 generate 一个 token" ✓
+④ 保底：hiai/cann 引擎（13.3 tok/s ✓）
+```
