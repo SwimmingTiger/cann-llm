@@ -7798,3 +7798,71 @@ OH_NNModel_GetAvailableOperations(model, deviceID, const bool **isSupported, uin
    · 一整套 NNRt 实测经验（API 坑 5 条 ✓ 参数必须是带 type 的秩0张量 ✓ 后端=HCL ✓ …）
    · docs/maintainer-notes.md §1~§142 全部实测记录 ✓
 ```
+
+## 143. ★★hiai 后端 --large-mem 的真实天花板：引擎自带 securec 克隆（IDA 反编译确认）★★
+
+### 143.1 起因：用户在 hiai 后端跑 --large-mem 的实测日志
+
+```
+[large-mem] ✓ libsec_shared.z.so +0x03E50 / +0x051DC / +0x05138 三处已就位
+[large-mem] 补丁结果：成功 3 / 跳过 0 / ★等模块加载 1★（共 4 处）
+[large-mem] 断点已挂起（等 libmindspore_lite_ndk.so 加载后自动生效）
+⇒ 追问：hiai 路径到底加载了哪些库？还有没有别的要补的？
+```
+
+### 143.2 从运行中进程取证（/proc/<pid>/maps ✓ 339 个库）
+
+```
+★AI 栈（真干活的）★：
+   libhiai_llm_engine.so（backends/hiai.py 的 HIAI_LIB ✓）
+   libneural_network_core.so · libhiai_hcl_service_2.0/2.1.z.so ·
+   libhiai_kernel_executor_service_2.0.z.so · libhiai_nn_proxy_2.0/2.1.z.so ·
+   libai_fmk_* · libai_npucore_* · libai_infra_* · libnpu_ai_fmk_om.so · libgraph.so · …
+   /system/lib64/chipset-sdk-sp/libsec_shared.z.so ✓（3 处补丁打在这里 ✓）
+★★没加载的（关键）★★：
+   ✗ libhiai_ir.so        ⇒ 补丁表第 1 处（+0xC16EC）在 hiai 路径上【是死代码】✗
+   ✗ libmindspore_lite_ndk.so ⇒ 断点 OH_AI_ModelBuildFromFile 永不命中
+     ⇒ ★pending 补丁唯一的重试入口（on_build 回调）在 hiai 路径上永不触发★ ✗
+   ✗ libcann_llm_engine.so（CANN 后端才用）
+```
+
+### 143.3 ★IDA Pro 9.3 反编译确认（x570 + hexarm，库 sha256 与设备一致 ✓）★
+
+```
+用"已知门的字节片段"做签名扫描 253 个可读库 ⇒ 严格命中只有 libsec_shared（已覆盖 ✓）
+但在 libhiai_llm_engine.so 里发现同源克隆 ⇒ 上 IDA 反编译确认：
+
+  sub_3057E8(dest, destMax, src, count)      ← 0x3057F0 所在
+     0x3057EC  lsr x8, x1, #31
+     0x3057F0  cbnz x8            ★2 GiB 门★   原字节 e8 02 00 b5
+     伪代码：if (n - 0x80000000 >= 0xFFFFFFFF80000001) { … } else return ★34★;（34 = ERANGE）
+     ⇒ securec memcpy_s 克隆 ✓
+  sub_3058F4(s, n, c, destMax)               ← 0x305910 所在
+     0x30590C  lsr x9, x8, #31 → 0x305910 cbnz x9   原字节 69 01 00 b5
+     伪代码：if (!s || n >> 31 || a4 > n) { … else return 34; }
+     ⇒ securec memset_s 克隆 ✓
+★同源证据★：sub_3057E8 与 libsec_shared 的 memcpy_s 门前后 64 字节里 ★50 字节逐字节相同★，
+   差异只在寄存器分配（x9/x8 ↔ x8/x1）⇒ 同一份 securec 源码编出来的 ✓
+★同族但无关的 4 个★：sub_305AB0 / sub_305C50 / sub_307A10 / sub_308FEC 是字符串族
+   （strcpy_s / sprintf_s 类，判据 a2 - 0x80000000 直接算术比较 ⇒ 我按 lsr 扫不到 ✓）——与权重无关 ✓
+★判别式★：伪代码含 ★0xFFFFFFFF80000001★ 惯用法 ⇒ 一次找出全部 7 个 securec 族函数 ✓
+```
+
+### 143.4 落地改动（4 处）
+
+```
+① src/cann_llm/large_mem.py PATCHES += 2 条（libhiai_llm_engine.so +0x3057F0 / +0x305910 ⇒ nop ✓）
+② PRELOAD_LIBS += "libhiai_llm_engine.so"（否则 attach 时它还没 dlopen ⇒ 永远补不上 ✗）
+③ src/cann_llm/backends/hiai.py：在 `ctypes.CDLL(lib_path…)` 之前调用 large_mem.rendezvous()
+   —— 这是 hiai 后端第一次接上"报到—等放行" ✓（与 nnrt/gemma4 同一套 ✓ 零开销 ✓）
+④ tests/test_large_mem.py：3 条新测试（两处门的精确字节/偏移 ✓ 预载清单 ✓
+   hiai.py 里 rendezvous 在加载引擎之前 ✓）；旧断言按新事实更新（4→6 处补丁、3→5 处 nop ✓）
+★验证★：全套 tests 254 passed / 8 skipped ✓；未设环境变量时 rendezvous() 立即返回 False ✓
+```
+
+### 143.5 用户下次重启后会看到
+
+```
+成功 5 / 跳过 0 / 等模块加载 1（那 1 处是 libhiai_ir.so —— hiai 路径永远不加载它 ✓ 无害）
+⇒ 权重拷贝（SubGraph_0.weight 4.4 GB）经过的两个内存族 securec 门都被打开 ✓
+```

@@ -333,6 +333,14 @@ class _HiaiBindings:
         if not os.path.exists(lib_path):
             raise BackendUnavailableError(
                 f"找不到内部引擎 {lib_path}；这个后端需要鸿蒙设备上的系统库")
+        # ★--large-mem：加载引擎【之前】先"报到—等放行"★（没设环境变量时零开销 ✓）
+        #   为什么必须在 CDLL 之前：
+        #     ① libhiai_llm_engine.so 自己静态链入了一份 securec（destMax ≥ 2 GiB ⇒ ERANGE），
+        #        hiai 后端只加载它、**不加载** libhiai_ir.so ⇒ 那两处补丁必须落在本库上 ✓
+        #     ② lldb 侧是在 attach 时就打补丁的 ⇒ 本库要先 dlopen 起来才补得到 ✓
+        #   顺序见 cann_llm.large_mem.rendezvous：先预载补丁目标库，再等 lldb 放行 ✓
+        from ..large_mem import rendezvous as _large_mem_rendezvous
+        _large_mem_rendezvous()
         try:
             self.lib = ctypes.CDLL(lib_path, mode=ctypes.RTLD_LOCAL)
         except OSError as e:

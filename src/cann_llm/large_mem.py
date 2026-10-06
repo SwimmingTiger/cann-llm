@@ -85,6 +85,28 @@ PATCHES: Tuple[LargeMemPatch, ...] = (
         "★极性相反★：它是 b.hs 跳向【正常】路径（0x5150），nop 反而会掉进 ERANGE ✗ "
         "⇒ 必须改成无条件跳转 b 0x5150 ✓",
     ),
+    # ---- 下面两处：hiai 后端（引擎自带 securec 克隆）★2026-10-06 新增★
+    # ★为什么必须加★：hiai 后端只加载 libhiai_llm_engine.so，**不加载** libhiai_ir.so
+    #   ⇒ 上面第一条对它是死代码 ✗；而引擎自己静态链入了一份 securec，
+    #   权力缓冲（SubGraph_0.weight 4.4 GB）就是走它拷的 ⇒ 它才是这条路径的真天花板 ✓
+    # 证据：/proc/<pid>/maps 339 个库；IDA Pro 9.3 + hexarm 反编译；与设备库 sha256 一致 ✓
+    LargeMemPatch(
+        "libhiai_llm_engine.so", 0x3057F0,
+        b"\xe8\x02\x00\xb5", b"\x1f\x20\x03\xd5",
+        "securec memcpy_s（静态链入引擎 —— hiai 后端真正在用的拷贝）",
+        "★IDA 反编译确认★ 函数 sub_3057E8(dest, destMax, src, count)："
+        "0x3057EC `lsr x8, x1, #31` → 0x3057F0 `cbnz x8`；伪代码 "
+        "`if (n - 0x80000000 >= 0xFFFFFFFF80000001) … return 34;`（34 = ERANGE ✓）"
+        "⇒ 与 libsec_shared 的 memcpy_s 同源（门前后 64 字节里 50 字节逐字节相同，仅寄存器分配不同）✓",
+    ),
+    LargeMemPatch(
+        "libhiai_llm_engine.so", 0x305910,
+        b"\x69\x01\x00\xb5", b"\x1f\x20\x03\xd5",
+        "securec memset_s（静态链入引擎）",
+        "同源确认：sub_3058F4(s, n, c, destMax) 的伪代码 "
+        "`if (!s || n >> 31 || …) { … else return 34; }`；"
+        "0x30590C `lsr x9, x8, #31` → 0x305910 `cbnz x9` ✓",
+    ),
 )
 
 #: lldb 侧脚本名（与 `large_mem_lldb.py` 同目录）
@@ -106,10 +128,11 @@ RENDEZVOUS_ENV = "CANN_LLM_LARGE_MEM_RENDEZVOUS"
 WAIT_ENV = "CANN_LLM_LARGE_MEM_WAIT"
 
 #: 报到前先 dlopen 的库
-#: ★为什么★：`libhiai_ir.so` 在 nnrt 路径下是**第一次 build 中途**才加载的，
-#:   于是那一处补丁赶不上这次 build ✗（只有 libsec_shared 那三处赶得上）。
-#:   先把它拉起来 ⇒ 4 处一次到位 ✓（§40.7 的遗留短板）
-PRELOAD_LIBS = ("libhiai_ir.so", "libsec_shared.z.so")
+#: ★为什么★：这些库在补丁时刻可能还没加载 ——
+#:   · `libhiai_ir.so`：nnrt 路径下**第一次 build 中途**才加载 ⇒ 那一处赶不上 ✗
+#:   · `libhiai_llm_engine.so`：hiai 后端在 attach 之后才 dlopen ⇒ 引擎里那两处赶不上 ✗
+#:   先拉起来 ⇒ 补丁一次到位 ✓（§40.7 与 2026-10-06 hiai 实测的遗留短板）
+PRELOAD_LIBS = ("libhiai_ir.so", "libsec_shared.z.so", "libhiai_llm_engine.so")
 
 _rendezvous_done = False
 

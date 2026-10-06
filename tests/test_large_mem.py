@@ -31,16 +31,23 @@ def _script_wrapper():
 
 class TestPatchTable(unittest.TestCase):
     def test_shape(self):
-        self.assertEqual(len(large_mem.PATCHES), 4)
+        self.assertEqual(len(large_mem.PATCHES), 6)
         for p in large_mem.PATCHES:
             self.assertEqual(len(p.expect), 4, p.what)
             self.assertEqual(len(p.patch), 4, p.what)
             self.assertNotEqual(p.expect, p.patch, p.what)
             self.assertTrue(p.module.endswith(".so"), p.module)
 
-    def test_modules_are_the_two_we_know(self):
+    def test_modules_are_the_three_we_know(self):
+        """★2026-10-06 更新：多了 libhiai_llm_engine.so★
+
+        原因（IDA 反编译确认，见 docs/maintainer-notes.md）：
+        hiai 后端只加载 libhiai_llm_engine.so，**不加载** libhiai_ir.so
+        ⇒ 引擎自己静态链入的 securec 才是这条路径的真天花板 ✓
+        """
         mods = {p.module for p in large_mem.PATCHES}
-        self.assertEqual(mods, {"libhiai_ir.so", "libsec_shared.z.so"})
+        self.assertEqual(mods, {"libhiai_ir.so", "libsec_shared.z.so",
+                                "libhiai_llm_engine.so"})
 
     def test_offsets_unique_per_module(self):
         seen = set()
@@ -50,9 +57,9 @@ class TestPatchTable(unittest.TestCase):
             seen.add(key)
 
     def test_nop_patches(self):
-        """三处「跳向错误路径」的 cbnz ⇒ nop 即可。"""
+        """五处「跳向错误路径」的 cbnz ⇒ nop 即可（引擎里那两处同处理 ✓）。"""
         nops = [p for p in large_mem.PATCHES if p.patch == NOP]
-        self.assertEqual(len(nops), 3)
+        self.assertEqual(len(nops), 5)
 
     def test_memmove_patch_is_branch_not_nop(self):
         """★memmove_s 极性相反：必须是无条件跳转，不能是 nop★"""
@@ -83,6 +90,40 @@ class TestPatchTable(unittest.TestCase):
         joined = "\n".join(lines)
         self.assertIn("libhiai_ir.so", joined)
         self.assertIn("libsec_shared.z.so", joined)
+        self.assertIn("libhiai_llm_engine.so", joined)
+
+
+class TestHiaiEngineGates(unittest.TestCase):
+    """★hiai 路径的 securec 克隆（2026-10-06 IDA 反编译确认）★
+
+    证据链：/proc/<pid>/maps（hiai 只加载 libhiai_llm_engine.so ✗ 无 libhiai_ir.so）
+      → x570 上 IDA Pro 9.3 + hexarm 反编译 sub_3057E8/sub_3058F4
+      → 伪代码含 `n - 0x80000000 >= 0xFFFFFFFF80000001 … return 34`（34 = ERANGE）
+      → 与 libsec_shared 的 memcpy_s 门 64 字节里 50 字节逐字节相同（同源 ✓）
+    """
+
+    def test_two_engine_gates_with_confirmed_bytes(self):
+        eng = {p.offset: p for p in large_mem.PATCHES
+               if p.module == "libhiai_llm_engine.so"}
+        self.assertEqual(set(eng), {0x3057F0, 0x305910})
+        self.assertEqual(eng[0x3057F0].expect, b"\xe8\x02\x00\xb5")   # cbnz x8
+        self.assertEqual(eng[0x305910].expect, b"\x69\x01\x00\xb5")   # cbnz x9
+        for p in eng.values():
+            self.assertEqual(p.patch, NOP, p.what)
+
+    def test_engine_lib_is_preloaded(self):
+        """★必须预载★：否则 attach 时补丁目标还没 dlopen ⇒ 那两处永远补不上 ✗"""
+        self.assertIn("libhiai_llm_engine.so", large_mem.PRELOAD_LIBS)
+        self.assertIn("libhiai_ir.so", large_mem.PRELOAD_LIBS)
+        self.assertIn("libsec_shared.z.so", large_mem.PRELOAD_LIBS)
+
+    def test_hiai_backend_reports_in_before_loading_engine(self):
+        """hiai.py 必须在 `ctypes.CDLL(` 引擎【之前】调用 rendezvous ✓"""
+        src = open(os.path.join(os.path.dirname(__file__), "..", "src", "cann_llm",
+                                "backends", "hiai.py"), encoding="utf-8").read()
+        i = src.index("_large_mem_rendezvous()")
+        j = src.index("ctypes.CDLL(lib_path")
+        self.assertLess(i, j, "rendezvous 必须在加载引擎之前调用 ✗")
 
 
 class TestStripFlag(unittest.TestCase):
