@@ -69,7 +69,12 @@ def main() -> int:
         tc.layer_types = list(tc.layer_types)[_start:_stop]
         print("SEGMENT: layers[%d:%d] ⇒ 本段 %d 层 ✓" % (_start, _stop, len(model.model.layers)))
     tc.kv_cache_max_len = args.kv_len
-    _w = model.model.layers[0].linear_attn.in_proj_qkv.weight
+    # ★取指纹要挑【线性注意力层】★（qwen3_5 是 18 线性 + 6 全注意力混合 ✓）
+    #   原来硬取 layers[0] ✗ ⇒ 分段起点落在全注意力层（层 3/7/11/15/19/23 ✓）时就崩 ✗
+    #   `AttributeError: 'Qwen3_5DecoderLayer' object has no attribute 'linear_attn'`（§153 实测 ✓）
+    _lin = next((l for l in model.model.layers if hasattr(l, "linear_attn")), None)
+    assert _lin is not None, "本段没有线性注意力层 ✗（改取指纹的方式 ✓）"
+    _w = _lin.linear_attn.in_proj_qkv.weight
     print("FINGERPRINT in_proj_qkv |sum|=%.6f shape=%s dtype=%s" % (float(_w.abs().sum()), tuple(_w.shape), _w.dtype))
 
     N.install(M)          # delta rule 3 维化 ✓
