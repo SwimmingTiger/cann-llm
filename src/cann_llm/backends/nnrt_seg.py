@@ -102,7 +102,10 @@ class _Seg:
     def run(self, hidden: bytes, pos: int, kv_len: int) -> bytes:
         """跑一段：hidden 是 token id（首段）或上一段的 hidden；返回本段输出字节。"""
         self._put(self.hidden_name, hidden)
-        self._put("position_ids", struct.pack("<i", pos))
+        # ★按需写★：纯线性注意力层组成的段【没有】position_ids / attention_mask ✓
+        #   （线性层的状态走 conv/KV 槽 ✓ 不需要 RoPE 位置与掩码 ✓ —— §153 实测 seg0 就是这样 ✓）
+        if "position_ids" in self.ins:
+            self._put("position_ids", struct.pack("<i", pos))
         if "new_kv_cache_pos" in self.ins:
             self._put("new_kv_cache_pos", struct.pack("<i", pos))
         if self.mask_elems:
