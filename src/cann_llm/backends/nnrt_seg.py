@@ -63,7 +63,12 @@ class _Seg:
             self.kv_names.append(("past_value_in%d" % i, "past_value%d" % i))
         if self.kv_names:
             self.kv_elems = ins[self.kv_names[0][0]][3]
-        self.kv = [bytearray(self.kv_elems * 4) for _ in self.kv_names]
+        # ★每个槽按【各自的】元素数处理★✓（§159.3 ✓）：
+        #   qwen3_5 线性层的 key / value 槽【不等长】✗（实测 past_key_in0=18432 vs
+        #   past_value_in0=262144 ✓）—— 原来统一用 key 槽的 elems ✗ ⇒ value 槽只写/读了一小部分 ✗
+        #   （gemma4 的 key/value 等长 ✓ 所以一直没暴露 ✓）
+        self.kv_elems_list = [ins[k][3] for k, _ in self.kv_names]
+        self.kv = [bytearray(n * 4) for n in self.kv_elems_list]
         # ★首段输入名★（§153 适配 ✓）：
         #   · gemma4 式：首段在【设备上】做 embedding ⇒ 输入名 input_ids，喂 token id ✓
         #   · qwen3_5 式：段图从 embedding 开始（主机侧算 embedding ✓ 与 nnrt_llm 同思路 ✓）
@@ -99,15 +104,28 @@ class _Seg:
             raise GenerationError("拿不到输入 %s 的数据指针" % name)
         ctypes.memmove(p, data, len(data))
 
+    def _put_ints(self, name: str, first: int, n: int) -> None:
+        """把整型张量【整宽】写满 ✓：第 0 位给 first ✓ 其余补 0 ✓。
+
+        ★为什么必须整宽★：图输入是 `[1, seq]`（如 [1,64] = 256 字节 ✓），
+        原来只 `struct.pack("<i", pos)` 写 4 字节 ✗ ⇒ 后面 63 个位置保留上次的旧值 ✗
+        ⇒ 行为不确定（同一输入可能给出不同结果 ✗）。§162 修 ✓
+        """
+        dt = self.ins[name][1]
+        if dt == 7:                                          # INT64
+            self._put(name, struct.pack("<%dq" % n, first, *([0] * (n - 1))))
+        else:                                                # INT32（我们的导出 ✓）
+            self._put(name, struct.pack("<%di" % n, first, *([0] * (n - 1))))
+
     def run(self, hidden: bytes, pos: int, kv_len: int) -> bytes:
         """跑一段：hidden 是 token id（首段）或上一段的 hidden；返回本段输出字节。"""
         self._put(self.hidden_name, hidden)
         # ★按需写★：纯线性注意力层组成的段【没有】position_ids / attention_mask ✓
         #   （线性层的状态走 conv/KV 槽 ✓ 不需要 RoPE 位置与掩码 ✓ —— §153 实测 seg0 就是这样 ✓）
         if "position_ids" in self.ins:
-            self._put("position_ids", struct.pack("<i", pos))
+            self._put_ints("position_ids", pos, self.ins["position_ids"][3])
         if "new_kv_cache_pos" in self.ins:
-            self._put("new_kv_cache_pos", struct.pack("<i", pos))
+            self._put_ints("new_kv_cache_pos", pos, self.ins["new_kv_cache_pos"][3])
         if self.mask_elems:
             mask = [_MASK_NEG] * self.mask_elems
             for i in range(min(pos + 1, self.mask_elems)):
@@ -119,8 +137,8 @@ class _Seg:
         for (kin, _), buf in zip(self.kv_names, self.kv):
             self._put(kin, bytes(buf))
         self.be._predict_checked()
-        for (_, kout), buf in zip(self.kv_names, self.kv):
-            buf[:] = self.be._get_output_raw(kout, self.kv_elems * 4)
+        for ((_, kout), buf, n) in zip(self.kv_names, self.kv, self.kv_elems_list):
+            buf[:] = self.be._get_output_raw(kout, n * 4)     # ★按各自的元素数读回✓★（§162 ✓）
         out = self.logits_name if self.is_last else self.hidden_name
         # 末段取 lm_logits；其余段取图的第一个输出（就是 hidden）
         oname = out if (self.is_last and out) else self.be._outputs[0][0]

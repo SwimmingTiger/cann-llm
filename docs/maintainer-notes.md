@@ -8785,3 +8785,75 @@ ONNX(g2_0_low/via ORT) vs Python      : ★余弦 1.000000★ ⇒ 导出忠实 �
    ⇒ hiai/cann 当场核验可用 ✓（25.9 tok/s ✓ §160.4 ✓）
 全程不 push ✓（所有提交都在本地 ✓）
 ```
+
+## 162. ★可运行的 NNRt 模型（交付件）★：Qwen3.8 分 12 段 · 2 层/段
+
+### 162.1 模型目录（设备上 ✓ 自包含 ✓）
+
+```
+<模型目录>/                      ← 例如 models/qwen38_seg_fix（≈6.1 GB）
+    tokenizer.json               ← 分词器（分段 runner 必需 ✓）
+    emb_f16.bin                  ← ★主机侧词表表★（248320×2048 fp16 ≈1017 MB ✓）
+    emb_manifest.json            ← 上面那张表的 shape/dtype 清单 ✓
+    seg0/  seg0.ms               ← 第 0-1 层（≈470 MB ✓）
+    seg1/  seg1.ms               ← 第 2-3 层
+    …                            ← 共 12 段 = 24 层（每段 2 层 ✓）
+    seg11/ seg11.ms              ← 第 22-23 层（末段内做 final norm ✓）
+★每段的权重已内联进 .ms✓★（OMG 用 --weight_merge ✓）⇒ 不需要额外 .weight 文件 ✓
+★词表头在主机侧★✓：Qwen 系 lm_head 与 embed_tokens ★tied★ ⇒ 首段喂 embedding 行、
+  末段只出 hidden，主机侧复用同一张表做投影 ✓（§155/§158 ✓ 实现见 nnrt_seg.py ✓）
+```
+
+### 162.2 跑法（两条都实测通过 ✓）
+
+```sh
+# ① 直接用仓库 CLI（设备上需要设备自带的 python ✓ 见 §152）
+LD_PRELOAD=<uname 兼容 shim> PYTHONPATH=src \
+  /data/service/hnp/bin/python3 -m cann_llm.cli.chat \
+    -b nnrt -d <模型目录> -p "你好" --max-tokens 4 --no-stream
+
+# ② 用仓库自带的启动脚本（会自动报告 python / 引擎 / 模型目录 ✓）
+LD_PRELOAD=<uname 兼容 shim> PYTHON=/data/service/hnp/bin/python3 \
+  sh scripts/start_chat.sh -b nnrt -d <模型目录> -p "你好" --max-tokens 4 --no-stream
+
+# ③ 代码里直接用分段 runner（接口与 NnrtLlmRunner 一致 ✓）
+from cann_llm.backends.nnrt_seg import SegmentedLlmRunner
+r = SegmentedLlmRunner("<模型目录>"); r.load()
+text, ids, stat = r.generate("你好", max_new=4)
+```
+
+### 162.3 实测（设备 ✓）
+
+```
+★跑通✓★：CLI 与 start_chat.sh 都能加载并生成 ✓（start_chat.sh 自报
+   "✓ Python 3.12.8 · ✓ nnrt 引擎 (MindSpore Lite NDK) · ✓ 模型目录" ✓）
+★load 12 段：14.4 s★ ✓
+★速度：4 token 34.6 s（prefill 7183 ms · decode 27351 ms）⇒ ≈8.6 s/步 · 0.12 tok/s✗★
+   慢的主因是【主机侧词表投影】✗：每步要读 1 GB 的 fp16 表做 248320×2048 的 matmul ✓
+   （12 段 NPU 前向本身很快 ✓ 单段 predict 0.1-0.5 s ✓）
+★可复现✓★：同一条命令连跑两次输出逐字相同 ✓（修掉 §162.4 的不确定性后 ✓）
+```
+
+### 162.4 本轮为"能稳定跑"修的两处实现细节（已提交 ✓）
+
+```
+① position_ids / new_kv_cache_pos 原来只写 4 字节 ✗（图输入是 [1,64] int32 = 256 字节 ✓）
+   ⇒ 后面 63 个位置保留上次的旧值 ✗ ⇒ 同一输入可能出不同结果 ✗
+   改为整宽写满 ✓（第 0 位给 pos、其余补 0 ✓）
+② 状态槽原来统一按【key 槽】的元素数读写 ✗，而 qwen3_5 线性层 key/value 槽不等长 ✓
+   （past_key_in0=18432 vs past_value_in0=262144 ✓）⇒ value 槽只处理了一小部分 ✗
+   改为每个槽按各自的元素数 ✓（§159.3 的落地 ✓）
+```
+
+### 162.5 使用须知（重要 ✓）
+
+```
+★输出文本目前不具语义✗★：数值保真受厂商离线工具链所限（§160 ✓ ~0.83 余弦 ✓）
+   ⇒ 本交付件的定位是【NNRt 路线可运行性的实证】✓，不是可用的对话模型 ✓
+   ⇒ 真实推理/对话请用 hiai/cann 路线 ✓（§160.4 ✓ 实测 25.9 tok/s ✓）
+★seq=1 的图在设备上不能编译✗★（CompileGraph → Schedule kernels failed ✓）
+   ⇒ 现方案按固定 seq=64 的图逐 token 推进 ✓（每次只有第 0 行是真实 token ✓
+     其余 63 行是零填充 ⇒ 会污染跨步状态 ✗ —— 这正是文本无意义的原因之一 ✓）
+★规模边界★：单段 470 MB 可执行 ✓ / 706 MB 起不行 ✗（§155 ✓）⇒ 所以是 2 层/段 ✓
+★重建配方★：§154-§159（分段导出 --start/--layers → OMG --weight_merge → THIRDPARTY 转换 ✓）
+```
