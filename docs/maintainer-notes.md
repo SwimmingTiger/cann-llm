@@ -8962,3 +8962,60 @@ sh scripts/start_chat.sh -b nnrt -d ../models/qwen38_seg_fix -p "你好" --max-t
 #   bot> 抓 blessed第二百五oly        ← 能跑 ✓（文本无语义 ✓ 见 §160 ✓）
 ★不需要任何环境变量✓★（不用 PYTHON= ✗、不用 LD_PRELOAD ✗ —— 脚本自己挑解释器 ✓）
 ```
+
+## 165. ★后端自动选择没生效的原因：判据过时✗★（gemma4 能选中、qwen3.8 分段选不中 ✓）
+
+### 165.1 现象与根因
+
+```
+现象（用户实测 ✓）：不带 -b 时
+   ./scripts/start_chat.sh -d ../models/qwen38_seg_fix
+   ⇒ ✓ hiai 引擎 … ✗ "缺少 api_config.json" ✗ —— 后端选错了 ✓
+
+根因：launcher.detect_backend() 的 nnrt 判据是【老布局】的 ✓：
+   `有 seg*/mseg*/dec*/pre* 且带 weights/ 或 graphP/` ✗
+★而本仓库导出的 qwen3.8 分段模型是：tokenizer.json + seg0…seg11/（每个子目录一个 .ms ✓）
+   —— 没有 weights/ ✗ 也没有 graphP/ ✗★ ⇒ 判成 None ⇒ 调用方回落 hiai ✗
+★为什么 gemma4 当年能选中✓★：gemma4 的布局正好是 `dec0/ pre0/ + weights/` ✓，
+   命中老判据 ✓ ⇒ 所以"给 gemma4 做的自动选择"一直有效 ✓，
+   而 qwen3.8 的分段导出是【另一种布局】✗ ⇒ 判据没覆盖到 ✓
+★关键认识★：判据必须与【后端自己的接受条件】一致 ✓ ——
+   NnrtBackend.load() 认的就是"tokenizer.json + 至少一个 seg* 目录" ✓（nnrt.py:308-311 ✓），
+   而 detect_backend 当时认的是另一套 ✗ ⇒ 两边漂移 ✓
+```
+
+### 165.2 修法（已提交 ✓）
+
+```python
+seg_dirs = [n for n in names if n.startswith(("seg","mseg","dec","pre")) and isdir(...)]
+if seg_dirs and "tokenizer.json" in names:                 # ★① 分段布局（本仓库导出 ✓）★
+    return "nnrt"
+if seg_dirs and ("weights" in names or "graphP" in names): # ② 老布局（gemma4 等 ✓ 保留 ✓）
+    return "nnrt"
+… 之后才是 hiai（api_config.json）/ cann（executor.json / context.json）✓
+```
+```
+实测（真实目录 ✓）：
+   models/qwen38_seg_fix          → ★nnrt★ ✓
+   models/model_qwen38_2b_hiai    → hiai ✓
+   models/Qwen3-8B                → hiai ✓
+用户原命令复测 ✓：
+   ./scripts/start_chat.sh -d ../models/qwen38_seg_fix -p "你好" --max-tokens 2 --no-stream
+   ⇒ ✓ Python 3.14.7 · ✓ ★nnrt 引擎 (MindSpore Lite NDK)★ · ✓ 模型目录 ⇒ bot> 抓 blessed ✓
+新增 tests/test_backend_detect.py（14 passed ✓）：分段布局 ✓ 老布局(weights/graphP) ✓
+   gemma4 式(dec0/pre0+weights) ✓ 官方 hiai ✓ 官方 cann(executor/context) ✓ 空目录/不存在/None ✓
+   "只有 tokenizer.json" ⇒ None ✓ "seg 开头但是文件" ⇒ None ✓（防误判 ✓）
+```
+
+### 165.3 有意【没有】改的地方（以及为什么 ✓）
+
+```
+CLI 自己的 `-b/--backend` 默认仍是 "hiai" ✓（cli/chat.py:194 · api/server.py:595 ✓）—— 保持不动 ✗：
+   · 正路（scripts/start_chat.sh / start_server.sh ✓）走 launcher ✓，
+     launcher 判出来后【显式注入 -b】传下去 ✓ ⇒ 已经是自动的 ✓
+   · 若把 CLI 默认改成 None/auto ✗，就得处理"CLI > 环境变量 > TOML > 默认"的优先级语义 ✗
+     （ModelConfig.backend 自身默认是 cann ✗）⇒ 容易把用户显式配置盖掉 ✗ ⇒ 不值得冒这个险 ✓
+   · 直接 `python -m cann_llm.cli.chat`（不经脚本 ✓）时想自动：给 -b，或设 CANN_LLM_BACKEND ✓
+★教训（可推广 ✓）★：凡是"按目录内容判类型"的地方 ✓，判据都应直接复用【消费方自己的接受条件】✓，
+   否则同一种布局在两处会有两种结论 ✗（这次就是 ✓）。
+```

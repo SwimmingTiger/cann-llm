@@ -110,11 +110,18 @@ def detect_backend(model_dir: Optional[str]) -> Optional[str]:
     """★ 按模型目录的内容判断该用哪个后端（用户没显式给 -b 时）★
 
     判据来自各后端真正需要的东西，不是猜：
-      · nnrt —— 本仓库自装配的布局：有段图目录（seg*/mseg*/dec*/pre*）
-                且带 weights/ 或 graphP/；它只吃这些，不吃 api_config.json
+      · nnrt —— 本仓库自装配的布局，★两种都算★：
+          ① 分段布局：`tokenizer.json` + 至少一个 `seg*/mseg*/dec*/pre*` 子目录
+             ★（与 NnrtBackend.load() 的接受条件逐条一致 ✓ —— 它就是这么判的 ✓）★
+          ② 老布局：有段图目录，且带 `weights/` 或 `graphP/`
+        它只吃这些，不吃 api_config.json
       · hiai —— 官方打包布局：有 api_config.json
       · cann —— 官方 OMC 包解压：有 executor.json / context.json
     都不像就返回 None，由调用方回落到默认值 ✓
+
+    ★为什么必须与后端自己的判据一致（§165 ✓）★：这里曾经只认 ② ✗，于是本仓库自己导出的
+    分段模型（`tokenizer.json` + `seg0…seg11/` ✓、没有 weights/ ✗）被判成 None ⇒ 回落 hiai ✗
+    ⇒ 用户不写 `-b nnrt` 就会撞"缺少 api_config.json" ✗（实测踩到 ✓）。
     """
     if not model_dir:
         return None
@@ -122,8 +129,12 @@ def detect_backend(model_dir: Optional[str]) -> Optional[str]:
         names = set(os.listdir(model_dir))
     except OSError:
         return None
-    if any(n.startswith(("seg", "mseg", "dec", "pre")) for n in names) and (
-            "weights" in names or "graphP" in names):
+    seg_dirs = [n for n in names
+                if n.startswith(("seg", "mseg", "dec", "pre"))
+                and os.path.isdir(os.path.join(model_dir, n))]
+    if seg_dirs and "tokenizer.json" in names:                   # ★① 分段布局（本仓库导出 ✓）★
+        return "nnrt"
+    if seg_dirs and ("weights" in names or "graphP" in names):   # ② 老布局 ✓
         return "nnrt"
     if "api_config.json" in names:
         return "hiai"
