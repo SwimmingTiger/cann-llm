@@ -332,7 +332,7 @@ class NnrtBackend(EngineBackend):
         #   顺序见 cann_llm.large_mem.rendezvous：先 dlopen 补丁目标的库，
         #   再等 lldb 打完补丁解锁 —— 这样 4 处补丁赶在这次 build 的权重拷贝之前 ✓
         from ..large_mem import rendezvous as _large_mem_rendezvous
-        _large_mem_rendezvous()
+        _large_mem_rendezvous(preload=("libhiai_ir.so", "libsec_shared.z.so"))
 
         st = lib.OH_AI_ModelBuildFromFile(
             self._model, self._ms_path.encode(), OH_AI_MODELTYPE_MINDIR, self._ctx)

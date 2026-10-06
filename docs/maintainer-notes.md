@@ -7921,3 +7921,56 @@ OH_NNModel_GetAvailableOperations(model, deviceID, const bool **isSupported, uin
 [large-mem] 补丁结果：成功 5 / 跳过 0 / 等模块加载 3（共 8 处）
                  ↑ 那 3 处是 libhiai_ir.so + libhiai_llm_engine.so×2 —— ★CANN 路径不需要它们✓★
 ```
+
+## 145. ★按 `-b/--backend` 选择补丁★（+ 预载按确切路径：修掉 libhiai_ir 永远 pending 的老问题）
+
+### 145.1 动机（用户两次注意到"等模块加载"）
+
+```
+CANN 跑 --large-mem 打印"成功 5 / 等模块加载 3" ✗ —— 那 3 处属于 hiai/nnrt 的库，
+CANN 进程根本不加载 ⇒ 看着像"没补完"，其实是【表里带了别的后端的条目】✓
+⇒ 用户要求：★按 -b 选择需要的补丁★ ✓
+```
+
+### 145.2 顺带查出的真问题：`libhiai_ir.so` 在 platformsdk（不在默认搜索路径 ✗）
+
+```
+设备实测：✗ /system/lib64/libhiai_ir.so
+          ✓ /system/lib64/platformsdk/libhiai_ir.so   ← 真正在这里 ✓
+          （固件镜像里同样在 system/system/lib64/platformsdk/ ✓）
+⇒ 原来的 preload 只 `ctypes.CDLL("libhiai_ir.so")` ⇒ 按名字必然失败 ✗
+  ⇒ 于是 nnrt 路径那处补丁一直显示"等模块加载 1"✗（等 OH_AI 自己按全路径 dlopen ✓）
+★修法★：preload 按候选路径挨个试（名字 → /system/lib64/ → ★platformsdk/★ → chipset-sdk-sp/ →
+  ndk/ → /vendor/lib64/ → /vendor/lib64/passthrough/indirect/ ✓）
+```
+
+### 145.3 落地改动
+
+```
+① large_mem.py
+   · BACKEND_ENV = "CANN_LLM_LARGE_MEM_BACKEND"（launcher 导出、lldb 读取 ✓）
+   · MODULE_BACKENDS：libsec_shared.z.so ⇒ (hiai,cann,nnrt,gemma4) ✓
+                     libhiai_ir.so      ⇒ (nnrt,gemma4) ✓
+                     libhiai_llm_engine.so ⇒ (hiai,) ✓（依据：两个进程的 maps 实测 ✓）
+   · patches_for_backend(backend) ⇒ 过滤；None/未知 ⇒ ★全表安全回退✓★
+   · backend_from_argv(argv)（支持 -b X / --backend X / --backend=X ✓）
+   · preload_targets 按 PRELOAD_DIRS 挨个试路径 ✓
+② large_mem_lldb.py：_table() 改为 patches_for_backend(os.environ.get(BACKEND_ENV)) ✓
+   并打印一行"后端 cann ⇒ 只处理本后端相关的 5 处补丁" ✓
+③ launcher.py / launcher_server.py（3 处调用点）：build_large_mem_argv 之前 env[BACKEND_ENV] = backend ✓
+④ 各后端只预载自己的库（不再互相加载 ✓）：
+     nnrt / gemma4_runner ⇒ ("libhiai_ir.so", "libsec_shared.z.so")
+     hiai                ⇒ ("libsec_shared.z.so", "libhiai_llm_engine.so")
+     cann                ⇒ ("libsec_shared.z.so",)
+⑤ tests +9（TestBackendFilter 8 条 + 各后端预载清单 1 条 ✓）；旧断言改为前缀匹配 ✓
+★验证★：tests/test_large_mem.py 39 passed ✓；★全套 267 passed / 8 skipped ✓★
+```
+
+### 145.4 过滤结果与预期日志
+
+```
+cann ⇒ 5 处（libsec_shared 全部）      ⇒ ★成功 5 / 跳过 0 / 等 0★ ✓
+hiai ⇒ 7 处（libsec_shared 5 + 引擎 2）⇒ ★成功 7 / 跳过 0 / 等 0★ ✓
+nnrt ⇒ 6 处（libsec_shared 5 + ir 1）  ⇒ ★成功 6 / 跳过 0 / 等 0★ ✓（ir 现在能预载上了 ✓）
+未设/未知 ⇒ 8 处（全表 = 旧行为 ✓ 安全回退）
+```

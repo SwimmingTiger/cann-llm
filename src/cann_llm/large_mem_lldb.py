@@ -46,12 +46,20 @@ def _p(*args):
 def _table():
     """拿补丁表；**必须**能从 cann_llm.large_mem 导入（单一来源）。"""
     try:
-        from cann_llm.large_mem import PATCHES
+        from cann_llm.large_mem import BACKEND_ENV, patches_for_backend
     except Exception as exc:              # noqa: BLE001 - 要把原因原样告诉用户
         _p("[large-mem] ✗ 导入补丁表失败：%s" % exc)
         _p("[large-mem]   请设 PYTHONPATH=<仓库根>/src（编排脚本会自动设）")
         return None
-    return PATCHES
+    # ★按后端过滤✓★（launcher 从 -b 得到并导出；没设 ⇒ 全表 = 旧行为 ✓）
+    global _BACKEND_SAID
+    backend = os.environ.get(BACKEND_ENV)
+    table = patches_for_backend(backend)
+    if backend and not _BACKEND_SAID:
+        _BACKEND_SAID = True
+        _p("[large-mem] 后端 %s ⇒ 只处理本后端相关的 %d 处补丁"
+           "（别的后端用的库不会出现在下面的清单里 ✓）" % (backend, len(table)))
+    return table
 
 
 def _module_base(target, name):
@@ -81,6 +89,8 @@ def _write(debugger, addr, data):
     vals = " ".join("0x%02x" % b for b in bytearray(data))
     debugger.HandleCommand("memory write -s 1 0x%x %s" % (addr, vals))
 
+
+_BACKEND_SAID = False
 
 _STATE = {"pending": 0,      # 还有几处"模块没加载"而没补上（模块一加载就重试）
           "patched": False}   # 首次 Build 命中、补丁处理过一次

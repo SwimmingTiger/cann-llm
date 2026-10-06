@@ -35,7 +35,8 @@ from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 __all__ = [
     "LargeMemPatch", "PATCHES", "LLDB_SCRIPT_NAME", "DRIVER_NAME",
-    "RENDEZVOUS_ENV", "WAIT_ENV", "PRELOAD_LIBS",
+    "RENDEZVOUS_ENV", "WAIT_ENV", "PRELOAD_LIBS", "PRELOAD_DIRS",
+    "BACKEND_ENV", "MODULE_BACKENDS", "patches_for_backend", "backend_from_argv",
     "preload_targets", "rendezvous",
     "DEFAULT_LARGE_MEM_PORT", "LIMIT_STOCK", "LIMIT_PATCHED",
     "large_mem_script_path", "large_mem_driver_path", "strip_large_mem",
@@ -154,6 +155,52 @@ WAIT_ENV = "CANN_LLM_LARGE_MEM_WAIT"
 #:   先拉起来 ⇒ 补丁一次到位 ✓（§40.7 与 2026-10-06 hiai 实测的遗留短板）
 PRELOAD_LIBS = ("libhiai_ir.so", "libsec_shared.z.so", "libhiai_llm_engine.so")
 
+#: ★按后端过滤补丁★：launcher 从 `-b/--backend` 得到后端名并导出，lldb 侧只打本后端要的那几条 ✓
+#:   没设时【不过滤】= 打全表（与旧行为一致 ✓ 安全回退 ✓）
+BACKEND_ENV = "CANN_LLM_LARGE_MEM_BACKEND"
+
+#: 每个库属于哪些后端（用于过滤；一个库被多个后端用就都列上 ✓）
+#: ★依据都是实测得到的，不是猜的★：
+#:   · libsec_shared.z.so    —— 共用 securec：hiai/cann 进程 maps 里都有 ✓
+#:   · libhiai_ir.so         —— 只有 nnrt 的 OH_AI 路径按需 dlopen ✓
+#:                              （设备上在 /system/lib64/platformsdk/ ✓ 不在默认搜索路径 ✓）
+#:   · libhiai_llm_engine.so —— 只有 hiai 后端加载 ✓（cann 进程 maps 里没有 ✓）
+MODULE_BACKENDS = {
+    "libsec_shared.z.so": ("hiai", "cann", "nnrt", "gemma4"),
+    "libhiai_ir.so": ("nnrt", "gemma4"),
+    "libhiai_llm_engine.so": ("hiai",),
+}
+
+#: 预载时按这些候选路径挨个试（先按名字，再试常见目录 ✓）
+#:   ★为什么需要★：libhiai_ir.so 在 /system/lib64/platformsdk/，
+#:   不在加载器默认搜索路径里 ⇒ 只按名字 dlopen 必然失败 ⇒ 那处补丁永远"等模块加载" ✗
+PRELOAD_DIRS = ("", "/system/lib64/", "/system/lib64/platformsdk/",
+                "/system/lib64/chipset-sdk-sp/", "/system/lib64/ndk/",
+                "/vendor/lib64/", "/vendor/lib64/passthrough/indirect/")
+
+
+def backend_from_argv(argv) -> "Optional[str]":
+    """从命令行取 ``-b/--backend``；取不到返回 ``None``（调用方据此决定是否过滤 ✓）"""
+    for i, a in enumerate(argv):
+        if a in ("-b", "--backend") and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith("--backend="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def patches_for_backend(backend: "Optional[str]") -> Tuple["LargeMemPatch", ...]:
+    """按后端过滤补丁表 ✓
+
+    ``backend=None``（或某个库里所有条目都不匹配该后端）⇒ 返回**全表**
+    —— 宁可多打（补丁自带原字节校验 ✓ 打不上只会"跳过"），也不要漏打 ✓
+    """
+    if not backend:
+        return PATCHES
+    keep = tuple(p for p in PATCHES
+                 if backend in MODULE_BACKENDS.get(p.module, (backend,)))
+    return keep or PATCHES
+
 _rendezvous_done = False
 
 
@@ -168,11 +215,13 @@ def preload_targets(verbose: bool = True, libs=None) -> List[str]:
     names = tuple(PRELOAD_LIBS if libs is None else libs)
     got = []
     for name in names:
-        try:
-            ctypes.CDLL(name)
-            got.append(name)
-        except OSError:
-            pass
+        for d in PRELOAD_DIRS:                       # ★按候选路径挨个试✓★
+            try:
+                ctypes.CDLL(d + name)
+                got.append(name)
+                break
+            except OSError:
+                continue
     if verbose and got:
         print("[large-mem] 已预加载 %s（让补丁在 attach 时一次到位 ✓）" % "、".join(got),
               flush=True)

@@ -230,7 +230,7 @@ def run_chat(root: str, argv: "List[str]") -> int:
         ensure_model_dir(model_dir, backend)
     # --lldb / --large-mem：本启动器的选项，不属于 chat CLI 的参数，先摘掉
     from .lldb_launch import build_debug_argv, strip_flag
-    from .large_mem import build_large_mem_argv, strip_large_mem
+    from .large_mem import BACKEND_ENV, build_large_mem_argv, strip_large_mem
     rest, want_lldb = strip_flag(rest)
     rest, want_large_mem = strip_large_mem(rest)
     var, lib, kind = pick_engine_lib(backend)
@@ -280,6 +280,9 @@ def run_chat(root: str, argv: "List[str]") -> int:
     if want_large_mem:
         # ★ 大模型补丁：gdbserver + lldb 全自动（不需要人工敲命令）✓
         #   和 --lldb 同时给时以本项为准 —— 它本身就是"带补丁的调试启动"
+        #   ★把后端名导出★ ⇒ lldb 侧只打本后端要的补丁（CANN 就不会再显示
+        #    "等模块加载 3" 那种属于别的后端的条目 ✓）
+        env[BACKEND_ENV] = backend
         argv_lm, hints, err = build_large_mem_argv(
             py, "cann_llm.cli.chat", rest, env)
         if argv_lm is None:

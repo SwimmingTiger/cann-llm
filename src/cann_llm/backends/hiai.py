@@ -340,7 +340,8 @@ class _HiaiBindings:
         #     ② lldb 侧是在 attach 时就打补丁的 ⇒ 本库要先 dlopen 起来才补得到 ✓
         #   顺序见 cann_llm.large_mem.rendezvous：先预载补丁目标库，再等 lldb 放行 ✓
         from ..large_mem import rendezvous as _large_mem_rendezvous
-        _large_mem_rendezvous()
+        _large_mem_rendezvous(preload=("libsec_shared.z.so",
+                                       "libhiai_llm_engine.so"))
         try:
             self.lib = ctypes.CDLL(lib_path, mode=ctypes.RTLD_LOCAL)
         except OSError as e:

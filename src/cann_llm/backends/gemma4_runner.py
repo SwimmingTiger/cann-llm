@@ -137,7 +137,7 @@ class _Mslite:
             m = L.OH_AI_ModelCreate()
             # ★--large-mem：第一次 build 之前"报到—等放行"★（见 cann_llm.large_mem.rendezvous）
             from ..large_mem import rendezvous as _large_mem_rendezvous
-            _large_mem_rendezvous()
+            _large_mem_rendezvous(preload=("libhiai_ir.so", "libsec_shared.z.so"))
             rc = L.OH_AI_ModelBuildFromFile(m, ms.encode(), _MINDIR, ctx)
             if rc == 0:
                 if not hasattr(self, "_id_used"):

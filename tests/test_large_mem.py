@@ -122,7 +122,7 @@ class TestHiaiEngineGates(unittest.TestCase):
         """hiai.py 必须在 `ctypes.CDLL(` 引擎【之前】调用 rendezvous ✓"""
         src = open(os.path.join(os.path.dirname(__file__), "..", "src", "cann_llm",
                                 "backends", "hiai.py"), encoding="utf-8").read()
-        i = src.index("_large_mem_rendezvous()")
+        i = src.index("_large_mem_rendezvous(")
         j = src.index("ctypes.CDLL(lib_path")
         self.assertLess(i, j, "rendezvous 必须在加载引擎之前调用 ✗")
 
@@ -243,14 +243,14 @@ class TestBuildCallsRendezvous(unittest.TestCase):
     def test_nnrt_backend_calls_it_before_build(self):
         src = open(os.path.join(os.path.dirname(__file__), "..", "src", "cann_llm",
                                 "backends", "nnrt.py"), encoding="utf-8").read()
-        i = src.index("_large_mem_rendezvous()")
+        i = src.index("_large_mem_rendezvous(")
         j = src.index("OH_AI_ModelBuildFromFile(")
         self.assertLess(i, j, "rendezvous 必须在 build 之前调用 ✗")
 
     def test_gemma4_runner_calls_it_before_build(self):
         src = open(os.path.join(os.path.dirname(__file__), "..", "src", "cann_llm",
                                 "backends", "gemma4_runner.py"), encoding="utf-8").read()
-        i = src.index("_large_mem_rendezvous()")
+        i = src.index("_large_mem_rendezvous(")
         j = src.index("L.OH_AI_ModelBuildFromFile(")
         self.assertLess(i, j, "rendezvous 必须在 build 之前调用 ✗")
 
@@ -376,3 +376,70 @@ class TestLldbScriptApiUsage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBackendFilter(unittest.TestCase):
+    """★按 `-b/--backend` 选择补丁（2026-10-06）★
+
+    之前的痛点：CANN 跑 --large-mem 会打印"成功 5 / 等模块加载 3"，
+    而那 3 处属于 hiai/nnrt 的库，CANN 进程根本不加载 ⇒ 看着像"没补完" ✗
+    """
+
+    def test_cann_only_shared_securec(self):
+        tbl = large_mem.patches_for_backend("cann")
+        self.assertEqual({p.module for p in tbl}, {"libsec_shared.z.so"})
+        self.assertEqual(len(tbl), 5)
+
+    def test_hiai_gets_engine_and_shared(self):
+        tbl = large_mem.patches_for_backend("hiai")
+        self.assertEqual({p.module for p in tbl},
+                         {"libsec_shared.z.so", "libhiai_llm_engine.so"})
+        self.assertEqual(len(tbl), 7)
+
+    def test_nnrt_gets_ir_and_shared(self):
+        tbl = large_mem.patches_for_backend("nnrt")
+        self.assertEqual({p.module for p in tbl},
+                         {"libsec_shared.z.so", "libhiai_ir.so"})
+        self.assertEqual(len(tbl), 6)
+
+    def test_none_or_unknown_backend_keeps_full_table(self):
+        """★安全回退★：拿不到后端名（或名字不认识）⇒ 打全表，绝不少打 ✓"""
+        self.assertEqual(len(large_mem.patches_for_backend(None)), 8)
+        self.assertEqual(len(large_mem.patches_for_backend("")), 8)
+        self.assertEqual(len(large_mem.patches_for_backend("bogus")), 8)
+
+    def test_backend_from_argv(self):
+        self.assertEqual(large_mem.backend_from_argv(["-b", "cann", "-d", "m"]), "cann")
+        self.assertEqual(large_mem.backend_from_argv(["--backend=hiai"]), "hiai")
+        self.assertEqual(large_mem.backend_from_argv(["-d", "m", "--backend", "nnrt"]), "nnrt")
+        self.assertIsNone(large_mem.backend_from_argv(["-d", "m"]))
+
+    def test_preload_dir_covers_platformsdk(self):
+        """★libhiai_ir.so 在 /system/lib64/platformsdk/★ —— 只按名字 dlopen 会失败 ✗"""
+        self.assertIn("/system/lib64/platformsdk/", large_mem.PRELOAD_DIRS)
+
+    def test_lldb_side_filters_by_backend(self):
+        src = open(os.path.join(os.path.dirname(__file__), "..", "src", "cann_llm",
+                                "large_mem_lldb.py"), encoding="utf-8").read()
+        self.assertIn("patches_for_backend", src)
+        self.assertIn("BACKEND_ENV", src)
+
+    def test_each_backend_preloads_only_its_own_libs(self):
+        """★各后端只预载自己用到的库★（不把 hiai 引擎拉进 nnrt/cann 进程 ✓）"""
+        base = os.path.join(os.path.dirname(__file__), "..", "src", "cann_llm", "backends")
+        want = {
+            "nnrt.py": "libhiai_ir.so",
+            "gemma4_runner.py": "libhiai_ir.so",
+            "hiai.py": "libhiai_llm_engine.so",
+            "cann.py": "libsec_shared.z.so",
+        }
+        for f, key in want.items():
+            src = open(os.path.join(base, f), encoding="utf-8").read()
+            self.assertIn("preload=(", src, f)
+            self.assertIn(key, src, f)
+
+    def test_launchers_export_backend(self):
+        base = os.path.join(os.path.dirname(__file__), "..", "src", "cann_llm")
+        for f in ("launcher.py", "launcher_server.py"):
+            src = open(os.path.join(base, f), encoding="utf-8").read()
+            self.assertIn("BACKEND_ENV", src, f)
