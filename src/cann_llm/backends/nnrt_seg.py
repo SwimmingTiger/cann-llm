@@ -221,21 +221,34 @@ class SegmentedLlmRunner:
             self.vocab = self.host_tab.rows if self.host_tab is not None else 0
 
     def _embed_bytes(self, token_id: int) -> bytes:
-        """首段要 embedding 时：把该 token 的 embedding 行做成图输入字节（fp32 ✓）。"""
+        """首段要 embedding 时：把该 token 的 embedding 行做成图输入字节（fp32 ✓）。
+
+        ★注意★：图输入的宽度是【整段 seq × hidden】✓（S=1 时正好一行 ✓；S=64 时 64 行 ✗）
+        ⇒ 把行放在【第 0 个位置】、其余补零 ✓（S=1 语义完全正确 ✓；S=64 只用于管道验证 ✓，
+          真正的 prefill 应走 chunked 喂入 ✓ 见 §155/§156 ✓）。
+        """
         seg = self.segs[0]
         n = seg.hidden_elems
-        row = self.host_tab.row(token_id)[:n] if self.host_tab is not None else None
-        if row is None:
+        if self.host_tab is None:
             raise GenerationError("首段要 input_embed，但没找到主机侧嵌入表 ✗")
-        return struct.pack("<%df" % n, *[float(x) for x in row])
+        row = self.host_tab.row(token_id)
+        cols = min(len(row), n)
+        buf = [0.0] * n
+        buf[:cols] = [float(x) for x in row[:cols]]
+        return struct.pack("<%df" % n, *buf)
 
     def _head_logits(self, hidden_bytes: bytes) -> List[float]:
-        """末段只吐 hidden 时：主机侧做 lm_head（与 embedding 【tied】⇒ 复用同一张表 ✓）。"""
-        seg = self.segs[-1]
-        n = seg.hidden_elems
-        h = struct.unpack("<%df" % (len(hidden_bytes) // 4), hidden_bytes[:(len(hidden_bytes)//4)*4])
-        h = h[:n]
-        return self.host_tab.matmul(h)
+        """末段只吐 hidden 时：主机侧做 lm_head（与 embedding 【tied】⇒ 复用同一张表 ✓）。
+
+        ★取【最后一个位置】的 hidden★✓：S=1 时就一行 ✓；S=64（整 chunk prefill ✓）时
+        取第 64 个 token 的 hidden ✓ —— 正是下一步 logits 该用的那个 ✓。
+        """
+        if self.host_tab is None:
+            raise GenerationError("末段没有 lm_logits，但没找到主机侧词表 ✓")
+        cols = self.host_tab.cols
+        h = struct.unpack("<%df" % (len(hidden_bytes) // 4),
+                          hidden_bytes[:(len(hidden_bytes) // 4) * 4])
+        return self.host_tab.matmul(list(h[-cols:]))
 
     def step(self, token_id: int, pos: int) -> List[float]:
         first = self.segs[0]
