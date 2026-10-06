@@ -8493,3 +8493,43 @@ hilog：`HIAI_HCL_ModelManager_RunV3 failed` → `OH_NNExecutor_RunSync failed` 
    ⇒ 才能做"整链 generate 一个 token" ✓
 ④ 保底：hiai/cann 引擎（13.3 tok/s ✓）
 ```
+
+## 155. ★★★重大修正：1 层真图在 NPU 上【能执行】（predict rc=0）；边界在 235 MB 与 706 MB 之间 ★★★
+
+### 155.1 修正 §154 的判断（那次只测到"段"这一级 ✗）
+
+```
+★实测★（同一个仓库后端 + 设备 Python + `predict` 全零输入 ✓）：
+   · 1 层真图（S=8·kv=64 · ★235 MB★）⇒ ★OH_AI_ModelPredict rc = 0 ✓★★（该次运行里
+     `SetBufferName failed` 仍出现 2 次 ✗ ⇒ ★它确实是噪声✗★，我上一轮把它当判据是错的 ✓）
+   · 3 层段（706 MB）✗ · 4 层（937 MB）✗ · 24 层（1.33 GB）✗ ⇒ 一律 RunV3 failed ✗
+⇒ ★NPU 执行是【能跑通】的✓★，只是有【尺寸边界】✓（在 235 MB 与 706 MB 之间 ✓）
+   ⇒ 正是用户提示的"内存上限"场景 ✓ ⇒ 出路：① `--large-mem` ✓ ② ★把段切得更小★ ✓
+★同时确认的噪声（别再当判据 ✗）★：`aodHeapFd/npuHugePageHeapFd/snapshopHeapFd/miscHeapFd open failed`
+   在【能跑的 ch400 与 1 层图】里同样出现 ✓；`weightSize:0` 同理 ✓
+★真信号只有★：`dma_heap_alloc SetBufferName failed, errno 9` —— 但它也只在大图上出现 ✓
+   （hmm：1 层那次也出现 2 次 ✗ ⇒ ★它也不是判据✗★ ⇒ 目前没有可靠的 hilog 判据，
+     只能靠【尺寸实验】定边界 ✓）
+```
+
+### 155.2 现在确证的能力矩阵（全部实测 ✓）
+
+```
+能力            1 层(235MB)   3 层(706MB)   4 层(937MB)   24 层(1.33GB)   小链(6.7MB)
+Build 0         ✓             ✓             ✓             ✓               ✓
+load ✓          ✓             ✓             ✓             ✗（大页堆）      ✓
+★NPU predict★   ★rc=0 ✓★      ✗             ✗             —               ✓
+CPU predict     ✓             ✓             —             —               ✓
+```
+
+### 155.3 下一步（明确 ✓）
+
+```
+① ★量边界★：2 层（≈470 MB）能否执行 ✓ —— 已后台启动 ✓
+   ⇒ 若 2 层能 ✓：切 2 层/段（12 段 ✓ 总 5.6 GB ✓）⇒ 立刻可跑整链 ✓
+   ⇒ 若 2 层不能 ✓：切 1 层/段（24 段 × 235 MB ✓ 已证能执行 ✓）⇒ 稳 ✓
+② 同时试 `--large-mem` ✓（用户指示 ✓）：需先解决 lldb 接入 ✗（gdbserver 手动可 attach ✓）
+③ 拿到能执行的段集合后 ⇒ 写 qwen3_5 版 SegRunner（主机侧 embed + 分块 lm_head ✓
+   模板 gemma4_runner.py ✓）⇒ 整链 generate ✓ ⇒ ★真正"在 NPU 上跑起来"✓★
+④ 保底：hiai/cann 引擎（13.3 tok/s ✓；本机 models/Qwen3-8B 与 hu60tx pkg_qwen38_2b 都在 ✓）
+```
