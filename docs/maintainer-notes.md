@@ -8873,10 +8873,17 @@ text, ids, stat = r.generate("你好", max_new=4)
    SubGraph_0.weight 5624.3 MB ✓ qwen38_2b.omc 6.07 MB ✓ qwen38_2b.json ✓ api_config.json ✓
    qwen38_2b_64_2048.embedding_weights 508.6 MB ✓ + dequant_scale 1.0 MB ✓ tokenizer.json 12.8 MB ✓
    （与 hu60tx:~/q38/pkg_qwen38_2b 文件集逐项一致 ✓ ⇒ 不是缺文件 ✗）
-★但它现在【加载失败】✗★：`EngineExecutorImpl::Init, init model fail or load tokenizer fail` ✗
-   而 notes 当年记的跑法是 `start_chat.sh -d models/model_qwen38_2b_hiai ★--large-mem★` ✓
-   ⇒ 该包 5.6 GB > 2 GiB 门槛 ✓ 很可能正是被那道门槛挡住 ✗；而 --large-mem 的 lldb 接入
-     在本环境是坏的 ✗ ⇒ ★这条路线"存在但当前跑不起来"✗★（要跑通需先修 --large-mem ✓）
+★但它现在【加载失败】✗★，且已实测确认【不是那道 2 GiB 门槛】✗：
+   报错链：`pipeline_executor_base.cpp Init(82)::"LoadModelExecutor(pipeLineExecutorInitParams)
+   == hiai::SUCCESS" "false, return FAIL."` → `EngineExecutorImpl::Init, init model fail or
+   load tokenizer fail` ✗ —— ★全程没有任何 securec / 2 GiB / large-mem 相关字样✗★
+   （notes 当年记的跑法是 `start_chat.sh -d models/model_qwen38_2b_hiai --large-mem` ✓，
+     所以这里原先猜想"被门槛挡住" ✗ —— 该猜想已被本次实测推翻 ✓）
+   ⇒ ★更可能是这个包的【形态】问题✓★：本机/hu60tx 上这份是
+     ★6.05 MB 的 .omc + 外置 5624 MB 的 SubGraph_0.weight★ 形态 ✓，
+     而 notes §4484 记过的成品是 ★2753.6 MB 的 .omc（权重内联）★形态 ✓ —— 两者不是同一份 ✓
+   ⇒ ★结论：hiai/cann 跑 Qwen3.8【这条路线存在、但当前这份包跑不起来】✗★；
+     要跑通需重建/修复该包（例如做权重内联的那一版 ✓），而不是修 --large-mem ✓
 ```
 
 ### 163.2 可运行 NNRt 模型的提速（本轮 ✓ 已提交）
