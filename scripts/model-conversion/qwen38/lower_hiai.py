@@ -18,6 +18,11 @@ print("  类型修正：%d 处 int 输入已 Cast→FP32 ✓" % _nf)
 onnx_lower.fix_static_shapes(m, verbose=False)
 if os.path.exists(dst):
     os.unlink(dst)
+# ★外置权重文件也要删★✓：onnx 的 external-data 写入器遇到同名文件会直接报
+#   `FileExistsError: External data file exists in …` ✗ ⇒ 覆盖式重建会失败 ✗（§158 踩到 ✓）
+for _f in (wfile, dst + ".weights"):
+    if os.path.exists(_f):
+        os.unlink(_f)
 onnx.save(m, dst, save_as_external_data=True, all_tensors_to_one_file=True,
           location=wfile, size_threshold=1024)
 print("  已写 %s（外置 %s ✓）" % (dst, wfile))
