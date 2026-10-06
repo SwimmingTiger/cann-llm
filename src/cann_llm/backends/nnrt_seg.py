@@ -147,6 +147,26 @@ class _Seg:
         return self.be._get_output_raw(oname, elems * 4)
 
 
+def _mem_available() -> int:
+    """可回收可用内存（字节 ✓）。
+
+    ★别用 os.sysconf("SC_AVPHYS_PAGES")✗★：它对应 MemFree（设备上实测只有 ≈2.5 GB ✗），
+    而真实可用是 MemAvailable（≈14.6 GB ✓）—— 用前者会让 §163 的常驻 fp32 优化
+    被误判为"内存不够"而静默不生效 ✗（实测踩到 ✓）。
+    """
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    try:
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError, AttributeError):
+        return 0
+
+
 class _HostTable:
     """主机侧 fp16 权重表（mmap ✓ 按行取 / 分块 matmul ✓）。
 
@@ -162,19 +182,44 @@ class _HostTable:
         self.rows, self.cols = int(rows), int(cols)
         self.path = path
         self.mm = _np.memmap(path, dtype=_np.float16, mode="r", shape=(self.rows, self.cols))
+        self._fp32 = None                                # ★常驻 fp32 副本（懒加载 ✓ §163 ✓）★
 
     def row(self, token_id: int):
         return self.mm[token_id % self.rows].astype(self._np.float32)
 
+    def _materialize_fp32(self):
+        """把整张表转成★常驻 fp32★✓（约 2 GB ✓）—— 实测比逐块转换快 ~50× ✓（§163 ✓）。
+
+        逐块 mmap 方案的瓶颈是 fp16→fp32 的【转换】✗（508M 元素 ≈ 1 GB 转换 ⇒ 2.5 s ✗），
+        而转成常驻 fp32 后走 BLAS 只要 0.05 s ✓。内存不够时返回 None ⇒ 回落到分块路径 ✓。
+        """
+        if self._fp32 is not None:
+            return self._fp32
+        np = self._np
+        need = self.rows * self.cols * 4
+        avail = _mem_available()                     # ★用 MemAvailable ✓★
+        if avail and avail < int(need * 1.5):        # ★留 0.5 倍余量✓★（不够就别硬上 ✓）
+            return None
+        try:
+            self._fp32 = np.asarray(self.mm, dtype=np.float32)
+        except MemoryError:
+            self._fp32 = None
+        return self._fp32
+
     def matmul(self, h) -> List[float]:
-        """logits = W @ h ✓（W: [vocab, hidden] fp16 ✓ · h: [hidden] fp32 ✓）分块算 ✓ 省内存 ✓。"""
+        """logits = W @ h ✓（W: [vocab, hidden] ✓ · h: [hidden] fp32 ✓）。
+
+        优先走★常驻 fp32 + BLAS★✓（§163 ✓）；内存不够时回落到 fp16 分块转换 ✓。
+        """
         np = self._np
         x = np.asarray(h, dtype=np.float32).reshape(-1)[: self.cols]
+        W = self._materialize_fp32()
+        if W is not None:
+            return [float(v) for v in (W @ x)]
         out = np.empty(self.rows, dtype=np.float32)
         step = 8192
         for s in range(0, self.rows, step):
-            blk = self.mm[s:s + step].astype(np.float32)
-            out[s:s + step] = blk @ x
+            out[s:s + step] = self.mm[s:s + step].astype(np.float32) @ x
         return [float(v) for v in out]
 
 

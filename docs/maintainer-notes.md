@@ -8857,3 +8857,45 @@ text, ids, stat = r.generate("你好", max_new=4)
 ★规模边界★：单段 470 MB 可执行 ✓ / 706 MB 起不行 ✗（§155 ✓）⇒ 所以是 2 层/段 ✓
 ★重建配方★：§154-§159（分段导出 --start/--layers → OMG --weight_merge → THIRDPARTY 转换 ✓）
 ```
+
+## 163. ★纠正：hiai/cann 那条核验用错了模型★ + 可运行 NNRt 模型的提速（49.0 s → 38.5 s）
+
+### 163.1 ★必须纠正的一处结论（§160.4/§161 的措辞有误）★
+
+```
+★实测身份判据（tokenizer 词表大小 ✓）★：
+   models/Qwen3-8B/                 vocab=★151643★ ⇒ 这是 Qwen3-8B（Qwen3.0 的 8B）✗
+   models/model_qwen38_2b_hiai/     vocab=★248044★ ⇒ ★这才是 Qwen3.8（qwen3_5）★✓
+   models/qwen38_seg*/              vocab=248044  ⇒ 我们的 NNRt 分段目标模型 ✓
+⇒ ★§160.4 那次"hiai 可用（25.9 tok/s）"跑的是 Qwen3-8B ✗ —— 只证明【hiai 引擎能用】✓，
+   并没有证明【Qwen3.8 能走 hiai 跑】✗。此处纠正 ✓★
+★真正的 Qwen3.8 hiai 包（本机 ✓ 完整 ✓）★：models/model_qwen38_2b_hiai/
+   SubGraph_0.weight 5624.3 MB ✓ qwen38_2b.omc 6.07 MB ✓ qwen38_2b.json ✓ api_config.json ✓
+   qwen38_2b_64_2048.embedding_weights 508.6 MB ✓ + dequant_scale 1.0 MB ✓ tokenizer.json 12.8 MB ✓
+   （与 hu60tx:~/q38/pkg_qwen38_2b 文件集逐项一致 ✓ ⇒ 不是缺文件 ✗）
+★但它现在【加载失败】✗★：`EngineExecutorImpl::Init, init model fail or load tokenizer fail` ✗
+   而 notes 当年记的跑法是 `start_chat.sh -d models/model_qwen38_2b_hiai ★--large-mem★` ✓
+   ⇒ 该包 5.6 GB > 2 GiB 门槛 ✓ 很可能正是被那道门槛挡住 ✗；而 --large-mem 的 lldb 接入
+     在本环境是坏的 ✗ ⇒ ★这条路线"存在但当前跑不起来"✗★（要跑通需先修 --large-mem ✓）
+```
+
+### 163.2 可运行 NNRt 模型的提速（本轮 ✓ 已提交）
+
+```
+★瓶颈实测（设备 ✓）★：
+   12 段 NPU 前向    ≈4.4 s/步（6 个含全注意力层的段 ≈0.5 s/段 ✓ 6 个纯线性段 ≈0.1 s/段 ✓）
+   主机侧词表投影     ≈2.5 s/步 ✗（mmap fp16 → 逐块转 fp32 ⇒ 508M 元素转换是瓶颈 ✗）
+★优化①：词表表常驻 fp32 + BLAS✓★ ⇒ ★0.05 s★（快 ~50× ✓，argmax 与分块路径一致 ✓）
+   代价：常驻 2.03 GB 内存 ✓（设备 MemTotal 32 GB · MemAvailable 14.6 GB ✓ 可行 ✓）
+   带内存守卫：可用内存 < 1.5×需求时自动回落分块路径 ✓
+★踩到的坑✓★：守卫最初用 `os.sysconf("SC_AVPHYS_PAGES")` ✗ —— 它对应 MemFree（≈2.5 GB ✗），
+   会把这次优化误判成"内存不够"而静默不生效 ✗（实测第一次改完毫无提速 ✓）；
+   改用 `/proc/meminfo` 的 ★MemAvailable（≈14.6 GB ✓）★ 后生效 ✓
+★端到端效果★：load 12 段 14.0 s ✓；4 token 49.0 s → ★38.5 s★（8.64 → 6.12 s/步 ✓）
+★seq 探路（供后续参考 ✓）★：seq=8 的段图【能编译能跑】✓（rc=0 ✓ 445 MB ✓
+   input_embed [1,8,2048] ✓），但耗时 0.455 s vs seq=64 的 0.51-0.62 s ⇒ ★只快 ~11%✗★
+   ⇒ 那 0.45-0.6 s 是【每调用固定开销】✓，不是 seq 规模 ⇒ ★靠缩 seq 提速收益有限✗★
+   （注：seq=1 仍然【不能编译】✗ ✓ 见 §156.3 ✓）
+★还能做的（未做 ✓）★：① 用 seq=8 全套（约 10% 收益 + 减少填充污染 ✓）；
+   ② 预填充按 64 token 成块喂（长 prompt 才明显 ✓）；③ 进一步压 NPU 每调用开销需厂商侧手段 ✗
+```
