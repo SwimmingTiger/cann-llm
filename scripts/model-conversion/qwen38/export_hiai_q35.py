@@ -88,6 +88,11 @@ def main() -> int:
     print("层型:", layer_types)
     print("heads=%d kv_heads=%d head_dim=%d hidden=%d" % (heads, kv_heads, hd, tc.hidden_size))
 
+    # ★final norm 只在【包含模型最后一层】的段里做★✓（§156 三级对拍定位 ✓）
+    #   原代码无条件做 `_expl_rmsnorm(self.body.norm, hidden)` ✗ ⇒ 中间段把中间 hidden
+    #   也归一化了 ⇒ 与 HF 参考（中间层不做 norm ✓）数值差 ~37× 且方向近乎正交 ✗✗
+    _last_is_final = (_stop >= _total)
+
     class Wrap(torch.nn.Module):
         """官方接口的一版实现 ✓（embedding 可在图内或图外 ✓）。"""
 
@@ -114,7 +119,8 @@ def main() -> int:
                 hidden, new_k, new_v = call_layer(layer, hidden, attention_mask, cos, sin,
                                                   k_slot, v_slot, idx)
                 outs.extend([new_k, new_v])
-            hidden = _expl_rmsnorm(self.body.norm, hidden)   # ★NPU 友好✓★（§118 ✓）
+            if _last_is_final:
+                hidden = _expl_rmsnorm(self.body.norm, hidden)   # ★只在末段做✓★（§118/§156 ✓）
             logits = self.body.embed_tokens.weight.new_zeros(1)  # 占位；--no-embed-head 时不用 ✓
             return (hidden, *outs) if args.no_embed_head else (logits, *outs)
 

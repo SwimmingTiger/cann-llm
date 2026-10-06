@@ -15,7 +15,7 @@ heads, kv_heads, hd = tc.num_attention_heads, tc.num_key_value_heads, 256
 h = torch.randn(B, S, tc.hidden_size)
 pos = torch.arange(S).unsqueeze(0)
 cos, sin = body.rotary_emb(h, pos.unsqueeze(0).expand(3, -1, -1))
-am = torch.ones(B, S, dtype=torch.long)
+am = torch.ones(B, S, dtype=torch.float32)   # ★新版 transformers 要求 float/bool 掩码✓★
 mask_causal = torch.full((B, 1, S, KV), -1e9)
 mask_causal[0, 0, :, :S] = torch.triu(torch.full((S, S), -1e9), 1)
 
