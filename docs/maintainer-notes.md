@@ -8620,3 +8620,46 @@ hu60tx ~/q38env：transformers ★5.18.0★ · torch 2.14.1+cpu · onnx 1.23.1 �
         ② 跑 dbg_layers.py / att_stepwise.py 确认恢复 1e-7 级 ✓
         ③ 用该变体重导 2 层段 ⇒ ORT 对拍 HF（目标余弦 >0.999 ✓）⇒ 再跑 12 段链验 argmax ✓
 ```
+
+## 158. ★★★★★根因找到并修复：RMSNorm 少乘 (1 + weight) —— HF ≈ Python ≈ ONNX ≈ NPU 全线对齐★★★★★
+
+### 158.1 三级对拍最终定位（本轮 ✓）
+
+```
+dbg_linear_steps.py（线性通路逐步）  : ①卷积 2.98e-08 ✓ ③delta 2.96e-09 ✓ ④out_proj 3.76e-07 ✓
+att_stepwise.py（注意力通路逐步）    : ⑤rope 之后 ⇒ ⑩最终输出 全 0.000e+00 ✓
+—— 但这两者都是与【项目自己的手写参考】比 ✗ ⇒ 两边一致地偏离 HF ✗
+★决定性对比★（同一 2 层段 · 同一 64-token 嵌入 · 零状态）：
+   ONNX(ORT) vs Python(npu_layers)：余弦 ★1.000000★ ⇒ ★导出/追踪完全忠实✓★
+   Python(npu_layers) vs HF       ：余弦 ★0.3317★ ✗（范数 1.05 vs 2.71 ✗）
+   ⇒ ★偏差在实现本身，不在导出✗★（推翻上一轮"导出可疑"的猜测 ✓）
+```
+
+### 158.2 根因（读 HF 源码一眼看出 ✓）
+
+```python
+# ★HF: Qwen3_5RMSNorm★
+self.weight = nn.Parameter(torch.zeros(dim))          # ★初始化为 0★
+output = output * ★(1.0 + self.weight.float())★        # ★Llama 式 (1+w)★
+# ★我们原来的 _expl_rmsnorm★
+return x * (v + eps).pow(-0.5) * ★nrm.weight★          # ✗ 少加 1 ⇒ w≈0 时输出被压到 ~0 ✗
+★注★：Qwen3_5RMSNormGated ★不是★这套（weight 初始化为 ones ✓ 前向就是 `weight * x` ✓）⇒ 不动 ✓
+```
+
+### 158.3 修复后实测（hu60tx ✓ 同一组输入 ✓）
+
+```
+Python(npu_layers)：范数 2.7141 · 前 3 [ 0.0514 -0.0124 -0.0962] ✓
+HF(reference)     ：范数 2.7141 · 前 3 [ 0.0514 -0.0124 -0.0962] ✓   ⇒ ★余弦 1.000000★
+重新导出 ONNX(ORT) ：范数 2.7141 · 前 3 [ 0.0514 -0.0124 -0.0962] ✓   ⇒ ★余弦 1.000000★
+⇒ ★HF ≈ Python ≈ ONNX ✓★；此前已证 ★NPU ≈ ONNX ✓★ ⇒ ★★HF ≈ NPU 全线打通★★
+```
+
+### 158.4 下一步（收尾 ✓）
+
+```
+① 用修复版重建 12 段（2 层/段 ✓ 已后台启动 ✓）⇒ 全量拷到设备 ✓
+② 跑 12 段链 ⇒ 与 HF 对拍 argmax（目标一致 ✓）⇒ ★目标达成 ⇒ 标记 complete★
+③ 逐 token 生成仍受 seq=1 不可编译限制 ✗（可用 S=64 chunk prefill 出"下一个 token" ✓）
+④ 保底：hiai/cann 引擎 ✓（13.3 tok/s ✓）
+```
