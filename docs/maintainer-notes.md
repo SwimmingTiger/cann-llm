@@ -8359,3 +8359,35 @@ matmulout  = MatMul(a,w) * Sigmoid(b)⇒ Build 0 ✓
 ★教训★：遇到"漂移的失败节点"要先找【共同祖先特征】（本次：是否 Neg 后代 ✓），
         而不是逐个改形状/秩/常量性 ✓。
 ```
+
+### 152.4 ★端到端打通：用【设备自带 Python】跑仓库后端，4 层真模型在 NPU 上 load 成功✓★
+
+```
+★关键坑（launcher 早就警告过 ✓ 我又踩了一次 ✗）★：
+  仓库自带的 ./python3（glibc 构建 + libmusl_compat 垫片 ✓）在 `ctypes.CDLL(libmindspore_lite_ndk.so)`
+  时 ★直接段错误✗★（栈：nnrt.py:148 _bind → ctypes._load_library ✓）
+  ⇒ ★改用设备自带 /data/service/hnp/bin/python3（3.12.8 ✓）⇒ 一切正常✓★
+  （与 launcher.py 里 `libc_compatible()` 的告警一致 ✓）
+
+实测（models/nnrt_qwen38_l4_nn/qwen38_l4nn.ms · 937.7 MB ✓）：
+   LD_PRELOAD=<libuname.so> PYTHONPATH=src /data/service/hnp/bin/python3 -c '…NnrtBackend(...).load()'
+   ⇒ ★load 成功 ✓★ ModelInfo(backend='nnrt', device='nnrt', 11 入 / 9 出 ✓)
+     in  input_embed [1,64,2048] FP32 · attention_mask [1,1,64,2048] · position_ids [1,64] INT32 ·
+         past_key_in0..3 / past_value_in0..3 [2048,2,1,256] FP32 ✓
+     out hidden_states [1,64,2048] · past_key0..3 / past_value0..3 ✓
+★另记★：examples/mslite-nnrt/mslite_run（探针）在多输出大模型上会段错误 ✗
+  （它按小模型假设读输出 ✓）⇒ 验证 Predict/Generate 一律走仓库后端 ✓
+```
+
+### 152.5 下一步（全模型与真正的对话）
+
+```
+① ★全模型（24 层 · 51 入 / 49 出 · 5.12 GB 权重）★：
+   同一套链（export → OMG --target=om 权重内联 → THIRDPARTY → .ms ✓）——
+   预计 OMG/转换耗时长 ✓ 且设备加载需要 `--large-mem` ✓（用户指示 ✓）
+② ★要能【对话】还需两件★：
+   · tokenizer.json（nnrt_seg 需要 ✓）
+   · 段划分：把 24 层切成若干 seg* 子目录 ✓（每段一个 .ms ✓ 末段给 lm_logits ✓）
+   · 或走单 .ms + 主机侧词表（像 gemma4 那样把 lm_head/embedding 放主机 ✓）
+③ 保底：hiai/cann 引擎路线依旧可用（13.3 tok/s 实测 ✓）
+```
