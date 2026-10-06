@@ -8319,3 +8319,43 @@ matmulout  = MatMul(a,w) * Sigmoid(b)⇒ Build 0 ✓
    即图里不出现该计算 ✓，由 cann-llm 在 CPU 侧补 ✓（需改 nnrt_seg 的段接口 ✓ 可行性待评估 ✓）
 ③ 并行保底：hiai/cann 引擎路线（已验证 13.3 tok/s ✓）继续可用 ✓
 ```
+
+## 152. ★★★★★ 攻克：`Neg(x)` → `Mul(x, 常量 -1)` —— NPUCL 的 CalcWeigtSize 墙解决，**4 层真模型在 NPU 上 Build 0** ★★★★★
+
+### 152.1 结论（实测 ✓ 语义完全等价 ✓）
+
+```
+★根因★：设备侧 NPUCL 的 `CalcWeigtSize` 处理不了【操作数来自 `Neg`】的 `Mul` ✗
+   ⇒ 报 `compile_task.cc CalcWeigtSize(133)::"/Mul_x Mul CalcWeigtSize failed!"` ⇒ 整图 Build -1 ✗
+★修法★：`Neg(x)` → `Mul(x, 常量 -1)` ✓（语义完全等价 ✓，且让每个 Mul 都带【常量】操作数 ✓）
+★证据链★：
+  · 切掉门控 Softplus 侧（cutB）⇒ Build 0 ✓（但剪掉了计算 ✗）
+  · 切掉 Neg 侧（cutA）⇒ 仍失败 ✗，失败节点从 /Mul_4 ★漂移★到 /Mul_20 ✓
+  · 把 1 个 Mul 的 Neg 推到外面 ⇒ 仍失败 ✗（★因为图里有 2 个 Neg ✗，另一个继续触发 ✓★）
+  · ★把【全部】Neg 换成 Mul(x, -1) ⇒ 真图 Build 0 ✓★（1 层 235 MB ✓ 与 4 层 937.7 MB ✓ 都过 ✓）
+★落进仓库★：`scripts/model-conversion/qwen38/onnx_lower.py` 新增一个 lowering pass ✓
+  （`lower_model(..., kinds=["Neg"])` 也可单独跑 ✓）；在 1 层图上验证 `Neg 2 → 0` ✓、
+  在 4 层图上 `Neg 8 → 0` ✓。
+```
+
+### 152.2 当前进度（★真模型已在 NPU 上建图成功✓★）
+
+```
+✓ 转换链：ONNX → OMG --target=om（★权重内联★）→ converter_lite --fmk=THIRDPARTY → .ms ✓
+✓ 1 层（S=8, kv=64, 235 MB, 3 入 3 出）⇒ ★BuildFromFile 0 ✓★
+✓ 4 层 L4（S=64, kv=2048, 937.7 MB, 11 入 9 出）⇒ ★BuildFromFile 0 ✓★
+△ Predict：`examples/mslite-nnrt/mslite_run`（探针 ✓）在我们的多输出大模型上段错误 ✗
+   ⇒ ★那是探针程序的问题✗★（它按小模型假设读输出 ✓ 我们模型有 [1,16,128,128] 这类输出 ✓）
+   ⇒ 应该换【仓库自己的 nnrt 后端】做 Predict ✓（它正确管理多路 IO ✓）
+✗ 尚未做：全模型（24 层 / 51 入 49 出 / 5.12 GB 权重 ✓）—— 大模型加载届时按用户指示挂 `--large-mem` ✓
+```
+
+### 152.3 为什么之前所有假设都不对（教训 ✓）
+
+```
+失败会【在同类 Mul 之间漂移】✗ 且最小复现全过 ✗ ⇒ 看起来像"融合阶段的相互作用" ✗
+—— 真因其实很朴素：★只要 Mul 的操作数追到 Neg 就挂✗★；
+   图里 Neg 有几个就"漂移"几次 ✓（我改了 1 个 ⇒ 另一个继续 ✗）。
+★教训★：遇到"漂移的失败节点"要先找【共同祖先特征】（本次：是否 Neg 后代 ✓），
+        而不是逐个改形状/秩/常量性 ✓。
+```

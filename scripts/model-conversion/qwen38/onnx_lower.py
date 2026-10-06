@@ -160,6 +160,45 @@ def lower_model(model: onnx.ModelProto, kinds=None) -> dict:
     # ★Softplus → Log(1+Exp(Min(x,20)))★（§71：CPUCL 不认这个激活 ✗）
     _lower_softplus(g, counts)
 
+    # ★Neg(x) → Mul(x, -1 常量)★（§151 实测 ✓）
+    #   为什么必须做：设备侧 NPUCL 的 CalcWeigtSize 处理不了【操作数来自 Neg】的 Mul ✗ ——
+    #   真图（3 维 1 层）里 2 个 Neg ⇒ 设备 OH_AI_ModelBuildFromFile 返回 -1 ✗；
+    #   全部换成 `Mul(x, 常量 -1)` ⇒ ★Build 0 (SUCCESS) ✓ 且 hilog 出现 load model succ ✓★。
+    #   语义完全等价 ✓，并且让每个 Mul 都带一个【常量】操作数 ✓（失败会"漂移"到下一个同类 Mul ✓，
+    #   这与"图里有 2 个 Neg、只改 1 个仍失败"的实测完全一致 ✓）。
+    _dt_of: dict = {}
+    for _vi in list(g.value_info) + list(g.input) + list(g.output):
+        _dt_of[_vi.name] = _vi.type.tensor_type.elem_type
+    for _ini in g.initializer:
+        _dt_of[_ini.name] = _ini.data_type
+    for _n in g.node:
+        if _n.op_type == "Constant":
+            for _a in _n.attribute:
+                if _a.name == "value":
+                    _dt_of[_n.output[0]] = _a.t.data_type
+    _used_names = {o for n in g.node for o in n.output} | {i.name for i in g.initializer}
+    _neg_nodes, _neg_inits = [], []
+    for n in g.node:
+        if n.op_type != "Neg" or (_want is not None and "Neg" not in _want):
+            _neg_nodes.append(n)
+            continue
+        dt = _dt_of.get(n.input[0], TensorProto.FLOAT)
+        np_dt = {TensorProto.FLOAT: np.float32,
+                 TensorProto.FLOAT16: np.float16}.get(dt, np.float32)
+        base = n.name or (n.output[0] + "_neg")
+        cname = base + "_negone"
+        while cname in _used_names:
+            cname += "_"
+        _used_names.add(cname)
+        _neg_inits.append(numpy_helper.from_array(np.array(-1.0, dtype=np_dt), cname))
+        _neg_nodes.append(helper.make_node("Mul", [n.input[0], cname], list(n.output),
+                                           name=base + "_byconst"))
+        counts["Neg"] = counts.get("Neg", 0) + 1
+    if counts.get("Neg"):
+        del g.node[:]
+        g.node.extend(_neg_nodes)
+        g.initializer.extend(_neg_inits)
+
     # ★MatMul(标量, x) / MatMul(x, 标量) → Mul(x, 标量)★（§57）
     _init_shape = {}
     for i in g.initializer:
