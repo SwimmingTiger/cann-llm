@@ -129,6 +129,54 @@ class _Seg:
         return self.be._get_output_raw(oname, elems * 4)
 
 
+class _HostTable:
+    """主机侧 fp16 权重表（mmap ✓ 按行取 / 分块 matmul ✓）。
+
+    ★为什么需要★（§155）：qwen3_5 的段图【从 embedding 开始、到 hidden 结束】——
+    首段吃 `input_embed`（主机侧算 embedding ✓ 与 ``nnrt_llm`` 同思路 ✓），
+    末段只吐 `hidden_states`（词表投影在主机侧 ✓）。Qwen 系 lm_head 与 embedding
+    ★tied★ ⇒ 这两侧可以复用同一张表 ✓（gemma4 也是这么做的 ✓ 见 gemma4_runner.py ✓）。
+    """
+
+    def __init__(self, path: str, rows: int, cols: int) -> None:
+        import numpy as _np                                  # 延迟导入（模块本身不强依赖 numpy ✓）
+        self._np = _np
+        self.rows, self.cols = int(rows), int(cols)
+        self.path = path
+        self.mm = _np.memmap(path, dtype=_np.float16, mode="r", shape=(self.rows, self.cols))
+
+    def row(self, token_id: int):
+        return self.mm[token_id % self.rows].astype(self._np.float32)
+
+    def matmul(self, h) -> List[float]:
+        """logits = W @ h ✓（W: [vocab, hidden] fp16 ✓ · h: [hidden] fp32 ✓）分块算 ✓ 省内存 ✓。"""
+        np = self._np
+        x = np.asarray(h, dtype=np.float32).reshape(-1)[: self.cols]
+        out = np.empty(self.rows, dtype=np.float32)
+        step = 8192
+        for s in range(0, self.rows, step):
+            blk = self.mm[s:s + step].astype(np.float32)
+            out[s:s + step] = blk @ x
+        return [float(v) for v in out]
+
+
+def _load_host_table(d: str):
+    """读 ``emb_manifest.json`` + 它的权重文件 ✓；没有就返回 None ✓（不报错 ✓）。"""
+    man = os.path.join(d, "emb_manifest.json")
+    if not os.path.isfile(man):
+        return None
+    try:
+        with open(man, encoding="utf-8") as fh:
+            info = json.load(fh)
+        path = os.path.join(d, info.get("file", "emb_f16.bin"))
+        rows, cols = info["shape"]
+        if not os.path.isfile(path):
+            return None
+        return _HostTable(path, rows, cols)
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
 class SegmentedLlmRunner:
     """多段串起来的 LLM 跑法（接口与 :class:`NnrtLlmRunner` 一致）。"""
 
@@ -159,22 +207,55 @@ class SegmentedLlmRunner:
             bes.append(be)
         for i, be in enumerate(bes):
             seg = _Seg(be, is_first=(i == 0), is_last=(i == len(bes) - 1))
-            if seg.is_last:
-                self.vocab = be._outputs[be._index_of_output("lm_logits")][3]
             self.segs.append(seg)
+        # ★末段输出 lm_logits 时才直接用；否则（我们的 qwen3_5 段只吐 hidden_states ✓）
+        #   词表投影要在【主机侧】做 ✓（与 gemma4 同思路 ✓ 模板 gemma4_runner.py ✓）
+        self.last_has_logits = self.segs[-1].logits_name is not None
+        self.host_tab = None
+        if not self.last_has_logits or not self.segs[0].first_is_token:
+            self.host_tab = _load_host_table(self.dir)      # ★fp16 表 ✓ 供 embedding/lm_head 两侧复用✓★
+        if self.last_has_logits:
+            self.vocab = self.segs[-1].be._outputs[
+                self.segs[-1].be._index_of_output("lm_logits")][3]
+        else:
+            self.vocab = self.host_tab.rows if self.host_tab is not None else 0
+
+    def _embed_bytes(self, token_id: int) -> bytes:
+        """首段要 embedding 时：把该 token 的 embedding 行做成图输入字节（fp32 ✓）。"""
+        seg = self.segs[0]
+        n = seg.hidden_elems
+        row = self.host_tab.row(token_id)[:n] if self.host_tab is not None else None
+        if row is None:
+            raise GenerationError("首段要 input_embed，但没找到主机侧嵌入表 ✗")
+        return struct.pack("<%df" % n, *[float(x) for x in row])
+
+    def _head_logits(self, hidden_bytes: bytes) -> List[float]:
+        """末段只吐 hidden 时：主机侧做 lm_head（与 embedding 【tied】⇒ 复用同一张表 ✓）。"""
+        seg = self.segs[-1]
+        n = seg.hidden_elems
+        h = struct.unpack("<%df" % (len(hidden_bytes) // 4), hidden_bytes[:(len(hidden_bytes)//4)*4])
+        h = h[:n]
+        return self.host_tab.matmul(h)
 
     def step(self, token_id: int, pos: int) -> List[float]:
         first = self.segs[0]
-        hidden = struct.pack("<i", token_id) if first.hidden_dtype == _I32 \
-            else struct.pack("<f", float(token_id))
+        if first.first_is_token:
+            hidden = struct.pack("<i", token_id) if first.hidden_dtype == _I32 \
+                else struct.pack("<f", float(token_id))
+        else:
+            hidden = self._embed_bytes(token_id)             # ★主机侧 embedding ✓（§155）★
         logits_bytes = b""
+        last_hidden = b""
         for si, seg in enumerate(self.segs):
             out = seg.run(hidden, pos, 0)
             hidden = out
             if seg.is_last:
+                last_hidden = out
                 logits_bytes = out
-        n = len(logits_bytes) // 4
-        return list(struct.unpack("<%df" % n, logits_bytes[:n * 4]))
+        if self.last_has_logits:
+            n = len(logits_bytes) // 4
+            return list(struct.unpack("<%df" % n, logits_bytes[:n * 4]))
+        return self._head_logits(last_hidden)                # ★主机侧 lm_head ✓（tied ✓）★
 
     def stream(self, prompt: str, max_new: int = 32, stop_ids=(), params=None):
         """真正的流式：每生成一个 token 就 yield 一段**新增文本**。
