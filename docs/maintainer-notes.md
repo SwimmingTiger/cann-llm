@@ -8024,3 +8024,81 @@ nnrt ⇒ 6 处（libsec_shared 5 + ir 1）  ⇒ ★成功 6 / 跳过 0 / 等 0�
         ③ 状态张量多（11 入/9 出，含 8 个 past_* ✓）
 ★下一步★：按①/②二分 —— 编 1 层 / 更短 seq / 去掉 BroadcastTo 的版本逐个上设备试 ✓
 ```
+
+
+## 147. NNRt/NPU 路线二分：★Invalid uid 是噪声（成功运行也打）· 真因是 ≥4 维内核（§57）★
+
+### 147.1 二分结果（真机 · 同一流水线 ✓ 这些测量有效 ✓）
+
+```
+✓ PASS（OH_AI BuildFromFile = 0）：
+   · tiny MatMul（2 节点）· MatMul + Expand/BroadcastTo（3 节点 ⇒ BroadcastTo 无罪 ✓）
+   · 状态进/状态出 成对 IO（2 入2出 · 4 入4出）⇒ 状态 IO 无罪 ✓
+   · 纯 MatMul 链 51 / 201 / ★401★ 节点（6.7 MB）⇒ 图规模无罪 ✓
+     ★且 hilog 证明它真在 NPU 上跑★：hiaiserver "load model succ: modelName=default_ndk
+     modelId=86" + "load model finished, pid: 50787" ✓
+✗ FAIL（OH_AI BuildFromFile = -1）：
+   · 完整 1 层 Qwen3.8（conv+delta+norm+out · 235 MB）
+   · P1 = 只留 conv+delta（Q35_SKIP=norm,out · 201.8 MB）
+   · L4（937 MB）· 厂商 .omc + 外挂权重（§146 记录的错路 ✓）
+⚠ 无效变体：只留 conv（Q35_SKIP=delta,norm,out）⇒ OMG rc=1（跳过 delta 后图不完整 ✓）
+工具：给 hu60tx 的 npu_layers.py 加了 Q35_SKIP=<conv,delta,norm,out 子集> 透传 ✓（原文件 .bak_skip ✓）
+```
+
+### 147.2 ★实测事实：`Invalid uid` 是噪声，不能当失败依据★
+
+```
+同一个 mslite_run 的对照（2026-10-06 复测 ✓）：
+  · 【成功】的 ch400：hilog 里 `Invalid uid` 出现 ★4 次★ · `CheckUid` 3 次 · `load model succ` 5 次
+  · 【失败】的 t1_s8  ：`Invalid uid` 7 次
+⇒ ★"Invalid uid" 在【成功】运行里同样出现✗★ ⇒ 它是客户端依次尝试若干模块、其中部分模块的规则
+  不容许时打出的【无害提示】✓；`moduleID[5]/[9]` 同理只是 `OnClientDie` 里的 handle 数组下标 ✓
+★判据★：看到 `Invalid uid` / `moduleID[n] check failed` 【不等于】模型被权限拒绝 ✗；
+        失败与否只认 `OH_AI_ModelBuildFromFile` 的返回码 + 是否出现 `load model succ` ✓
+```
+
+### 147.3 ★真因（§57 早已查清 ✓ 本次复核一致 ✓）★
+
+```
+NPU 内核对【≥4 维】的 Slice / Reshape / ExpandDims 不支持 ✗（§30/§57）：
+  E/AI_NPUCL: strided_slice_get_format "inputDim.size() 4 dimC 2 dimH 128" ✗
+              reshape_check_support "check reshape dimInfo fail" ✗
+              expanddims_check_support "not support input dimCnt >= ?" ✗
+我们的旧导出仍是 4 维 ✗：past_value_in0 = [1,16,128,128] · past_key_in0 = [2048,2,1,256] ✓
+gemma4 五段当年能 Build 0 ✓，正因为它【全程 ≤3 维】✓（§57.4：方法已知，就是 gemma4 那一套 ✓）
+⇒ ★下一步不是查权限，而是把 qwen3_5 解码器按 §58/§59 的【全程 3 维】版导出★ ✓
+   （npu_layers.py 已经 import 了 3 维实现 npu_attention / npu_gated_delta ✓ 整模型 argmax 1.0000 ✓；
+     但 export_hiai_q35.py 走的仍是 HF 自带的 4 维注意力 ✗ ⇒ 要用 3 维入口重导 ✓）
+```
+
+## 148. x570 逆向记录：NPU 设备节点与 hiai RPC 规则机制（事实 ✓ 不作为失败归因 ✗）
+
+```
+★以下是从 x570 固件反编译 + 设备实测得到的事实 ✓（§146/§147 的失败与此无关 ✓）★
+
+设备与固件：
+  crw-------  hiaiserver hiaiserver  /dev/npu0 · npu_direct · npu_manager · npu_freq_* · log_drv
+  ueventd：chown hiaiserver hiaiserver /dev/npu0 · chmod 0660（npu_direct ⇒ 0444）
+  SELinux：/dev/npu0 ⇒ u:object_r:davinci0_device:s0 · npu_direct ⇒ davinci_direct_device:s0
+  ⇒ NPU 设备只归 hiaiserver ✓ 客户端一律走 RPC ✓
+
+libai_infra_rpc_server.so（26 KB）：
+  CheckUid(const Rule&) @0x4F08：
+     uid = GetCallingUid();
+     if (rule.mode != 0) { if (uid > rule.uid) → 日志行 55 → return 0; }
+     else if (uid != rule.uid) { if (uid != getuid()) → 日志行 50（"Invalid uid:%d"）→ return 0; }
+     return 1;
+     ★日志里的 CheckUid(50) 是源码行号 ✗ 不是模块号 ✓★
+     ★存在 getuid() 逃生口★（与服务同 uid ⇒ 放行 ✓，为"同进程"准备 ✓）
+  CheckToken(const RuleExt&) @0x53B4：比 tokenTypeFlag ✓；原生进程还要求 native token id 匹配
+     （否则 VerifyAccessToken）⇒ 偏向系统/原生客户端 ✓
+  RegisterModuleRule(moduleID, const ModuleRule*) @0x4CDC：只把【指针】存进 std::map ✓
+     唯一调用者 = RpcHandlerManager::RegisterHandler ✓
+     ⇒ 规则由各服务模块（om_service · memory_manager_service · npucore_graph_executor_service …）
+       在代码里静态注册 ✓ 不是配置文件 ✓（vendor/etc/hiai/default 只有 ai_cie/ai_igs/monitor ✓）
+  moduleID 是三位数（AiMaintainceService 构造时写死 201 ✓）
+
+★用途★：解释【小图 / 中等纯算子图为何能跑通】✓（不触达带规则的模块 ✓），
+  以及 NNRt 客户端形态为何天然偏系统应用 ✓（当前 Build 失败的归因见 §147.3 ✓）。
+★另记★：canon 路线（cann/hiai 引擎）之所以不受影响 ✓，是因为它们【同进程内加载】✓，
+  不经 hiai RPC 去要 /dev/npu* ✓（hiai 引擎 13.3 tok/s 实测 ✓）。
