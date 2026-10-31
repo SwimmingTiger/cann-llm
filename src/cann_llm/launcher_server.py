@@ -19,8 +19,9 @@ import time
 import urllib.request
 from typing import Dict, List, Optional
 
-from .launcher import (die, find_model_dir, info, libc_compatible, model_info_line,
-                       ok, pick_engine_lib, warn)
+from .launcher import (detect_backend, die, ensure_engine_lib_path, find_model_dir,
+                       info, libc_compatible, model_info_line, ok, pick_engine_lib,
+                       warn)
 
 __all__ = ["run_server"]
 
@@ -339,16 +340,18 @@ def run_server(root: str, argv: "List[str]") -> int:
 
     # ★ 与 run_chat 一致：没显式指定后端就按模型目录自动判断 ✓
     #   （否则会拿 hiai 的规则去校验 nnrt 的模型目录 ⇒ 报缺少 api_config.json ✗）
+    # ★§166：这里的 import 一律放模块级✓★ —— 曾经写成函数内 `from .launcher import
+    #   detect_backend, find_model_dir` ✗，于是 find_model_dir 在【整个 run_server】里
+    #   变成局部名 ✓；一旦用户显式给了 -b（这段被跳过 ✗），后面 `d = find_model_dir(...)`
+    #   就 UnboundLocalError 崩掉 ✗（实测：scripts/start_server.sh -d … -b hiai 必崩 ✓）。
     backend = str(o["backend"]) if o.get("backend") else ""
     if not backend:
-        from .launcher import detect_backend, find_model_dir
         _d = str(o["model_dir"]) if o.get("model_dir") else None
         backend = detect_backend(find_model_dir(root, _d)) or "hiai"
     # 同 run_chat：cann 缺结构化配置时就地导入（幂等，只补缺的）
     if o.get("model_dir"):
         from .omcimport import ensure_model_dir
         ensure_model_dir(str(o["model_dir"]), backend)
-    from .launcher import ensure_engine_lib_path
     _env = dict(os.environ)
     ensure_engine_lib_path(_env)
     os.environ["LD_LIBRARY_PATH"] = _env.get("LD_LIBRARY_PATH", "")

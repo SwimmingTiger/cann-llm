@@ -9019,3 +9019,73 @@ CLI 自己的 `-b/--backend` 默认仍是 "hiai" ✓（cli/chat.py:194 · api/se
 ★教训（可推广 ✓）★：凡是"按目录内容判类型"的地方 ✓，判据都应直接复用【消费方自己的接受条件】✓，
    否则同一种布局在两处会有两种结论 ✗（这次就是 ✓）。
 ```
+
+## 166. ★server 路径必崩的 UnboundLocalError：函数内 import 把模块级名字变成了局部名✗★
+
+### 166.1 现象（用户实测 ✓）
+
+```
+scripts/start_server.sh -d ../models/Qwen3-8B -b hiai
+  ✓ Python 3.14.7 · ✓ hiai 引擎
+  Traceback … UnboundLocalError: cannot access local variable 'find_model_dir'
+  where it is not associated with a value
+      at launcher_server.py:377  d = find_model_dir(root, o["model_dir"] …)
+⇒ ★带 -b 必崩✗★（不带 -b 反而不崩 ✓ —— 这个不对称就是线索 ✓）
+```
+
+### 166.2 根因
+
+```python
+# launcher_server.py（模块顶部本来就有一句 ✓）
+from .launcher import (die, find_model_dir, info, …)          # ← 模块级 ✓
+
+def run_server(root, argv):
+    …
+    backend = … if o.get("backend") else ""
+    if not backend:                                          # ← 只有【没给 -b】才进这里
+        from .launcher import detect_backend, find_model_dir  # ★函数内 import ✗★
+        backend = detect_backend(find_model_dir(root, _d)) or "hiai"
+    …
+    d = find_model_dir(root, o["model_dir"] …)               # ★这里崩✗★
+```
+**Python 的作用域规则**：只要函数体内**任何位置**出现对某个名字的**赋值/import** ✗，
+这个名字在整个函数里就是**局部名** ✓ ⇒ 函数内那句 import 把 `find_model_dir` 变成了局部名 ✓，
+而它只在 `if not backend:` 分支里才被绑定 ✓ ⇒ 用户显式给 `-b` 时该分支被跳过 ✗
+⇒ 后面第一次使用就 `UnboundLocalError` ✗（不是 ImportError、也不是找不到文件 ✓，纯粹作用域 ✓）。
+
+### 166.3 修法（已提交 ✓）
+
+```
+① 把 detect_backend / ensure_engine_lib_path 一起提到【模块级】import ✓
+② 删掉函数内那两句 `from .launcher import …` ✓
+③ 保留 launcher.main() 里的 `from .launcher_server import run_server` ✓ ——
+   唯一合理的函数内 import ✓：模块级互相 import 会成环 ✗，且它紧邻使用 ✓（不会出现未绑定 ✓）
+```
+
+### 166.4 验证（本机实测 ✓）
+
+```
+① 不存在的模型目录 ⇒ ★干净错误，无 traceback✓★：
+     scripts/start_server.sh -d /definitely/missing/model -b hiai
+     ⇒ ✓ Python 3.14.7 · ✓ hiai 引擎 · ★错误 模型目录不存在★ · exit 1 ✓
+② 真实模型端到端 ✓（端口 8123 ✓）：
+     scripts/start_server.sh -d ../models/Qwen3-8B -b hiai --port 8123 --background
+     ⇒ ✓ 已就绪（7s）pid=54340 ✓（上下文窗口 4096 ✓ base_url/端点/日志路径都打印 ✓）
+     curl GET /v1/models            ⇒ {"object":"list","data":[{"id":"Qwen3-8B",…}]} ✓
+     curl POST /v1/chat/completions ⇒ content "<think>\n" · usage 18/2/20 ✓
+     scripts/start_server.sh --stop --port 8123 ⇒ ✓ 已停止 ✓
+③ 新增 tests/test_launcher_server.py（2 passed ✓）：
+     · 给 -b ⇒ 必须走到"模型目录解析"而不是崩在局部名上 ✓（原 bug 的复现路径 ✓）
+     · 不给 -b ⇒ 走 detect_backend 分支，同样不崩 ✓
+     做法：把 pick_engine_lib 换成"一定存在的文件" ✓，用不存在的模型目录让它 die ✓
+     ⇒ 这样既能复现原 bug ✗，又不真的拉起 uvicorn ✓
+```
+
+### 166.5 教训（可推广 ✓）
+
+```
+· 同一个模块【顶部已经 import 过】的名字 ✗ 不要在函数里再 import 一次 ✓ ——
+  除了让名字变成局部名 ✗，还会让"某条分支才执行"变成"某条分支才绑定" ✓。
+· 需要延迟 import（避免循环）时 ✓：放在函数【最开头】✓（所有路径都会执行 ✓），
+  或者干脆只 import 模块、用 module.attr 访问 ✓ —— 后者连作用域问题都不会有 ✓。
+· 症状识别 ✓：★"带某个参数就崩、不带就正常"✗★ 往往就是"那条分支里做了绑定" ✓（本例就是 ✓）。
