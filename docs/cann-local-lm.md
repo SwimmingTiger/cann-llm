@@ -78,21 +78,37 @@ PYTHONPATH=$SANDBOX "$HOME/p1/bin/python" -m \
 
 `--mode prefill-decode` = 一次导出两张图（prefill + decode，共享权重）。
 
-### 2.3 ★KV 长度必须按滑窗公式★
+### 2.3 KV 长度：`kv_cache_max_len` = **目标上下文**，与 prefill 行宽解耦
 
-gemma4 的 `sliding_attention` 层 KV 用 ring buffer：`R = sliding_window + prefill_seq`
-（`export_wrapper.py` 里写死的设计），而 `full_attention` 层用 `kv_max`。
-引擎逐层要求 `graph dims[2] == meta kv_cache_max_len`
-（`engine/core/component/kv_cache_pool/kv_cache_pool.cpp`）：
+两层 KV 的容量规则不同（`engine/core/component/kv_cache_pool`）：
 
 ```
-kv_cache_max_len = sliding_window + prefill_len
-gemma-4-E2B-it : 512 + 64 = 576
+full_attention   层：KV 容量 = kv_cache_max_len        ← 上下文总长由它决定 ✓
+sliding_attention 层：ring 容量 = sliding_window + prefill_len
+                     （新契：meta 带 sliding_window_head_dim 时引擎按此校验）
 ```
 
-导出时**显式传**这个值（改 `cann_lm_converter.convert()` 里 `save_epair_prefill_decode(..., kv_cache_max_len=_kv)`，
-`_kv = hf_config.text_config.sliding_window + seq_len`）。默认 2048 对带滑窗的模型
-一定失败 ✗（full 层 2048 / sliding 层 576 不可能同时等于一个数）。
+**两者不需要相等**。早期我把 `kv_cache_max_len` 当成"必须等于滑窗环"✗，
+于是把 kv 压到 576 —— 实际可以独立放大到目标上下文，`prefill_len` 保持小：
+
+| 配置 | kv_cache_max_len | prefill_len（图行宽） | 上下文 | 短 prompt TTFT |
+|---|---|---|---|---|
+| 早期（错） | 576 | 64 | 576 | 2.2 s |
+| **推荐** | **2048** | **64** | **2048** | **2.5 s** |
+
+`prefill_len` 只影响 **prefill 图行宽**（= 引擎 chunk 大小）：
+短 prompt 会被 padding 到该行宽 ⇒ **越小 TTFT 越好**；与上下文长度无关 ✓。
+所以"长上下文 + 低延迟"可以同时要：`kv=2048, prefill_len=64`。
+
+导出时显式传两个值（`cann_local_lm_converter.convert()` 目前不暴露 CLI 参数）：
+
+```python
+_seq = 64                                   # 图行宽 / chunk
+_kv  = 2048                                 # 目标上下文
+save_epair_prefill_decode(..., kv_cache_max_len=_kv, seq_len=_seq)
+```
+
+> 注意：`max_io_tokens`（默认 8192）只是部署上限字段，实际上下文受 `kv_cache_max_len` 约束。
 
 ### 2.4 产物
 

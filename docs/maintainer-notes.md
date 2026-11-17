@@ -9144,8 +9144,9 @@ cllm 部署目录里也有 `prefill/`、`decode/` —— 首字母 `pre`/`dec` *
 ### 167.5 转换/部署的硬约束（细节见 docs/cann-local-lm.md）
 
 ```
-① kv_cache_max_len = sliding_window + prefill_len   （gemma4: 512+64=576）
-   ⇒ full 层与 sliding 层必须等宽，否则 kv_pool.ensure 逐层校验拒绝
+① kv_cache_max_len = **目标上下文**；sliding 层的环 = sliding_window + prefill_len，
+   两者**不必相等**（早期误判成必须相等 ✗，把 kv 压到 576，白丢 3.5× 上下文）
+   ⇒ 长上下文与低延迟可兼得：kv=2048、prefill_len=64（图行宽只影响短 prompt 的 padding 开销）
 ② model.json 必须补 sliding_window（取 HF 真值）与 sliding_window_head_dim
 ③ 编译前 source CANN 的 set_env.sh（ccec + TBE 路径）；source 不能接管道
 ④ 输出目录不能是 bind mount（rename EXDEV）
@@ -9241,3 +9242,17 @@ NEEDED，而进程启动后再改 LD_LIBRARY_PATH 是无效的 ✗。
 
 实测（设备，不设 OHOS_SDK_NATIVE，--clang --force）：
   toolchain=clang → cmake 21s → 安装 → selfsign 签名 → 加载 → 出字 ✓
+
+### 167.11 长上下文重导（kv=2048 / prefill=64）：实测
+
+```
+改法：convert 里显式传 kv_cache_max_len=2048、seq_len=64（上游 CLI 未暴露，暂用环境变量补丁）
+产物：prefill.omc 8.5 MB + decode.omc 7.8 MB，权重/embedding 与旧版同源（可复用）
+实测（KirinX90）：
+  load 5.0 s（旧版 12.0 s，页缓存差异）
+  短 prompt TTFT 2.53 s（旧 2.2 s，持平）
+  decode 2.07 s/token ⇒ 0.48 tok/s（旧 1.90 s/token：full 层 KV 2048 vs 576 的代价 ≈9%）
+  ~1000 token 长 prompt：TTFT 37.8 s，输出语义正确 ✓（旧版 kv=576 会截断/失败）
+注意：
+  · embedding 文件不能用符号链接 —— 引擎 mmap identity 段会失败 ✗（实体拷贝或复用旧目录绝对路径）
+  · 新导出的 model.json 里 embedding_config 是上游默认（int8 等）✗，必须按实际文件改成 fp16 全组
