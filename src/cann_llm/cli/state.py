@@ -24,6 +24,8 @@ class CliState:
     stream: bool = True
     model_id: str = ""
     backend: str = ""
+    #: 实际使用的对话模板名（跟随后端自报，见 chat/template.pick_template_name）
+    template_name: str = "chatml"
     #: 最近一轮的用量与结束原因
     last_stats: Optional[GenerationStats] = None
     last_finish_reason: Optional[str] = None

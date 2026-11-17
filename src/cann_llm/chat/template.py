@@ -251,6 +251,18 @@ register_template("plain")(PlainTemplate)
 register_template("gemma")(GemmaTemplate)
 
 
+def pick_template_name(configured: str, backend_name: str = "") -> str:
+    """选模板名：**配置显式改过就尊重**，仍是默认 ``chatml`` 时跟随后端自报。
+
+    后端的 ``ModelInfo.chat_template`` 是按模型给的（cllm/gemma 模型 → ``gemma``）。
+    不跟随的话，``-b cllm`` 跑 gemma 会套 ChatML ⇒ 模型看到它不认识的标签 ✗
+    （实测输出会跑偏）。
+    """
+    if configured and configured != "chatml":
+        return configured
+    return backend_name or configured or "chatml"
+
+
 def get_template(name: str) -> ChatTemplate:
     if name not in _REGISTRY:
         raise InvalidRequestError(

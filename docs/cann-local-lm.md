@@ -290,7 +290,8 @@ python -m cann_llm.launcher chat -d <model> -b cllm
 # 服务：python -m cann_llm.launcher server -d <model> -b cllm --port 8080
 ```
 
-* 不给 `-b` 时 `detect_backend()` 会认出这个布局（`model.json` + 两段 `.omc`）✓；
+* 不给 `-b` 时 `detect_backend()` 会认出这个布局（`model.json` + 两段 `.omc`）✓，
+  不给 `-t` 时模板跟随后端自报（gemma 模型 → `gemma` 模板）✓；
   注意它的判据**必须排在 nnrt 之前** —— `prefill/`、`decode/` 也以 `pre/dec` 开头 ✓。
 * 上下文窗口 = `kv_cache_max_len`（gemma4 部署值 576）；`--max-tokens` 受它限制。
 * 引擎不套 chat template：指令模型请自己拼

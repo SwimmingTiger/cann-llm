@@ -63,6 +63,14 @@ class TestTemplate(unittest.TestCase):
             "<start_of_turn>user\nc<end_of_turn>\n"
             "<start_of_turn>model\n")
 
+    def test_pick_template_name(self):
+        """配置显式改过就尊重；仍是默认 chatml 时跟随后端自报 ✓"""
+        from cann_llm.chat.template import pick_template_name
+        self.assertEqual(pick_template_name("chatml", "gemma"), "gemma")
+        self.assertEqual(pick_template_name("plain", "gemma"), "plain")
+        self.assertEqual(pick_template_name("chatml", ""), "chatml")
+        self.assertEqual(pick_template_name("", ""), "chatml")
+
     def test_unknown_template_rejected(self):
         with self.assertRaises(InvalidRequestError):
             get_template("nope")

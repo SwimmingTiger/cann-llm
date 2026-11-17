@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 from .. import version
 from ..backends import available_backends, create_backend
 from ..backends.base import EngineBackend, SerializedBackend
-from ..chat.template import get_template
+from ..chat.template import get_template, pick_template_name
 from .. import debuglog
 from ..config import AppConfig, load_config, resolve_sampler
 from ..agent.loop import StreamFilter
@@ -102,7 +102,9 @@ def build_state(cfg: AppConfig) -> AppState:
     # 引擎一次只能跑一路，统一在后端层串行化（见 backends/base.SerializedBackend）
     backend = SerializedBackend(inner, max_queue=cfg.server.max_queue,
                                 timeout_s=cfg.server.queue_timeout_s)
-    return AppState(cfg=cfg, backend=backend, template=get_template(mc.chat_template))
+    # 与 CLI 一致：模板跟随后端自报（显式配置过就尊重配置）
+    tname = pick_template_name(mc.chat_template, inner.info.chat_template)
+    return AppState(cfg=cfg, backend=backend, template=get_template(tname))
 
 
 # ------------------------------------------------------------------ 处理器

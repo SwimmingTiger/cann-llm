@@ -30,7 +30,8 @@ from ..agent.loop import (
 )
 from ..backends import available_backends, create_backend
 from ..backends.base import EngineBackend
-from ..chat.template import Message, available_templates, get_template
+from ..chat.template import (Message, available_templates, get_template,
+                             pick_template_name)
 from ..config import AppConfig, load_config, resolve_sampler
 from ..errors import CannLlmError
 from ..tools import ToolRegistry, default_registry
@@ -120,7 +121,7 @@ def run_turn(engine: EngineBackend, cfg: AppConfig, state: CliState,
     """跑一轮：交给 agent 循环，把过程打到终端。"""
     state.messages.append(Message("user", text))
     loop = AgentLoop(
-        engine, get_template(cfg.model.chat_template), registry,
+        engine, get_template(state.template_name), registry,
         config=AgentConfig(max_steps=cfg.agent.max_steps),
         system_prompt=state.system_prompt, params=state.params,
 )
@@ -254,7 +255,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"启动失败: {e}", file=sys.stderr)
         return 1
 
-    template = get_template(cfg.model.chat_template)
+    # ★模板跟随后端自报★（cllm 跑 gemma 时就是 gemma 模板，不是默认 chatml）
+    template = get_template(pick_template_name(cfg.model.chat_template,
+                                              engine.info.chat_template))
     state = CliState(
         params=GenerationParams(
             max_tokens=cfg.model.max_tokens,
@@ -263,6 +266,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             **resolve_sampler(cfg.model, engine.sampler_defaults())),
         # 空 = 用模板自己的默认（chatml→Qwen 那句；gemma→空，Gemma 无 system 角色）
         system_prompt=cfg.model.system_prompt or template.default_system,
+        template_name=template.name,
         tool_names=registry.names(),
         stream=not args.no_stream,
         model_id=cfg.model.resolved_id, backend=cfg.model.backend)
