@@ -9194,7 +9194,8 @@ tests/test_backend_detect.py  新增 cllm 三条（含"cllm 优先于 nnrt"的�
      （否则 cmake 停在 nlohmann_json not found ✗）
   3) 构建：OHOS_SDK_NATIVE 必需（SDK 不能 clone），跑 build_ohos.sh **--no-signed**
      （脚本自带 jar 签名器大多数环境没有 ⇒ 会 rc=1 ✗；签名统一由我们在 install 做）
-  4) 签名+安装：ohos-sign-elf.py 签 libcann_lm_engine.so / libc++_shared.so，
+  4) 签名+安装：ohos-sign-elf.py 签 libcann_lm_engine.so / libc++_shared.so
+     （★工具只吃一个 path 参数★：一次传多个文件会 unrecognized arguments ✗ ⇒ 逐个签），
      装到 **<cann-llm>/lib/**（加载器优先这里）；签名工具找不到时报错并给出三种出路
      （装工具 / 指定路径 / skip 仅供本机检查）
   5) 缓存：产物比源码新就跳过（force/删除 .tmp 可强制）；日志落 .tmp/engine-build/

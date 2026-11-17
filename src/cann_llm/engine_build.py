@@ -356,10 +356,15 @@ def _sign(files: Sequence[str], log: Log) -> None:
             "  装好签名工具后重试，或设 CANN_LLM_CLLM_SIGN=/path/to/ohos-sign-elf.py；\n"
             "  只在本机检查、不上设备时可设 CANN_LLM_CLLM_SIGN=skip。")
     log(f"签名：{tool}")
-    cmd = ([sys.executable, tool, *files] if tool.endswith(".py") else [tool, *files])
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise BuildError(f"签名失败（rc={proc.returncode}）：{(proc.stderr or proc.stdout)[-400:]}")
+    # ★ohos-sign-elf.py 的 path 是单个位置参数（文件或目录）★ ——
+    #   一次传多个文件会报 "unrecognized arguments" ✗（实测），所以逐个签 ✓
+    for path in files:
+        cmd = ([sys.executable, tool, path] if tool.endswith(".py") else [tool, path])
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise BuildError(
+                f"签名失败（{path}，rc={proc.returncode}）："
+                f"{(proc.stderr or proc.stdout)[-400:]}")
 
 
 def install(plan: BuildPlan, *, log: Log = _stderr) -> str:

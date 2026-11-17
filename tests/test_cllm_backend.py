@@ -92,6 +92,20 @@ class TestResolveArtifact(unittest.TestCase):
 
 
 class TestFindEngineLib(unittest.TestCase):
+    """注意：查找顺序里 ` <cann-llm>/lib ` 排很前 —— 本机装过引擎库时它会**先命中** ✓，
+    所以这里把 repo_root 指到空目录，测的才是"模型目录/环境变量"这两级 ✓。"""
+
+    def setUp(self):
+        from cann_llm import engine_build as eb
+        self._eb = eb
+        self._real = eb.repo_root
+        self._tmp = os.path.join(eb.repo_root(), ".tmp", "unit-cllm-backend")
+        os.makedirs(self._tmp, exist_ok=True)
+        eb.repo_root = lambda: self._tmp
+
+    def tearDown(self):
+        self._eb.repo_root = self._real
+
     def test_env_wins(self):
         with tempfile.TemporaryDirectory() as d:
             lib = os.path.join(d, "libcann_lm_engine.so")
