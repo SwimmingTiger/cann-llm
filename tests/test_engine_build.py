@@ -207,6 +207,99 @@ class TestSourceAcquire(_Env):
                 eb._git = real
 
 
+def _fake_sign_tool_repo(dest: str) -> str:
+    """在 dest 造一个 ohos-bst-light 的最小替身（只有 selfsign.py）。"""
+    argv_dump = os.path.join(os.path.dirname(dest), "sign_argv.txt")
+    _write(os.path.join(dest, eb.SIGN_TOOL),
+           "import sys, os\n"
+           f"open({argv_dump!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+           "open(sys.argv[1], 'a').write('SIGNED\\n')\n", mode=0o755)
+    return argv_dump
+
+
+class TestSigning(_Env):
+    """签名改用 ohos-bst-light 的 selfsign.py（clone 到 .tmp/sign-tool ✓）。"""
+
+    def test_auto_clones_selfsign_and_signs_with_force(self):
+        with _RepoDir() as d:
+            os.environ[eb.ENV_BUILD_DIR] = os.path.join(d, "scratch")
+            argv_dump = os.path.join(d, "scratch", "sign_argv.txt")
+
+            def fake_git(args, _log):
+                self.assertEqual(args[0], "clone")
+                self.assertTrue(args[-1].endswith("sign-tool.new"))
+                _write(os.path.join(args[-1], eb.SIGN_TOOL),
+                       "import sys\n"
+                       f"open({argv_dump!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+                       "open(sys.argv[1], 'a').write('SIGNED\\n')\n", mode=0o755)
+
+            real = eb._git
+            eb._git = fake_git
+            try:
+                tool = eb.ensure_sign_tool(log=lambda _m: None)
+                self.assertTrue(tool.endswith(eb.SIGN_TOOL))
+                self.assertTrue(os.path.isfile(tool))
+                elf = os.path.join(d, "x.so")
+                _write(elf, "ELF-HEADER")
+                eb._sign([elf], lambda _m: None)
+                with open(elf, encoding="utf-8") as fh:
+                    self.assertIn("SIGNED", fh.read())
+                with open(argv_dump, encoding="utf-8") as fh:
+                    self.assertIn("--force", fh.read())     # 已有段时先剥离再签 ✓
+            finally:
+                eb._git = real
+
+    def test_skip_mode_does_not_clone(self):
+        with _RepoDir() as d:
+            os.environ[eb.ENV_BUILD_DIR] = os.path.join(d, "s")
+            os.environ[eb.ENV_SIGN] = "skip"
+            called = []
+            real = eb._git
+            eb._git = lambda *_a, **_k: called.append(1)
+            try:
+                elf = os.path.join(d, "y.so")
+                _write(elf, "X")
+                eb._sign([elf], lambda _m: None)
+                self.assertEqual(called, [])
+            finally:
+                eb._git = real
+
+    def test_custom_signer_path_is_used_without_force(self):
+        with _RepoDir() as d:
+            dump = os.path.join(d, "argv.txt")
+            tool = os.path.join(d, "my-sign.py")
+            _write(tool, "import sys\n"
+                         f"open({dump!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+                         "open(sys.argv[1], 'a').write('OK\\n')\n", mode=0o755)
+            os.environ[eb.ENV_SIGN] = tool
+            elf = os.path.join(d, "z.so")
+            _write(elf, "X")
+            eb._sign([elf], lambda _m: None)
+            with open(dump, encoding="utf-8") as fh:
+                line = fh.read().strip()
+            self.assertIn(os.path.basename(elf), line)
+            self.assertNotIn("--force", line)               # 自定义工具不乱加参数 ✓
+
+    def test_clone_failure_falls_back_to_cached_tool(self):
+        with _RepoDir() as d:
+            os.environ[eb.ENV_BUILD_DIR] = os.path.join(d, "s")
+            cached = os.path.join(d, "s", "sign-tool")
+            _fake_sign_tool_repo(cached)
+
+            def boom(_args, _log):
+                raise eb.BuildError("网络不通")
+
+            real = eb._git
+            eb._git = boom
+            try:
+                logs = []
+                tool = eb.ensure_sign_tool(log=logs.append, refresh=True)
+                self.assertEqual(tool, os.path.join(cached, eb.SIGN_TOOL))
+                self.assertTrue(any("缓存" in line for line in logs))
+            finally:
+                eb._git = real
+
+
 class TestBuildAndInstall(_Env):
     def test_build_install_sign_end_to_end(self):
         with _RepoDir() as d:
@@ -302,8 +395,8 @@ class TestBuildAndInstall(_Env):
             os.environ[eb.ENV_LIB_DIR] = os.path.join(d, "lib")
             with self.assertRaises(eb.BuildError) as cm:
                 eb.ensure_engine_lib(model, log=lambda _m: None)
-            self.assertIn("ohos-sign-elf.py", str(cm.exception))
             self.assertIn(eb.ENV_SIGN, str(cm.exception))
+            self.assertIn("不存在", str(cm.exception))
 
     def test_build_failure_reports_log_path(self):
         with _RepoDir() as d:

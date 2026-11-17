@@ -25,7 +25,8 @@ CANN_LLM_CLLM_SRC        直接用本地源码树（跳过 clone，便于离线/
 CANN_LLM_CLLM_BUILD_DIR  构建根目录（默认 <cann-llm>/.tmp/engine-build）
 CANN_LLM_CLLM_REFRESH    1=强制重新 clone（默认复用已 clone 的）
 CANN_LLM_CLLM_AUTOBUILD  1=允许自动构建 / 0=禁止 / 缺省=条件齐了才编
-CANN_LLM_CLLM_SIGN       auto(默认找 PATH 上的 ohos-sign-elf.py) / skip / 指定路径
+CANN_LLM_CLLM_SIGN       auto(默认) / skip / 指定签名器路径
+CANN_LLM_CLLM_SIGN_REPO  签名工具仓库（默认 https://gitcode.com/hu60cn/ohos-bst-light）
 CANN_LLM_CLLM_LIB_DIR    最终库安装目录（默认 <cann-llm>/lib）
 OHOS_SDK_NATIVE          OHOS SDK 的 native 子树（含 sysroot/ 与 llvm/bin/clang）
 ```
@@ -36,7 +37,10 @@ OHOS_SDK_NATIVE          OHOS SDK 的 native 子树（含 sysroot/ 与 llvm/bin/
 ## 为什么不能只编不签
 
 设备上未签名的 ``.so`` 会被 ``dlopen`` 拒绝（``Permission denied`` ✗），所以构建完
-必须用 ``ohos-sign-elf.py`` 签名再安装。
+必须签名再安装。
+
+签名用 **ohos-bst-light 的 ``selfsign.py``**：该仓库同样在首次构建时 clone 到
+``<scratch>/sign-tool``，调用方式 ``python3 selfsign.py <elf> --force``（就地签）。
 """
 
 from __future__ import annotations
@@ -77,6 +81,7 @@ ENV_BUILD_DIR = "CANN_LLM_CLLM_BUILD_DIR"
 ENV_REFRESH = "CANN_LLM_CLLM_REFRESH"
 ENV_AUTOBUILD = "CANN_LLM_CLLM_AUTOBUILD"
 ENV_SIGN = "CANN_LLM_CLLM_SIGN"
+ENV_SIGN_REPO = "CANN_LLM_CLLM_SIGN_REPO"
 ENV_LIB_DIR = "CANN_LLM_CLLM_LIB_DIR"
 ENV_SDK = "OHOS_SDK_NATIVE"
 
@@ -84,6 +89,10 @@ ENV_SDK = "OHOS_SDK_NATIVE"
 BUILD_SCRIPT = os.path.join("scripts", "cann_lm_engine", "build_ohos.sh")
 #: 构建产物目录（相对源码树，由 build_ohos.sh 决定）
 BUILD_DIR = "build_ohos"
+#: 签名工具仓库（ohos-bst-light，里面有 selfsign.py）
+SIGN_REPO_URL = "https://gitcode.com/hu60cn/ohos-bst-light"
+#: 工具名
+SIGN_TOOL = "selfsign.py"
 #: 需要安装/签名两个库
 LIB_NAMES = ("libcann_lm_engine.so", "libc++_shared.so")
 #: 判断"源码比产物新"时扫的扩展名
@@ -325,7 +334,7 @@ def build(plan: BuildPlan, *, force: bool = False, log: Log = _stderr) -> str:
         logf.flush()
         timeout = float(os.environ.get("CANN_LLM_CLLM_BUILD_TIMEOUT", "3600"))
         # ★--no-signed★：脚本自带的 jar 签名器在多数环境里没有 ✗（报了就给 rc=1 ✗），
-        #   签名由本模块 install() 用 ohos-sign-elf.py 统一做 ✓。
+        #   签名由本模块 install() 用 ohos-bst-light 的 selfsign.py 统一做 ✓。
         try:
             proc = subprocess.run(["bash", plan.script, "--no-signed"], cwd=plan.src, env=env,
                                   stdout=logf, stderr=subprocess.STDOUT, timeout=timeout)
@@ -343,23 +352,61 @@ def build(plan: BuildPlan, *, force: bool = False, log: Log = _stderr) -> str:
     return plan.built_lib
 
 
+def ensure_sign_tool(scratch: Optional[str] = None, *, log: Log = _stderr,
+                     refresh: bool = False) -> str:
+    """拿到 ``selfsign.py``：没有就从 ohos-bst-light **clone 到 ``<scratch>/sign-tool``**。
+
+    与源码同理：已 clone 且不 refresh 就复用；clone 失败但有缓存时用缓存并告警。
+    """
+    root = scratch or scratch_root()
+    dest = os.path.join(root, "sign-tool")
+    tool = os.path.join(dest, SIGN_TOOL)
+    if not refresh and os.path.isfile(tool):
+        return tool
+    fresh = dest + ".new"
+    if os.path.isdir(fresh):
+        shutil.rmtree(fresh)
+    os.makedirs(root, exist_ok=True)
+    url = os.environ.get(ENV_SIGN_REPO, SIGN_REPO_URL).strip() or SIGN_REPO_URL
+    try:
+        _git(["clone", "--depth", "1", url, fresh], log)
+    except BuildError:
+        if os.path.isfile(tool):
+            log("签名工具 clone 失败，改用已缓存的 selfsign.py")
+            return tool
+        raise
+    if os.path.isdir(dest):
+        shutil.rmtree(dest)
+    os.replace(fresh, dest)
+    if not os.path.isfile(tool):
+        raise BuildError(f"clone 完成但没找到 {SIGN_TOOL}（仓库={url}）")
+    log(f"签名工具已就绪：{tool}")
+    return tool
+
+
 def _sign(files: Sequence[str], log: Log) -> None:
-    """给库签名（设备上未签名会被 dlopen 拒绝 ✗）。"""
+    """给库签名（设备上未签名会被 dlopen 拒绝 ✗）。
+
+    * 默认（``CANN_LLM_CLLM_SIGN`` 空/auto）⇒ clone ohos-bst-light，用 ``selfsign.py``；
+    * ``skip`` ⇒ 跳过（仅本机检查）；
+    * 其它值 ⇒ 当作签名器路径（自定义工具按 ``<tool> <elf>`` 调用）。
+    """
     mode = os.environ.get(ENV_SIGN, "auto").strip()
     if mode == "skip":
         log("按配置跳过签名（仅本机检查可用；设备上会 Permission denied ✗）")
         return
-    tool = mode if mode not in ("", "auto") else shutil.which("ohos-sign-elf.py")
-    if not tool or not os.path.isfile(tool):
-        raise BuildError(
-            "找不到 ohos-sign-elf.py（设备上未签名的 .so 会被 dlopen 拒绝：Permission denied）。\n"
-            "  装好签名工具后重试，或设 CANN_LLM_CLLM_SIGN=/path/to/ohos-sign-elf.py；\n"
-            "  只在本机检查、不上设备时可设 CANN_LLM_CLLM_SIGN=skip。")
+    if mode not in ("", "auto"):
+        tool = mode
+        if not os.path.isfile(tool):
+            raise BuildError(f"{ENV_SIGN}={tool} 不存在")
+    else:
+        tool = ensure_sign_tool(log=log)
     log(f"签名：{tool}")
-    # ★ohos-sign-elf.py 的 path 是单个位置参数（文件或目录）★ ——
-    #   一次传多个文件会报 "unrecognized arguments" ✗（实测），所以逐个签 ✓
+    use_force = os.path.basename(tool) == SIGN_TOOL
     for path in files:
-        cmd = ([sys.executable, tool, path] if tool.endswith(".py") else [tool, path])
+        cmd = [sys.executable, tool, path] if tool.endswith(".py") else [tool, path]
+        if use_force:
+            cmd.append("--force")          # selfsign.py：已有 .codesign 段时先剥离再重签 ✓
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise BuildError(

@@ -9149,7 +9149,7 @@ cllm 部署目录里也有 `prefill/`、`decode/` —— 首字母 `pre`/`dec` *
 ② model.json 必须补 sliding_window（取 HF 真值）与 sliding_window_head_dim
 ③ 编译前 source CANN 的 set_env.sh（ccec + TBE 路径）；source 不能接管道
 ④ 输出目录不能是 bind mount（rename EXDEV）
-⑤ .so 必须 ohos-sign-elf.py 签名（未签名 dlopen = Permission denied）
+⑤ .so 必须签名（未签名 dlopen = Permission denied）—— 用 ohos-bst-light 的 selfsign.py
 ⑥ weight/meta.json 里 hash_to_weight_file 要改成设备路径（否则 INVALID_ARGUMENT 且无日志）
 ⑦ embedding_weights 四段文件，seg3/seg4 = 1.0（图内已乘 embed_scale）
 ```
@@ -9194,8 +9194,10 @@ tests/test_backend_detect.py  新增 cllm 三条（含"cllm 优先于 nnrt"的�
      （否则 cmake 停在 nlohmann_json not found ✗）
   3) 构建：OHOS_SDK_NATIVE 必需（SDK 不能 clone），跑 build_ohos.sh **--no-signed**
      （脚本自带 jar 签名器大多数环境没有 ⇒ 会 rc=1 ✗；签名统一由我们在 install 做）
-  4) 签名+安装：ohos-sign-elf.py 签 libcann_lm_engine.so / libc++_shared.so
-     （★工具只吃一个 path 参数★：一次传多个文件会 unrecognized arguments ✗ ⇒ 逐个签），
+  4) 签名+安装：**selfsign.py**（从 https://gitcode.com/hu60cn/ohos-bst-light clone 到
+     <scratch>/sign-tool）逐个签 libcann_lm_engine.so / libc++_shared.so，
+     命令 `python3 selfsign.py <elf> --force`（已有 .codesign 段时先剥离再签 ✓）；
+     也可用 CANN_LLM_CLLM_SIGN_REPO 换源、CANN_LLM_CLLM_SIGN=skip 跳过，
      装到 **<cann-llm>/lib/**（加载器优先这里）；签名工具找不到时报错并给出三种出路
      （装工具 / 指定路径 / skip 仅供本机检查）
   5) 缓存：产物比源码新就跳过（force/删除 .tmp 可强制）；日志落 .tmp/engine-build/

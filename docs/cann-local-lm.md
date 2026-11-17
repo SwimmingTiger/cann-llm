@@ -44,7 +44,7 @@ decode.omc    每步喂 1 个 token                      ← 同样 35 层全在
 |---|---|---|
 | ① | Linux x86_64 + Python 3.12 + `torch==2.9.0+cpu` + `torchair` + `torch_delegate` | 导出走 torchair/torch_delegate 的图捕获 |
 | ② | CANN toolkit 9.3.0（**mobile-station** 变体）+ `Ascend-cann-kirinx90-ops` | 目标 SoC 是 KirinX90；`ccec`（毕昇）编 kernel |
-| ③ | OHOS SDK（`native` 子树，含 `sysroot` + `llvm/bin/clang`）+ `ohos-sign-elf.py` | 交叉编译 aarch64/musl 的 `.so` 并签名 |
+| ③ | OHOS SDK（`native` 子树，含 `sysroot` + `llvm/bin/clang`）+ `selfsign.py`（自动 clone） | 交叉编译 aarch64/musl 的 `.so` 并签名 |
 | ④ | 设备（HarmonyOS，KirinX90） | 运行时 |
 
 > **宿主 ABI 的坑**：如果宿主是滚动更新的发行版（glibc 2.38+/GCC 16），直接用宿主
@@ -228,7 +228,8 @@ python -m cann_llm.launcher chat -d <model>   # 库缺失 ⇒ 自动 clone + 构
 | `CANN_LLM_CLLM_BUILD_DIR` | 构建根目录，默认 `<cann-llm>/.tmp/engine-build` |
 | `CANN_LLM_CLLM_REFRESH` | `1` = 强制重新 clone |
 | `CANN_LLM_CLLM_AUTOBUILD` | `1`/`0` 强制开/关，缺省=有 SDK 就自动 |
-| `CANN_LLM_CLLM_SIGN` | `auto`（找 PATH 上 `ohos-sign-elf.py`）/ `skip` / 指定路径 |
+| `CANN_LLM_CLLM_SIGN` | `auto`（clone ohos-bst-light 用其 `selfsign.py`）/ `skip` / 指定签名器路径 |
+| `CANN_LLM_CLLM_SIGN_REPO` | 签名工具仓库，默认 `https://gitcode.com/hu60cn/ohos-bst-light` |
 
 产物比源码新时**跳过重复构建**；`force=True`（或删 `.tmp/engine-build`）可强制重编。
 
@@ -236,10 +237,13 @@ python -m cann_llm.launcher chat -d <model>   # 库缺失 ⇒ 自动 clone + 构
 
 ```bash
 export OHOS_SDK_NATIVE=<sdk>/native          # 含 sysroot/ 与 llvm/bin/clang
-bash "$SANDBOX/scripts/cann_lm_engine/build_ohos.sh"
+bash "$SANDBOX/scripts/cann_lm_engine/build_ohos.sh" --no-signed
 # → build_ohos/libcann_lm_engine.so + libc++_shared.so（ELF aarch64）
 
-ohos-sign-elf.py libcann_lm_engine.so libc++_shared.so
+# 签名：clone ohos-bst-light，用它的 selfsign.py 逐个签（就地）
+git clone --depth 1 https://gitcode.com/hu60cn/ohos-bst-light .tmp/engine-build/sign-tool
+python3 .tmp/engine-build/sign-tool/selfsign.py libcann_lm_engine.so --force
+python3 .tmp/engine-build/sign-tool/selfsign.py libc++_shared.so --force
 ```
 
 **不签名 ⇒ `dlopen` 报 `Permission denied`** ✗（不是文件权限位，是 OHOS 的代码签名校验）。
@@ -369,7 +373,7 @@ python -m cann_llm.launcher chat -d <model> -b cllm
 | `kv_pool.ensure: kv_len dim mismatch` | `kv_cache_max_len ≠ sliding_window + prefill_len` | §2.3（576） |
 | `graph has per_layer_token_identity_scale slot but embedding scale segment is absent` | `embedding_weights.bin` 只有两段 | §4.2 补 seg3/seg4 |
 | 能出字但**乱码/语义错** | scale 段填了 `sqrt(hidden)`（图内已乘一次） | seg3/seg4 填 **1.0** |
-| `dlopen ... Permission denied` | `.so` 未签名 | `ohos-sign-elf.py` |
+| `dlopen ... Permission denied` | `.so` 未签名 | `selfsign.py <elf> --force`（自动模式会自己 clone 工具） |
 | `cllm 后端需要模型目录` / `找不到 cann-local-lm 引擎库` | 模型目录或库没配 | `-d` + `CANN_LLM_CLLM_LIB` |
 
 ## 7. 限制与后续
