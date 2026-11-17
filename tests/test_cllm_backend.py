@@ -169,6 +169,23 @@ class TestStatusAndHelpers(unittest.TestCase):
         self.assertEqual(_chat_template({"model_type": "qwen3"}), "chatml")
 
 
+class TestSpecialStopIds(unittest.TestCase):
+    """gemma4 的 <turn|>(106) 必须进 stop_token_ids（否则一直重复它 ✗）。"""
+
+    def test_parse_special_tokens(self):
+        from cann_llm.backends.cllm import special_stop_ids
+        meta = {"tokenizer_config": {"special_tokens": {"<turn|>": 106, "x": "7"}}}
+        self.assertEqual(special_stop_ids(meta), [106, 7])
+
+    def test_missing_or_bad(self):
+        from cann_llm.backends.cllm import special_stop_ids
+        self.assertEqual(special_stop_ids({}), [])
+        self.assertEqual(special_stop_ids({"tokenizer_config": {}}), [])
+        self.assertEqual(special_stop_ids({"tokenizer_config": {"special_tokens": None}}), [])
+        self.assertEqual(special_stop_ids(
+            {"tokenizer_config": {"special_tokens": {"bad": "abc"}}}), [])
+
+
 class TestBackendLoadErrors(unittest.TestCase):
     def test_incomplete_model_dir_raises_before_touching_lib(self):
         with tempfile.TemporaryDirectory() as d:

@@ -55,6 +55,7 @@ __all__ = [
     "find_engine_lib",
     "status_text",
     "split_stop",
+    "special_stop_ids",
 ]
 
 #: 显式指定引擎库的变量
@@ -97,6 +98,27 @@ _TESTCASE_KEYS = {
     "model_weight_dir_prefill": "prefill_weight",
     "model_weight_dir_decode": "decode_weight",
 }
+
+
+def special_stop_ids(meta: "dict") -> "List[int]":
+    """从 meta 的 ``tokenizer_config.special_tokens`` 取「应当停止」的 token id。
+
+    gemma4 会在句末吐 ``<turn|>``(106)（多轮结束符）；不把它当停止符，模型会一直
+    重复这个 token ✗（实测 256 样本量化模型刷了半屏 ``<turn|>``）。
+    引擎的停止集合 = ``eos_token_id``（meta 自带）+ 这里给的 id ✓。
+    """
+    tc = (meta or {}).get("tokenizer_config") or {}
+    special = tc.get("special_tokens") or {}
+    out: "List[int]" = []
+    if isinstance(special, dict):
+        for v in special.values():
+            try:
+                i = int(v)
+            except (TypeError, ValueError):
+                continue
+            if i not in out:
+                out.append(i)
+    return out
 
 
 def status_text(code: int) -> str:
@@ -336,6 +358,7 @@ class CllmBackend(EngineBackend):
         #: CLI/服务在 load() 之后会读它（没显式指定采样参数时用）
         self.default_params = default_params or GenerationParams()
         self._info = ModelInfo(id="unknown", backend=self.name)
+        self._stop_ids: "List[int]" = []
         self._lock = threading.Lock()
         self._closed = False
 
@@ -360,6 +383,7 @@ class CllmBackend(EngineBackend):
         lib = self._lib
 
         meta = _read_json(art["meta_json"])
+        self._stop_ids = special_stop_ids(meta)
         mc = meta.get("model_config") or {}
         kv_max = int(mc.get("kv_cache_max_len") or 0)
         vocab = int(mc.get("vocab_size") or 0)
@@ -453,9 +477,12 @@ class CllmBackend(EngineBackend):
         )
         stop_keep = [s.encode() for s in (params.stop or ()) if s]
         stop_arr = (ctypes.c_char_p * len(stop_keep))(*stop_keep) if stop_keep else None
+        stop_ids = list(getattr(self, "_stop_ids", []) or [])
+        ids_arr = (ctypes.c_uint32 * len(stop_ids))(*stop_ids) if stop_ids else None
         options = _RequestOptions(
             max_tokens=int(params.max_tokens),
-            stop_token_ids=None, stop_token_ids_count=0,
+            stop_token_ids=ctypes.cast(ids_arr, ctypes.POINTER(ctypes.c_uint32)) if ids_arr else None,
+            stop_token_ids_count=len(stop_ids),
             stop_strings=ctypes.cast(stop_arr, ctypes.POINTER(ctypes.c_char_p)) if stop_arr else None,
             stop_strings_count=len(stop_keep),
         )
