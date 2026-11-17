@@ -61,3 +61,6 @@ scripts/model-conversion/qwen38/nnrt_builder/nnrt_build
 scripts/model-conversion/qwen38/nnrt_builder/*_graph.txt
 scripts/model-conversion/qwen38/nnrt_builder/real_*.txt
 scripts/model-conversion/qwen38/nnrt_builder/[a-z]_*.txt
+
+# 构建/调试临时目录（cllm 引擎自动构建也落在这里，见 src/cann_llm/engine_build.py）
+.tmp/

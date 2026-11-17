@@ -154,13 +154,22 @@ def resolve_artifact(model_dir: str) -> Dict[str, str]:
 
 
 def find_engine_lib(model_dir: Optional[str] = None) -> str:
-    """按优先级找引擎库；都没有就抛 :class:`BackendUnavailableError` 并列出试过的路径。"""
+    """按优先级找引擎库；都没有就抛 :class:`BackendUnavailableError` 并列出试过的路径。
+
+    顺序：``$CANN_LLM_CLLM_LIB`` → ``<cann-llm>/lib/``（自动构建的安装位置）→
+    模型目录的 ``lib/`` / ``py/cann_local_lm/lib/`` → ``/system/lib64/``。
+    """
     tried: List[str] = []
     env = os.environ.get(CLLM_LIB_ENV)
     if env:
         tried.append(f"{CLLM_LIB_ENV}={env}")
         if os.path.isfile(env):
             return env
+    from ..engine_build import repo_root
+    repo_lib = os.path.join(repo_root(), "lib", "libcann_lm_engine.so")
+    tried.append(repo_lib)
+    if os.path.isfile(repo_lib):
+        return repo_lib
     if model_dir:
         for rel in _LIB_IN_MODEL:
             cand = os.path.join(model_dir, rel)
@@ -246,6 +255,14 @@ class _Lib:
     """把 C API 绑成 Python 方法（一次绑定，多次调用）。"""
 
     def __init__(self, path: str) -> None:
+        # libc++_shared.so 是引擎的 NEEDED，但进程启动后改 LD_LIBRARY_PATH 没用 ✗
+        # ⇒ 先按绝对路径把它 RTLD_GLOBAL 加载进来 ✓（引擎随后就能解析到它）
+        cxx = os.path.join(os.path.dirname(os.path.abspath(path)), "libc++_shared.so")
+        if os.path.isfile(cxx):
+            try:
+                ctypes.CDLL(cxx, mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                pass
         try:
             self.lib = ctypes.CDLL(path, mode=ctypes.RTLD_LOCAL)
         except OSError as exc:
@@ -330,8 +347,17 @@ class CllmBackend(EngineBackend):
         if not self.model_dir:
             raise ModelLoadError("cllm 后端需要模型目录（-d 或 models/<名字>/）")
         art = resolve_artifact(self.model_dir)
-        lib = self._lib or _Lib(self.lib_path or find_engine_lib(self.model_dir))
-        self._lib = lib
+        if self._lib is None:
+            lib_path = self.lib_path or os.environ.get(CLLM_LIB_ENV) or ""
+            if not lib_path or not os.path.isfile(lib_path):
+                try:
+                    lib_path = find_engine_lib(self.model_dir)
+                except BackendUnavailableError:
+                    # ★缺库就编★（需要源码树 + OHOS SDK；条件不足时这里会抛出带指引的错）
+                    from ..engine_build import ensure_engine_lib
+                    lib_path = ensure_engine_lib(self.model_dir)
+            self._lib = _Lib(lib_path)
+        lib = self._lib
 
         meta = _read_json(art["meta_json"])
         mc = meta.get("model_config") or {}

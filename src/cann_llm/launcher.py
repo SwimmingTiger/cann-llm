@@ -124,6 +124,12 @@ def pick_engine_lib(backend: str, model_dir: "Optional[str]" = None) -> "tuple[s
     if env:
         return var, env, kind
     if backend == "cllm":
+        # 自动构建把库装在 <cann-llm>/lib/ ⇒ 先看这里 ✓
+        repo_lib = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "..", "lib", "libcann_lm_engine.so")
+        repo_lib = os.path.abspath(repo_lib)
+        if os.path.isfile(repo_lib):
+            return var, repo_lib, kind
         if model_dir:
             for rel in _CLLM_LIB_IN_MODEL:
                 cand = os.path.join(model_dir, rel)
@@ -281,10 +287,15 @@ def run_chat(root: str, argv: "List[str]") -> int:
     d = find_model_dir(root, model_dir)
     var, lib, kind = pick_engine_lib(backend, d)
     if backend == "cllm" and not lib:
-        die("找不到 cann-local-lm 引擎库 libcann_lm_engine.so：\n"
-            "    - 用 CANN_LLM_CLLM_LIB=/path/libcann_lm_engine.so 指定，或\n"
-            f"    - 放到模型目录的 lib/ 下（当前模型目录: {d or '未指定'}）\n"
-            "    它不是系统库：要从 cann-local-lm 源码交叉编译并签名，见 docs/cann-local-lm.md")
+        # ★缺库就编★：源码树 + OHOS SDK 都在时自动构建并签名（见 engine_build.py）
+        try:
+            from .engine_build import ensure_engine_lib
+            lib = ensure_engine_lib(d or "")
+            ok(f"{kind}: {lib}（自动构建）")
+        except Exception as exc:            # noqa: BLE001 —— 统一成可操作的 die
+            die(f"找不到 cann-local-lm 引擎库 libcann_lm_engine.so，自动构建也没成：\n"
+                f"    {exc}\n"
+                "    也可以直接给现成的库：CANN_LLM_CLLM_LIB=/path/libcann_lm_engine.so")
 
     py = current_python()
     if not libc_compatible(py):

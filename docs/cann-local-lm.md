@@ -196,7 +196,43 @@ export TE_PARALLEL_COMPILER=0     # 串行更稳（并发版偶发主进程 abor
 
 ## 4. ③ 部署到设备
 
-### 4.1 交叉编译引擎 `.so` 并**签名**
+### 4.1 交叉编译引擎 `.so` 并签名
+
+#### 4.1.1 缺库时自动构建（推荐）
+
+`cllm` 后端发现引擎库不存在时会**自动构建**：从上游 **clone 源码**到 cann-llm 的
+构建临时目录（**不在 `/tmp`**），编完签名，装到 `<模型目录>/lib/`：
+
+```bash
+export OHOS_SDK_NATIVE=<ohos-sdk>/native     # 必需（SDK 不能自动下载）
+# 可选：CANN_LLM_CLLM_REPO / _REF / _BUILD_DIR / _SRC / _AUTOBUILD / _SIGN
+python -m cann_llm.launcher chat -d <model>   # 库缺失 ⇒ 自动 clone + 构建 + 签名 + 安装
+```
+
+目录约定（全部在仓库内 ✓）：
+
+```
+<cann-llm>/.tmp/engine-build/src/            # clone 的 cann-local-lm（--depth 1）
+<cann-llm>/.tmp/engine-build/src/build_ohos/ # 构建产物（.so）
+<cann-llm>/.tmp/engine-build/build-engine.log# 构建日志（失败先看它）
+<cann-llm>/lib/libcann_lm_engine.so          # ★安装 + 签名的最终库★（加载器优先这里）
+<cann-llm>/lib/libc++_shared.so
+```
+
+| 变量 | 作用 |
+|---|---|
+| `OHOS_SDK_NATIVE` | **必需**，SDK native 子树（`sysroot/` + `llvm/bin/clang`） |
+| `CANN_LLM_CLLM_REPO` | 上游地址，默认 `https://gitcode.com/cann/cann-local-lm.git` |
+| `CANN_LLM_CLLM_REF` | 要构建的分支/标签（默认默认分支） |
+| `CANN_LLM_CLLM_SRC` | 直接用本地源码树（跳过 clone，离线/固定版本时用） |
+| `CANN_LLM_CLLM_BUILD_DIR` | 构建根目录，默认 `<cann-llm>/.tmp/engine-build` |
+| `CANN_LLM_CLLM_REFRESH` | `1` = 强制重新 clone |
+| `CANN_LLM_CLLM_AUTOBUILD` | `1`/`0` 强制开/关，缺省=有 SDK 就自动 |
+| `CANN_LLM_CLLM_SIGN` | `auto`（找 PATH 上 `ohos-sign-elf.py`）/ `skip` / 指定路径 |
+
+产物比源码新时**跳过重复构建**；`force=True`（或删 `.tmp/engine-build`）可强制重编。
+
+#### 4.1.2 手工构建（调试/离线时）
 
 ```bash
 export OHOS_SDK_NATIVE=<sdk>/native          # 含 sysroot/ 与 llvm/bin/clang

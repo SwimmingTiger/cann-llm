@@ -9179,3 +9179,30 @@ tests/test_backend_detect.py  新增 cllm 三条（含"cllm 优先于 nnrt"的�
    ⇒ 后端做"保留后缀"裁剪 split_stop()：命中即截断；若结尾是某个 stop 的前缀
    就先扣住不吐 ✓（跨 token 也能拼上 ✓，单测覆盖 5 条）。
 ```
+
+### 167.8 缺引擎库时自动构建（clone → 编 → 签名 → 装）
+
+```
+痛点：cllm 的引擎库是交叉编译产物，用户往往只有源码仓库地址 ⇒ 首次 -b cllm 直接报
+      "找不到 libcann_lm_engine.so" ✗，然后得手工跑一长串 cmake/SDK/签名命令。
+
+做法（src/cann_llm/engine_build.py，全在仓库目录内，★不用 /tmp★）：
+  1) 源码：没现成的就从上游 clone 到 <cann-llm>/.tmp/engine-build/src（--depth 1，
+     CANN_LLM_CLLM_REPO/_REF 可换源/换版本）；CANN_LLM_CLLM_SRC 可跳过 clone；
+     已 clone 且不 refresh 就复用；clone 失败但有缓存 ⇒ 用缓存并告警 ✓
+  2) 三方库：<src>/output/third_party/json 缺 ⇒ 先跑 `bash build.sh third_party`
+     （否则 cmake 停在 nlohmann_json not found ✗）
+  3) 构建：OHOS_SDK_NATIVE 必需（SDK 不能 clone），跑 build_ohos.sh **--no-signed**
+     （脚本自带 jar 签名器大多数环境没有 ⇒ 会 rc=1 ✗；签名统一由我们在 install 做）
+  4) 签名+安装：ohos-sign-elf.py 签 libcann_lm_engine.so / libc++_shared.so，
+     装到 **<cann-llm>/lib/**（加载器优先这里）；签名工具找不到时报错并给出三种出路
+     （装工具 / 指定路径 / skip 仅供本机检查）
+  5) 缓存：产物比源码新就跳过（force/删除 .tmp 可强制）；日志落 .tmp/engine-build/
+     build-engine.log
+
+库查找顺序：$CANN_LLM_CLLM_LIB → <cann-llm>/lib → 模型目录 lib/ → 系统。
+_Lib 加载前会先按绝对路径 RTLD_GLOBAL 预加载同目录 libc++_shared.so —— 它是引擎的
+NEEDED，而进程启动后再改 LD_LIBRARY_PATH 是无效的 ✗。
+
+实测（宿主，仓库内 <cann-llm>/.tmp 路径，非 /tmp）：
+  clone ✓ → third_party ✓ → build ✓（aarch64 .so）→ 安装到 <cann-llm>/lib ✓
