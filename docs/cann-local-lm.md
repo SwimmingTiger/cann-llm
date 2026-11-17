@@ -205,8 +205,14 @@ export TE_PARALLEL_COMPILER=0     # 串行更稳（并发版偶发主进程 abor
 
 ```bash
 export OHOS_SDK_NATIVE=<ohos-sdk>/native     # 必需（SDK 不能自动下载）
+# 方式一：直接跑脚本（推荐，等价于"缺库时的自动构建"，也可单独用于预构建）
+scripts/build_cllm_engine.sh                  # 产物 → <cann-llm>/lib/
+scripts/build_cllm_engine.sh --force --refresh # 强制重编 + 重新 clone 源码/签名工具
+scripts/build_cllm_engine.sh --skip-sign      # 仅本机检查（设备上加载会 Permission denied）
+
+# 方式二：让 `-b cllm` 自己发现缺库 ⇒ 自动 clone + 构建 + 签名 + 安装
 # 可选：CANN_LLM_CLLM_REPO / _REF / _BUILD_DIR / _SRC / _AUTOBUILD / _SIGN
-python -m cann_llm.launcher chat -d <model>   # 库缺失 ⇒ 自动 clone + 构建 + 签名 + 安装
+python -m cann_llm.launcher chat -d <model>
 ```
 
 目录约定（全部在仓库内 ✓）：

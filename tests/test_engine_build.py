@@ -411,5 +411,45 @@ class TestBuildAndInstall(_Env):
             self.assertIn("build-engine.log", str(cm.exception))
 
 
+class TestCli(_Env):
+    """`python -m cann_llm.engine_build` 与 scripts/build_cllm_engine.sh 的入口。"""
+
+    def test_cli_end_to_end_skip_sign(self):
+        with _RepoDir() as d:
+            src, sdk = _fake_tree(d)
+            lib_dir = os.path.join(d, "lib")
+            rc = eb.main(["--src", src, "--sdk", sdk, "--lib-dir", lib_dir,
+                          "--build-dir", os.path.join(d, "build"), "--skip-sign"])
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.isfile(os.path.join(lib_dir, "libcann_lm_engine.so")))
+
+    def test_cli_help(self):
+        with self.assertRaises(SystemExit) as cm:
+            eb.main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_shell_script_help(self):
+        import subprocess
+        import sys
+        script = os.path.join(eb.repo_root(), "scripts", "build_cllm_engine.sh")
+        self.assertTrue(os.path.isfile(script))
+        env = {k: v for k, v in os.environ.items() if k not in _ENV_KEYS}
+        env["PYTHON"] = sys.executable
+        proc = subprocess.run(["sh", script, "--help"], capture_output=True,
+                              text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("build_cllm_engine", proc.stdout)
+
+    def test_shell_script_without_sdk_is_actionable(self):
+        import subprocess
+        import sys
+        script = os.path.join(eb.repo_root(), "scripts", "build_cllm_engine.sh")
+        env = {k: v for k, v in os.environ.items() if k not in _ENV_KEYS}
+        env["PYTHON"] = sys.executable
+        proc = subprocess.run(["sh", script], capture_output=True, text=True, env=env)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(eb.ENV_SDK, proc.stderr + proc.stdout)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

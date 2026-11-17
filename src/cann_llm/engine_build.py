@@ -69,6 +69,7 @@ __all__ = [
     "build",
     "install",
     "ensure_engine_lib",
+    "main",
 ]
 
 #: 上游仓库（cann-local-lm）
@@ -450,3 +451,60 @@ def ensure_engine_lib(model_dir: str, *, log: Log = _stderr, src: Optional[str] 
     plan = make_plan(model_dir, src=src, sdk=sdk, log=log, refresh=refresh)
     build(plan, force=force, log=log)
     return install(plan, log=log)
+
+
+# ---------------------------------------------------------------- 命令行入口
+
+def main(argv: "Optional[Sequence[str]]" = None) -> int:
+    """``python -m cann_llm.engine_build`` —— 手动触发一次"clone + 构建 + 签名 + 安装"。
+
+    ``scripts/build_cllm_engine.sh`` 只是找解释器 + 转发参数，逻辑都在这里。
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="build_cllm_engine",
+        description="构建 cann-local-lm 引擎库 libcann_lm_engine.so"
+                    "（缺失则 clone 源码 → 编 → 签名 → 装到 <cann-llm>/lib）")
+    ap.add_argument("-d", "--model-dir", default="",
+                    help="模型目录（可选；默认 <cann-llm>/.tmp/model）")
+    ap.add_argument("--sdk", default="", help="OHOS SDK native 子树（等同 OHOS_SDK_NATIVE）")
+    ap.add_argument("--src", default="", help="本地源码树（跳过 clone）")
+    ap.add_argument("--repo", default="", help="源码仓库（默认 gitcode cann-local-lm）")
+    ap.add_argument("--ref", default="", help="分支/标签")
+    ap.add_argument("--lib-dir", default="", help="安装目录（默认 <cann-llm>/lib）")
+    ap.add_argument("--build-dir", default="", help="构建临时根（默认 <cann-llm>/.tmp/engine-build）")
+    ap.add_argument("--sign-tool", default="", help="自定义签名器（默认 clone ohos-bst-light 用 selfsign.py）")
+    ap.add_argument("--skip-sign", action="store_true", help="跳过签名（仅本机检查，设备上加载会 Permission denied）")
+    ap.add_argument("--force", action="store_true", help="即使产物比源码新也重编")
+    ap.add_argument("--refresh", action="store_true", help="强制重新 clone 源码与签名工具")
+    args = ap.parse_args(list(argv) if argv is not None else None)
+
+    if args.sdk:
+        os.environ[ENV_SDK] = args.sdk
+    if args.repo:
+        os.environ[ENV_REPO] = args.repo
+    if args.ref:
+        os.environ[ENV_REF] = args.ref
+    if args.lib_dir:
+        os.environ[ENV_LIB_DIR] = args.lib_dir
+    if args.build_dir:
+        os.environ[ENV_BUILD_DIR] = args.build_dir
+    if args.skip_sign:
+        os.environ[ENV_SIGN] = "skip"
+    elif args.sign_tool:
+        os.environ[ENV_SIGN] = args.sign_tool
+
+    model_dir = args.model_dir or os.path.join(scratch_root(), "model")
+    try:
+        lib = ensure_engine_lib(model_dir, src=args.src or None, sdk=args.sdk or None,
+                                force=args.force, refresh=args.refresh)
+    except BackendUnavailableError as exc:
+        print(f"构建失败：{exc}", file=sys.stderr)
+        return 1
+    print(f"✓ 引擎库就绪：{lib}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

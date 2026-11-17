@@ -9207,5 +9207,8 @@ tests/test_backend_detect.py  新增 cllm 三条（含"cllm 优先于 nnrt"的�
 _Lib 加载前会先按绝对路径 RTLD_GLOBAL 预加载同目录 libc++_shared.so —— 它是引擎的
 NEEDED，而进程启动后再改 LD_LIBRARY_PATH 是无效的 ✗。
 
+入口：`scripts/build_cllm_engine.sh`（纯 POSIX sh，只找解释器并把参数转发给
+`python -m cann_llm.engine_build`；逻辑全在 Python 里，便于单测）。
+
 实测（宿主，仓库内 <cann-llm>/.tmp 路径，非 /tmp）：
   clone ✓ → third_party ✓ → build ✓（aarch64 .so）→ 安装到 <cann-llm>/lib ✓
