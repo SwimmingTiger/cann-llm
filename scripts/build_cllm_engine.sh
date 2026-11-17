@@ -5,7 +5,8 @@
 # 全部逻辑（clone 源码 / 引导三方库 / 交叉编译 / 签名 / 安装）都在 Python 里：
 #   src/cann_llm/engine_build.py（设计说明见 docs/maintainer-notes.md §167.8）
 #
-#   scripts/build_cllm_engine.sh                                  # 用 OHOS_SDK_NATIVE
+#   scripts/build_cllm_engine.sh                                  # auto：有 SDK 用 SDK，否则用 PATH 的 clang
+#   scripts/build_cllm_engine.sh --clang                          # 不用 SDK，纯 clang 本机编译
 #   scripts/build_cllm_engine.sh --sdk /path/to/ohos-sdk/native   # 显式给 SDK
 #   scripts/build_cllm_engine.sh --force --refresh                 # 强制重编/重 clone
 #   scripts/build_cllm_engine.sh --skip-sign                       # 仅本机检查（设备上加载会失败）
@@ -16,7 +17,7 @@
 #
 # 环境变量：
 #   PYTHON                  指定解释器（跳过自动发现）
-#   OHOS_SDK_NATIVE         OHOS SDK native 子树（必需，除非 --sdk）
+#   OHOS_SDK_NATIVE         OHOS SDK native 子树（可选；不给就用 PATH 上的 clang）
 #   CANN_LLM_CLLM_*         见 docs/cann-local-lm.md §4.1.1
 set -eu
 

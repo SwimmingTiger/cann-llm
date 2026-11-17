@@ -29,9 +29,9 @@ class _RepoDir:
     def __exit__(self, *exc) -> None:
         shutil.rmtree(self.path, ignore_errors=True)
 
-_ENV_KEYS = (eb.ENV_SRC, eb.ENV_SDK, eb.ENV_AUTOBUILD, eb.ENV_SIGN,
-             eb.ENV_LIB_DIR, eb.ENV_REPO, eb.ENV_REF, eb.ENV_REFRESH,
-             eb.ENV_BUILD_DIR)
+_ENV_KEYS = (eb.ENV_SRC, eb.ENV_SDK, eb.ENV_SDK_ALT, eb.ENV_AUTOBUILD, eb.ENV_SIGN,
+             eb.ENV_SIGN_REPO, eb.ENV_LIB_DIR, eb.ENV_REPO, eb.ENV_REF, eb.ENV_REFRESH,
+             eb.ENV_BUILD_DIR, eb.ENV_TOOLCHAIN, eb.ENV_CC, eb.ENV_CXX, "CC", "CXX")
 
 
 class _Env(unittest.TestCase):
@@ -41,8 +41,13 @@ class _Env(unittest.TestCase):
         self._saved = {k: os.environ.get(k) for k in _ENV_KEYS}
         for k in _ENV_KEYS:
             os.environ.pop(k, None)
+        # 测试要可复现：屏蔽"从本机 PATH/常见位置自动发现 SDK"
+        self._sdk_probes = (eb._sdk_from_clang, eb._sdk_from_common_places)
+        eb._sdk_from_clang = lambda: None
+        eb._sdk_from_common_places = lambda: None
 
     def tearDown(self) -> None:
+        eb._sdk_from_clang, eb._sdk_from_common_places = self._sdk_probes
         for k, v in self._saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -64,8 +69,8 @@ def _fake_tree(root: str) -> "tuple[str, str]":
     _write(os.path.join(src, eb.BUILD_SCRIPT),
            "#!/bin/bash\nset -e\n"
            "mkdir -p build_ohos\n"
-           "echo LIB-$(date +%s%N) > build_ohos/libcann_lm_engine.so\n"
-           "echo CPP > build_ohos/libc++_shared.so\n",
+           "printf '\\177ELF fake-engine' > build_ohos/libcann_lm_engine.so\n"
+           "printf '\\177ELF fake-cxx' > build_ohos/libc++_shared.so\n",
            mode=0o755)
     _write(os.path.join(src, "cann_local_lm", "engine", "main.cpp"), "int main(){}")
     _write(os.path.join(src, "CMakeLists.txt"), "project(x)")
@@ -107,22 +112,34 @@ class TestResolve(_Env):
             os.remove(os.path.join(sdk, "llvm", "bin", "clang"))
             self.assertIsNone(eb.resolve_sdk())
 
-    def test_plan_requires_sdk_first(self):
-        """SDK 不能克隆 ⇒ 缺它必须直接报，且消息里说清"SDK 需自行下载" ✓"""
+    def test_explicit_sdk_missing_is_actionable(self):
+        """显式要 sdk 但找不到 ⇒ 报错并给三条出路（含"改用 clang"）✓"""
         with _RepoDir() as d:
             src, _sdk = _fake_tree(d)
             os.environ[eb.ENV_SRC] = src
             with self.assertRaises(eb.BuildError) as cm:
-                eb.make_plan(os.path.join(d, "m"))
-            self.assertIn(eb.ENV_SDK, str(cm.exception))
+                eb.make_plan(os.path.join(d, "m"), toolchain="sdk")
+            msg = str(cm.exception)
+            self.assertIn(eb.ENV_SDK, msg)
+            self.assertIn("--toolchain clang", msg)
+
+    def test_auto_without_sdk_falls_back_to_clang(self):
+        """★没有 SDK 也能编★：auto 自动落到 PATH 上的 clang ✓"""
+        with _RepoDir() as d:
+            src, _sdk = _fake_tree(d)
+            os.environ[eb.ENV_SRC] = src
+            plan = eb.make_plan(os.path.join(d, "m"))
+            self.assertEqual(plan.toolchain, "clang")
+            self.assertEqual(plan.sdk, "")
+            self.assertTrue(plan.build_dir.startswith(eb.scratch_root() + os.sep))
 
 
 def _materialize_src(dest: str, sdk: str) -> None:
     """在 dest 造一棵能构建的源码树（模拟 clone 结果）。"""
     _write(os.path.join(dest, eb.BUILD_SCRIPT),
            "#!/bin/bash\nset -e\nmkdir -p build_ohos\n"
-           "echo LIB > build_ohos/libcann_lm_engine.so\n"
-           "echo CPP > build_ohos/libc++_shared.so\n", mode=0o755)
+           "printf '\\177ELF fake-engine' > build_ohos/libcann_lm_engine.so\n"
+           "printf '\\177ELF fake-cxx' > build_ohos/libc++_shared.so\n", mode=0o755)
     _write(os.path.join(dest, "cann_local_lm", "engine", "main.cpp"), "int main(){}")
     _write(os.path.join(dest, "CMakeLists.txt"), "project(x)")
     _write(os.path.join(dest, "output", "third_party", "json", ".keep"))
@@ -374,15 +391,28 @@ class TestBuildAndInstall(_Env):
                 eb.ensure_engine_lib(os.path.join(d, "model"))
             self.assertIn(eb.ENV_AUTOBUILD, str(cm.exception))
 
-    def test_explicit_autobuild_without_sdk_still_errors(self):
-        """显式 AUTOBUILD=1 但没 SDK：仍然要报"缺 SDK"而不是静默跳过。"""
+    def test_clang_mode_end_to_end_simulated(self):
+        """clang 模式：不跑 build_ohos.sh，直接 cmake（这里用假的实现验证接线）✓"""
         with _RepoDir() as d:
             src, _sdk = _fake_tree(d)
-            os.environ[eb.ENV_AUTOBUILD] = "1"
             os.environ[eb.ENV_SRC] = src
-            with self.assertRaises(eb.BuildError) as cm:
-                eb.ensure_engine_lib(os.path.join(d, "model"))
-            self.assertIn(eb.ENV_SDK, str(cm.exception))
+            os.environ[eb.ENV_LIB_DIR] = os.path.join(d, "lib")
+            os.environ[eb.ENV_BUILD_DIR] = os.path.join(d, "scratch")
+            os.environ[eb.ENV_SIGN] = "skip"
+            real = (eb._build_with_clang, eb._ensure_cxx_shared)
+            def fake_clang_build(plan, _logf, _timeout, _log):
+                os.makedirs(plan.build_dir, exist_ok=True)
+                for n in eb.LIB_NAMES:
+                    _write(os.path.join(plan.build_dir, n), "\x7fELF clang-built")
+            eb._build_with_clang = fake_clang_build
+            eb._ensure_cxx_shared = lambda _p, _l: None
+            try:
+                lib = eb.ensure_engine_lib(os.path.join(d, "model"))
+            finally:
+                eb._build_with_clang, eb._ensure_cxx_shared = real
+            self.assertTrue(os.path.isfile(lib))
+            with open(lib, "rb") as fh:
+                self.assertTrue(fh.read(4) == b"\x7fELF")
 
     def test_missing_signer_is_actionable(self):
         with _RepoDir() as d:
@@ -440,13 +470,20 @@ class TestCli(_Env):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("build_cllm_engine", proc.stdout)
 
-    def test_shell_script_without_sdk_is_actionable(self):
+    def test_shell_script_sdk_missing_is_actionable(self):
+        """显式要 sdk 但没有：脚本应给可操作报错（且不会先去 clone）✓"""
         import subprocess
         import sys
         script = os.path.join(eb.repo_root(), "scripts", "build_cllm_engine.sh")
         env = {k: v for k, v in os.environ.items() if k not in _ENV_KEYS}
         env["PYTHON"] = sys.executable
-        proc = subprocess.run(["sh", script], capture_output=True, text=True, env=env)
+        env[eb.ENV_TOOLCHAIN] = "sdk"
+        env[eb.ENV_SDK] = os.path.join(eb.repo_root(), ".tmp", "no-such-sdk")
+        # 让自动探测也扑空（否则本机 PATH/HOME 里的真 SDK 会被找到 ⇒ 测试不 hermetic ✗）
+        env["HOME"] = os.path.join(eb.repo_root(), ".tmp", "fake-home")
+        env["PATH"] = "/usr/bin:/bin"
+        proc = subprocess.run(["sh", script, "--skip-sign"], capture_output=True,
+                              text=True, env=env)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn(eb.ENV_SDK, proc.stderr + proc.stdout)
 

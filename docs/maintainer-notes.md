@@ -9212,3 +9212,28 @@ NEEDED，而进程启动后再改 LD_LIBRARY_PATH 是无效的 ✗。
 
 实测（宿主，仓库内 <cann-llm>/.tmp 路径，非 /tmp）：
   clone ✓ → third_party ✓ → build ✓（aarch64 .so）→ 安装到 <cann-llm>/lib ✓
+
+### 167.9 不要假设"必须用 SDK 构建"：纯 clang 也是一等路径
+
+```
+背景：我最初把 resolve_sdk() 写成"必须给 OHOS_SDK_NATIVE"✗，用户在设备上直接跑
+      ./scripts/build_cllm_engine.sh 就被拦下 ✗ —— 而设备上 clang/cmake/make/ninja
+      本来就在 PATH 里（harmonybrew 的 clang 目标就是 aarch64-unknown-linux-ohos）。
+
+改成两套工具链：
+  · clang（默认兜底）：cmake 直接配 cann_local_lm/engine/ohos，
+    -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++（可用 _CC/_CXX 覆盖）；
+    libc++_shared.so 用 `clang++ -print-file-name=libc++_shared.so` 找（设备 /system/lib64 也有兜底）
+  · sdk（有 SDK 时）：走上游 build_ohos.sh --no-signed
+选择：CANN_LLM_CLLM_TOOLCHAIN=auto|sdk|clang（--clang 简写）；auto 会先从 PATH 的 clang
+反推 SDK（ohos-sdk→ohos-sdk-native、-print-resource-dir 上溯 4 层、常见安装位置）。
+
+另外两条实测教训：
+  1) 安装必须"临时文件 + os.replace"：已签名/已落盘的 .so 在 OHOS 上直接 open(dst,'wb')
+     会 "Operation not permitted" ✗（lsattr 有特殊标志）；rename 不受影响 ✓。
+  2) install/签名前先验 ELF 魔数：构建目录里若有坏产物（例如被测试写进来的文本文件），
+     直接拿去 sign 会报 "not ELF64" 而且很难定位 ✗；现在坏的可选库（libc++_shared）
+     会跳过并告警（设备上有系统版），引擎库坏则明确报错。
+
+实测（设备，不设 OHOS_SDK_NATIVE，--clang --force）：
+  toolchain=clang → cmake 21s → 安装 → selfsign 签名 → 加载 → 出字 ✓

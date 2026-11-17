@@ -3,6 +3,17 @@
 `cllm` 后端的引擎库是**交叉编译产物**，系统里没有；用户常常只有源码仓库地址，
 忘了先编库 ⇒ `-b cllm` 报"找不到 libcann_lm_engine.so" ✗。本模块把"缺了就编"做掉。
 
+## 工具链：SDK 或"普通 clang"，两种都行
+
+* ``sdk``（交叉）：用 ``OHOS_SDK_NATIVE`` 的 ``llvm/bin/clang`` + ``sysroot``，
+  走上游 ``build_ohos.sh``（``--no-signed``）；
+* ``clang``（本机编译）：**不要求任何 SDK 目录**，直接用 PATH 上的 ``clang/clang++``
+  （它们本身就以 ``aarch64-unknown-linux-ohos`` 为目标），cmake 直配
+  ``cann_local_lm/engine/ohos``。设备上编译目标就是本机 ⇒ 天然可跑 ✓。
+
+选择：``CANN_LLM_CLLM_TOOLCHAIN=auto|sdk|clang``（默认 auto：找到 SDK 用 sdk，
+否则用 PATH 的 clang）。``auto`` 也会从 PATH 上的 clang 反推 SDK 位置 ✓。
+
 ## 构建目录（全部在 cann-llm 仓库内）
 
 ```
@@ -85,6 +96,10 @@ ENV_SIGN = "CANN_LLM_CLLM_SIGN"
 ENV_SIGN_REPO = "CANN_LLM_CLLM_SIGN_REPO"
 ENV_LIB_DIR = "CANN_LLM_CLLM_LIB_DIR"
 ENV_SDK = "OHOS_SDK_NATIVE"
+ENV_SDK_ALT = "CANN_LLM_CLLM_SDK"
+ENV_TOOLCHAIN = "CANN_LLM_CLLM_TOOLCHAIN"   # auto | sdk | clang
+ENV_CC = "CANN_LLM_CLLM_CC"
+ENV_CXX = "CANN_LLM_CLLM_CXX"
 
 #: 构建脚本（相对源码树）
 BUILD_SCRIPT = os.path.join("scripts", "cann_lm_engine", "build_ohos.sh")
@@ -111,10 +126,11 @@ class BuildPlan:
     """一次构建需要的全部信息。"""
 
     src: str
-    sdk: str
+    sdk: str                 # 空 = 不用 SDK（clang 本机模式）
     script: str
     build_dir: str
     model_dir: str
+    toolchain: str = "sdk"   # "sdk" | "clang"
 
     @property
     def built_lib(self) -> str:
@@ -132,6 +148,15 @@ class BuildPlan:
     def log_path(self) -> str:
         """构建日志放在 .tmp 下（别污染 lib/）。"""
         return os.path.join(scratch_root(), "build-engine.log")
+
+
+def _is_elf(path: str) -> bool:
+    """是不是 ELF（安装/签名前必查：坏产物别拿去 sign，报错会很难懂 ✗）。"""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4) == b"\x7fELF"
+    except OSError:
+        return False
 
 
 def _stderr(text: str) -> None:
@@ -172,20 +197,92 @@ def resolve_src(model_dir: Optional[str] = None, explicit: Optional[str] = None)
     return None
 
 
-def resolve_sdk(explicit: Optional[str] = None) -> Optional[str]:
-    """找 OHOS SDK 的 native 子树（必须含 sysroot/ 与 llvm/bin/clang）。"""
-    cands: List[str] = []
-    if explicit:
-        cands.append(explicit)
-    env = os.environ.get(ENV_SDK)
-    if env:
-        cands.append(env)
+def _is_sdk_native(path: str) -> bool:
+    return (os.path.isdir(os.path.join(path, "sysroot"))
+            and os.path.isfile(os.path.join(path, "llvm", "bin", "clang")))
+
+
+def _sdk_from_clang() -> Optional[str]:
+    """从 **PATH 上的 clang** 反推 SDK native 目录。
+
+    设备上 clang/cmake/make/ninja 往往都已在 PATH 里（例如 harmonybrew 装的
+    ``ohos-sdk`` 包装：``.../ohos-sdk/<ver>/bin/clang``，真正的 native 在
+    ``.../ohos-sdk-native/<ver>/``，带 ``sysroot`` 与 ``llvm/bin/clang``）。
+    用户没必要再手填 ``OHOS_SDK_NATIVE`` —— 这里按三种线索找：
+      1. clang 真身所在目录往上几层；
+      2. 把路径里的 ``ohos-sdk`` 换成 ``ohos-sdk-native``（harmonybrew 布局）；
+      3. ``clang -print-resource-dir``（``<native>/llvm/lib/clang/<ver>`` ⇒ 上溯 4 层）。
+    """
+    exe = shutil.which("clang") or shutil.which("clang++")
+    if not exe:
+        return None
+    real = os.path.realpath(exe)
+    dirs = [os.path.dirname(real)]
+    for _ in range(3):
+        dirs.append(os.path.dirname(dirs[-1]))
+    cands: List[str] = list(dirs)
+    for d in dirs:
+        if os.sep + "ohos-sdk" + os.sep in d:
+            cands.append(d.replace(os.sep + "ohos-sdk" + os.sep,
+                                   os.sep + "ohos-sdk-native" + os.sep))
+    try:
+        proc = subprocess.run([exe, "-print-resource-dir"], capture_output=True,
+                              text=True, timeout=10)
+        rd = (proc.stdout or "").strip()
+        if rd:
+            native = rd
+            for _ in range(4):      # <native>/llvm/lib/clang/<ver> ⇒ 上溯 4 层
+                native = os.path.dirname(native)
+            cands.append(native)
+    except (OSError, subprocess.SubprocessError):
+        pass
     for c in cands:
-        path = os.path.abspath(os.path.expanduser(c))
-        if os.path.isdir(os.path.join(path, "sysroot")) and os.path.isfile(
-                os.path.join(path, "llvm", "bin", "clang")):
-            return path
+        if c and os.path.isdir(c) and _is_sdk_native(c):
+            return os.path.abspath(c)
     return None
+
+
+def _sdk_from_common_places() -> Optional[str]:
+    """常见安装位置（harmonybrew Cellar / hmos SDK / /mnt/workspace / /opt）浅扫。"""
+    import glob
+
+    pats = [
+        os.path.expanduser("~/.harmonybrew/Cellar/ohos-sdk-native/*"),
+        os.path.expanduser("~/work/hmos/*/native"),
+        os.path.expanduser("~/work/hmos/*/*/native"),
+        os.path.expanduser("~/work/hmos/*/*/*/native"),
+        "/mnt/workspace/ohos_sdk/cli_native",
+        "/mnt/workspace/ohos_sdk/ohos_native/native",
+        "/opt/ohos-sdk/native",
+        "/opt/ohos-sdk/*/native",
+    ]
+    for pat in pats:
+        for c in sorted(glob.glob(pat), reverse=True):
+            if _is_sdk_native(c):
+                return os.path.abspath(c)
+    return None
+
+
+def sdk_sources() -> "List[str]":
+    """给报错用：列一下我们到底找过哪些地方。"""
+    out = [f"{ENV_SDK} / --sdk", "PATH 上的 clang（含 -print-resource-dir 推导）",
+           "~/.harmonybrew/Cellar/ohos-sdk-native/*", "~/work/hmos/**/native",
+           "/mnt/workspace/ohos_sdk/*", "/opt/ohos-sdk/*"]
+    return out
+
+
+def resolve_sdk(explicit: Optional[str] = None) -> Optional[str]:
+    """找 OHOS SDK 的 native 子树（含 ``sysroot/`` 与 ``llvm/bin/clang``）。
+
+    顺序：显式/``OHOS_SDK_NATIVE``/``CANN_LLM_CLLM_SDK`` → **PATH 上的 clang 推导**
+    → 常见安装位置。所以**只要 clang/cmake/make 在 PATH 里，就不用设环境变量** ✓。
+    """
+    for c in (explicit, os.environ.get(ENV_SDK), os.environ.get(ENV_SDK_ALT)):
+        if c:
+            path = os.path.abspath(os.path.expanduser(c))
+            if _is_sdk_native(path):
+                return path
+    return _sdk_from_clang() or _sdk_from_common_places()
 
 
 def _git(args: Sequence[str], log: Log) -> None:
@@ -243,20 +340,72 @@ def _autobuild_enabled(has_src: bool, has_sdk: bool) -> bool:
     return has_sdk
 
 
+def _find_compiler(name: str, alt_env: str, fallback: str) -> Optional[str]:
+    """找编译器：``CANN_LLM_CLLM_CC/CXX`` → ``CC/CXX`` → PATH 上的 clang/clang++。"""
+    for cand in (os.environ.get(alt_env), os.environ.get(name), fallback):
+        if not cand:
+            continue
+        got = shutil.which(cand) or (cand if os.path.isfile(cand) else None)
+        if got:
+            return got
+    return None
+
+
+def pick_toolchain(explicit: Optional[str] = None, sdk_path: Optional[str] = None) -> str:
+    """决定用哪套工具链：``sdk``（交叉）还是 ``clang``（本机普通 clang）。
+
+    优先级：显式/``CANN_LLM_CLLM_TOOLCHAIN`` → auto（找到 SDK 用 sdk，否则 clang）。
+    """
+    want = (explicit or os.environ.get(ENV_TOOLCHAIN, "")).strip().lower()
+    if want in ("sdk", "clang"):
+        return want
+    return "sdk" if sdk_path else "clang"
+
+
 def make_plan(model_dir: str, *, src: Optional[str] = None, sdk: Optional[str] = None,
-              log: Log = _stderr, refresh: bool = False) -> BuildPlan:
-    """组装构建计划（必要时 clone 源码）；条件不足时抛 :class:`BuildError`。"""
+              toolchain: Optional[str] = None, log: Log = _stderr,
+              refresh: bool = False) -> BuildPlan:
+    """组装构建计划（必要时 clone 源码）。
+
+    ★不再强制要求 SDK★：没 SDK 时自动走 ``clang`` 本机模式（PATH 上的 clang）。
+    只有显式 ``toolchain="sdk"`` 且找不到 SDK 才报错。
+    """
     model_dir = os.path.abspath(os.path.expanduser(model_dir)) if model_dir else ""
     got_sdk = resolve_sdk(sdk)
-    if not got_sdk:
-        raise BuildError(
-            "找不到 OHOS SDK native 子树（要含 sysroot/ 与 llvm/bin/clang）。\n"
-            f"  设 {ENV_SDK}=/path/to/ohos-sdk/native（SDK 不能自动 clone，需自行下载）。")
+    mode = pick_toolchain(toolchain, got_sdk)
+    # 先把工具链敲定，再 clone（否则配置错了还要白等一次 clone ✗）
+    if mode == "clang":
+        if not (_find_compiler("CC", ENV_CC, "clang")
+                and _find_compiler("CXX", ENV_CXX, "clang++")):
+            raise BuildError(
+                "clang 工具链不可用：PATH 上找不到 clang/clang++"
+                f"（可用 {ENV_CC}/{ENV_CXX} 或 CC/CXX 指定）。\n"
+                "  也可以给 --sdk <native> 走 SDK 交叉编译。")
     got_src = ensure_source(None, log=log, explicit=src, refresh=refresh)
-    return BuildPlan(src=got_src, sdk=got_sdk,
-                     script=os.path.join(got_src, BUILD_SCRIPT),
-                     build_dir=os.path.join(got_src, BUILD_DIR),
-                     model_dir=model_dir)
+
+    if mode == "sdk":
+        if not got_sdk:
+            raise BuildError(
+                "指定了 sdk 工具链，但找不到 OHOS SDK native 子树"
+                "（要含 sysroot/ 与 llvm/bin/clang）。\n"
+                "  已尝试：" + "；".join(sdk_sources()) + "。\n"
+                f"  显式给：{ENV_SDK}=/path/to/ohos-sdk/native 或 --sdk <path>；"
+                "或改用 --toolchain clang（用 PATH 上的 clang，不需要 SDK）。")
+        return BuildPlan(src=got_src, sdk=got_sdk,
+                         script=os.path.join(got_src, BUILD_SCRIPT),
+                         build_dir=os.path.join(got_src, BUILD_DIR),
+                         model_dir=model_dir, toolchain="sdk")
+
+    cc = _find_compiler("CC", ENV_CC, "clang")
+    cxx = _find_compiler("CXX", ENV_CXX, "clang++")
+    if not cc or not cxx:
+        raise BuildError(
+            "clang 工具链不可用：PATH 上找不到 clang/clang++"
+            f"（可用 {ENV_CC}/{ENV_CXX} 或 CC/CXX 指定）。\n"
+            "  也可以给 --sdk <native> 走 SDK 交叉编译。")
+    return BuildPlan(src=got_src, sdk="", script=os.path.join(got_src, BUILD_SCRIPT),
+                     build_dir=os.path.join(scratch_root(), "clang-build"),
+                     model_dir=model_dir, toolchain="clang")
 
 
 def _newest_source(plan: BuildPlan) -> float:
@@ -316,40 +465,105 @@ def _ensure_third_party(plan: BuildPlan, log: Log) -> None:
             "  常见原因：网络无法下载依赖（可设 CANN_3RD_LIB_PATH 指向现成三方库目录）。")
 
 
+def _run(cmd: "Sequence[str]", cwd: str, logf, timeout: float, log: Log) -> None:
+    """跑一条命令：日志进文件、失败带命令与日志路径、超时也报清楚。"""
+    log("$ " + " ".join(cmd))
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, stdout=logf, stderr=subprocess.STDOUT,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise BuildError(f"命令超时（>{timeout:.0f}s）：{' '.join(cmd)}") from exc
+    if proc.returncode != 0:
+        raise BuildError(f"命令失败（rc={proc.returncode}）：{' '.join(cmd)}")
+
+
+def _ensure_cxx_shared(plan: BuildPlan, log: Log) -> None:
+    """本机 clang 模式没有 SDK 目录 ⇒ 自己找一份 ``libc++_shared.so`` 放到产物旁。"""
+    dst = os.path.join(plan.build_dir, "libc++_shared.so")
+    if os.path.isfile(dst):
+        if _is_elf(dst):
+            return
+        os.remove(dst)          # 坏产物（非 ELF）⇒ 丢掉重找 ✓
+    cands: List[str] = []
+    cxx = _find_compiler("CXX", ENV_CXX, "clang++")
+    if cxx:
+        try:
+            out = subprocess.run([cxx, "-print-file-name=libc++_shared.so"],
+                                 capture_output=True, text=True, timeout=15).stdout.strip()
+            if out and os.path.isfile(out):
+                cands.append(out)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    cands += ["/system/lib64/libc++_shared.so", "/system/lib64/ndk/libc++_shared.so"]
+    if plan.sdk:
+        for base, _dirs, files in os.walk(plan.sdk):
+            if "libc++_shared.so" in files:
+                cands.append(os.path.join(base, "libc++_shared.so"))
+                break
+    for c in cands:
+        if os.path.isfile(c) and _is_elf(c):
+            shutil.copy2(c, dst)
+            log(f"libc++_shared.so ← {c}")
+            return
+    log("警告：没找到 libc++_shared.so（设备上它可能在 /system/lib64 里，加载时再解析）")
+
+
+def _build_with_clang(plan: BuildPlan, logf, timeout: float, log: Log) -> None:
+    """★不用 SDK★：直接用 PATH 上的 clang/clang++ 配 cmake（目标就是本机 ohos-arm64）。"""
+    cc = _find_compiler("CC", ENV_CC, "clang")
+    cxx = _find_compiler("CXX", ENV_CXX, "clang++")
+    if not cc or not cxx:
+        raise BuildError("找不到 clang/clang++（可用 --cc/--cxx 或 CC/CXX 指定）")
+    src_dir = os.path.join(plan.src, "cann_local_lm", "engine", "ohos")
+    if not os.path.isdir(src_dir):
+        raise BuildError(f"源码树里缺 {src_dir}")
+    os.makedirs(plan.build_dir, exist_ok=True)
+    log(f"工具链：clang（{cc} / {cxx}）— 不使用 SDK 目录")
+    _run(["cmake", "-G", "Unix Makefiles",
+          "-DCMAKE_BUILD_TYPE=Release", "-DOHOS_PLATFORM=OHOS",
+          f"-DCMAKE_C_COMPILER={cc}", f"-DCMAKE_CXX_COMPILER={cxx}",
+          "-B", plan.build_dir, "-S", src_dir], plan.src, logf, timeout, log)
+    _run(["cmake", "--build", plan.build_dir, "-j", str(os.cpu_count() or 1)],
+         plan.src, logf, timeout, log)
+    _ensure_cxx_shared(plan, log)
+
+
 def build(plan: BuildPlan, *, force: bool = False, log: Log = _stderr) -> str:
-    """跑 ``build_ohos.sh``（在 clone 出来的源码树里），返回构建出的库路径。"""
+    """构建引擎库（``sdk`` 走 build_ohos.sh；``clang`` 直接 cmake），返回库路径。"""
     if not force and is_fresh(plan):
         log(f"产物已是最新，跳过构建：{plan.built_lib}")
         return plan.built_lib
     os.makedirs(plan.install_dir, exist_ok=True)
     _ensure_third_party(plan, log)
-    env = dict(os.environ)
-    env[ENV_SDK] = plan.sdk
-    env.setdefault("PYTHON", sys.executable)
     t0 = time.monotonic()
-    log(f"开始构建引擎库：{plan.script}（SDK={plan.sdk}）…")
     os.makedirs(os.path.dirname(plan.log_path), exist_ok=True)
+    timeout = float(os.environ.get("CANN_LLM_CLLM_BUILD_TIMEOUT", "3600"))
+    log(f"开始构建引擎库（toolchain={plan.toolchain}）…")
     with open(plan.log_path, "ab") as logf:
         logf.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} build start ====\n".encode())
-        logf.write(f"src={plan.src}\nsdk={plan.sdk}\n".encode())
+        logf.write(f"src={plan.src}\nsdk={plan.sdk or '<无>'}\n"
+                   f"toolchain={plan.toolchain}\n".encode())
         logf.flush()
-        timeout = float(os.environ.get("CANN_LLM_CLLM_BUILD_TIMEOUT", "3600"))
-        # ★--no-signed★：脚本自带的 jar 签名器在多数环境里没有 ✗（报了就给 rc=1 ✗），
-        #   签名由本模块 install() 用 ohos-bst-light 的 selfsign.py 统一做 ✓。
-        try:
-            proc = subprocess.run(["bash", plan.script, "--no-signed"], cwd=plan.src, env=env,
-                                  stdout=logf, stderr=subprocess.STDOUT, timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            raise BuildError(
-                f"构建超时（>{timeout:.0f}s）。日志：{plan.log_path}") from exc
+        if plan.toolchain == "clang":
+            try:
+                _build_with_clang(plan, logf, timeout, log)
+            except BuildError as exc:
+                raise BuildError(f"{exc}\n  完整日志：{plan.log_path}") from exc
+        else:
+            env = dict(os.environ)
+            env[ENV_SDK] = plan.sdk
+            env.setdefault("PYTHON", sys.executable)
+            # ★--no-signed★：脚本自带的 jar 签名器多数环境没有 ✗（会 rc=1 ✗）；
+            #   签名由本模块 install() 用 ohos-bst-light 的 selfsign.py 统一做 ✓。
+            try:
+                _run(["bash", plan.script, "--no-signed"], plan.src, logf, timeout, log)
+            except BuildError as exc:
+                raise BuildError(f"{exc}\n  完整日志：{plan.log_path}") from exc
     took = time.monotonic() - t0
-    if proc.returncode != 0:
-        raise BuildError(
-            f"构建失败（rc={proc.returncode}，耗时 {took:.0f}s）。完整日志：{plan.log_path}\n"
-            "  常见原因：cmake/make 不在 PATH、SDK 与源码不配套、SDK 缺 builtins。")
     if not os.path.isfile(plan.built_lib):
-        raise BuildError(f"构建脚本成功但没产出 {plan.built_lib}。看日志：{plan.log_path}")
-    log(f"构建完成（{took:.0f}s）：{plan.built_lib}")
+        raise BuildError(
+            f"构建命令成功但没产出 {plan.built_lib}。看日志：{plan.log_path}")
+    log(f"构建完成（{took:.0f}s，toolchain={plan.toolchain}）：{plan.built_lib}")
     return plan.built_lib
 
 
@@ -425,9 +639,19 @@ def install(plan: BuildPlan, *, log: Log = _stderr) -> str:
             if name == LIB_NAMES[0]:
                 raise BuildError(f"构建目录里缺 {src}")
             continue
+        if not _is_elf(src):
+            if name == LIB_NAMES[0]:
+                raise BuildError(f"产物不是 ELF：{src}（看日志 {plan.log_path}）")
+            log(f"跳过非 ELF 的附带库：{src}（设备上有系统版 libc++_shared.so 可用）")
+            continue
         dst = os.path.join(plan.install_dir, name)
-        shutil.copy2(src, dst)
-        os.chmod(dst, 0o755)
+        # ★原子替换★：不能直接 open(dst,'wb') —— 已签名/已落盘的 .so 在 OHOS 上
+        #   会带特殊属性，直接覆盖报 "Operation not permitted" ✗（实测）；
+        #   写临时文件再 rename 则不受影响 ✓（selfsign.py 也是这么干的）。
+        tmp = dst + ".tmp"
+        shutil.copy2(src, tmp)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, dst)
         if name == LIB_NAMES[0]:
             target = dst
         log(f"安装：{dst}")
@@ -437,18 +661,24 @@ def install(plan: BuildPlan, *, log: Log = _stderr) -> str:
 
 
 def ensure_engine_lib(model_dir: str, *, log: Log = _stderr, src: Optional[str] = None,
-                      sdk: Optional[str] = None, force: bool = False,
-                      refresh: bool = False) -> str:
-    """缺库就编（必要时先 clone 源码）：返回可直接加载的库路径。"""
-    got_sdk = resolve_sdk(sdk)
-    if not _autobuild_enabled(True, bool(got_sdk)):
+                      sdk: Optional[str] = None, toolchain: Optional[str] = None,
+                      force: bool = False, refresh: bool = False,
+                      require_enabled: bool = True) -> str:
+    """缺库就编（必要时先 clone 源码）：返回可直接加载的库路径。
+
+    ``require_enabled``：``-b cllm`` 的**自动**路径为 True（尊重
+    ``CANN_LLM_CLLM_AUTOBUILD=0``）；用户**显式**跑构建脚本/CLI 时为 False
+    （意图明确，不该被开关拦住 ✗）。
+
+    ★不需要 SDK★：``toolchain=auto`` 时找不到 SDK 会自动用 PATH 上的 clang。
+    """
+    if require_enabled and os.environ.get(ENV_AUTOBUILD, "").strip() == "0":
         raise BackendUnavailableError(
-            "找不到 cann-local-lm 引擎库 libcann_lm_engine.so，且未启用自动构建。\n"
-            f"  自动构建需要 OHOS SDK：设 {ENV_SDK}=/path/to/ohos-sdk/native"
-            f"（设好后缺源码会自动 clone 到 {os.path.join(scratch_root(), 'src')}；库装到 {os.path.join(repo_root(), 'lib')}）；\n"
-            f"  或显式设 {ENV_AUTOBUILD}=1；也可以直接给现成的库："
-            "CANN_LLM_CLLM_LIB=/path/libcann_lm_engine.so。")
-    plan = make_plan(model_dir, src=src, sdk=sdk, log=log, refresh=refresh)
+            f"自动构建被 {ENV_AUTOBUILD}=0 关掉了。\n"
+            "  去掉该变量，或直接跑 scripts/build_cllm_engine.sh 显式构建，"
+            "或给现成的库 CANN_LLM_CLLM_LIB=/path/libcann_lm_engine.so。")
+    plan = make_plan(model_dir, src=src, sdk=sdk, toolchain=toolchain,
+                     log=log, refresh=refresh)
     build(plan, force=force, log=log)
     return install(plan, log=log)
 
@@ -469,6 +699,12 @@ def main(argv: "Optional[Sequence[str]]" = None) -> int:
     ap.add_argument("-d", "--model-dir", default="",
                     help="模型目录（可选；默认 <cann-llm>/.tmp/model）")
     ap.add_argument("--sdk", default="", help="OHOS SDK native 子树（等同 OHOS_SDK_NATIVE）")
+    ap.add_argument("--toolchain", choices=("auto", "sdk", "clang"), default="",
+                    help="工具链：auto(默认，有 SDK 用 sdk 否则 clang) / sdk / clang")
+    ap.add_argument("--clang", action="store_true",
+                    help="等价于 --toolchain clang：用 PATH 上的 clang，不需要 SDK")
+    ap.add_argument("--cc", default="", help="C 编译器（clang 模式，默认 PATH 的 clang）")
+    ap.add_argument("--cxx", default="", help="C++ 编译器（clang 模式，默认 PATH 的 clang++）")
     ap.add_argument("--src", default="", help="本地源码树（跳过 clone）")
     ap.add_argument("--repo", default="", help="源码仓库（默认 gitcode cann-local-lm）")
     ap.add_argument("--ref", default="", help="分支/标签")
@@ -482,6 +718,13 @@ def main(argv: "Optional[Sequence[str]]" = None) -> int:
 
     if args.sdk:
         os.environ[ENV_SDK] = args.sdk
+    toolchain = "clang" if args.clang else (args.toolchain or None)
+    if toolchain:
+        os.environ[ENV_TOOLCHAIN] = toolchain
+    if args.cc:
+        os.environ[ENV_CC] = args.cc
+    if args.cxx:
+        os.environ[ENV_CXX] = args.cxx
     if args.repo:
         os.environ[ENV_REPO] = args.repo
     if args.ref:
@@ -498,7 +741,9 @@ def main(argv: "Optional[Sequence[str]]" = None) -> int:
     model_dir = args.model_dir or os.path.join(scratch_root(), "model")
     try:
         lib = ensure_engine_lib(model_dir, src=args.src or None, sdk=args.sdk or None,
-                                force=args.force, refresh=args.refresh)
+                                toolchain=toolchain,
+                                force=args.force, refresh=args.refresh,
+                                require_enabled=False)
     except BackendUnavailableError as exc:
         print(f"构建失败：{exc}", file=sys.stderr)
         return 1

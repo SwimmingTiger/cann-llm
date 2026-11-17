@@ -44,7 +44,7 @@ decode.omc    每步喂 1 个 token                      ← 同样 35 层全在
 |---|---|---|
 | ① | Linux x86_64 + Python 3.12 + `torch==2.9.0+cpu` + `torchair` + `torch_delegate` | 导出走 torchair/torch_delegate 的图捕获 |
 | ② | CANN toolkit 9.3.0（**mobile-station** 变体）+ `Ascend-cann-kirinx90-ops` | 目标 SoC 是 KirinX90；`ccec`（毕昇）编 kernel |
-| ③ | OHOS SDK（`native` 子树，含 `sysroot` + `llvm/bin/clang`）+ `selfsign.py`（自动 clone） | 交叉编译 aarch64/musl 的 `.so` 并签名 |
+| ③ | **`clang`（PATH 上即可）** 或 OHOS SDK；`selfsign.py`（自动 clone） | 编译 aarch64/musl 的 `.so` 并签名 |
 | ④ | 设备（HarmonyOS，KirinX90） | 运行时 |
 
 > **宿主 ABI 的坑**：如果宿主是滚动更新的发行版（glibc 2.38+/GCC 16），直接用宿主
@@ -227,7 +227,9 @@ python -m cann_llm.launcher chat -d <model>
 
 | 变量 | 作用 |
 |---|---|
-| `OHOS_SDK_NATIVE` | **必需**，SDK native 子树（`sysroot/` + `llvm/bin/clang`） |
+| `CANN_LLM_CLLM_TOOLCHAIN` | `auto`（默认）/ `sdk` / `clang`；`--clang` 等价于 `clang` |
+| `OHOS_SDK_NATIVE` | **可选**：给了就用 SDK 交叉编译；不给或 auto 找不到 ⇒ 用 PATH 上的 clang |
+| `CANN_LLM_CLLM_CC` / `_CXX` | 指定编译器（默认 PATH 的 `clang` / `clang++`，会退到 `CC`/`CXX`） |
 | `CANN_LLM_CLLM_REPO` | 上游地址，默认 `https://gitcode.com/cann/cann-local-lm.git` |
 | `CANN_LLM_CLLM_REF` | 要构建的分支/标签（默认默认分支） |
 | `CANN_LLM_CLLM_SRC` | 直接用本地源码树（跳过 clone，离线/固定版本时用） |
@@ -238,6 +240,17 @@ python -m cann_llm.launcher chat -d <model>
 | `CANN_LLM_CLLM_SIGN_REPO` | 签名工具仓库，默认 `https://gitcode.com/hu60cn/ohos-bst-light` |
 
 产物比源码新时**跳过重复构建**；`force=True`（或删 `.tmp/engine-build`）可强制重编。
+
+**两套工具链，都行**：
+
+| 模式 | 需要什么 | 做法 |
+|---|---|---|
+| `clang`（默认，没有 SDK 时） | PATH 上的 `clang/clang++`（目标就是 `aarch64-unknown-linux-ohos`）+ cmake/make | 直接 cmake 配 `cann_local_lm/engine/ohos`；`libc++_shared.so` 用 `clang++ -print-file-name` 找 |
+| `sdk`（有 SDK 时） | OHOS SDK native（`sysroot/` + `llvm/bin/clang`） | 走上游 `build_ohos.sh --no-signed` |
+
+设备上编译目标 == 本机 ⇒ **纯 clang 完全可行**（实测 21 s 编完、签名后直接加载出字 ✓）。
+`auto` 还会从 PATH 上的 clang 反推 SDK 位置（`…/ohos-sdk/<ver>/bin/clang` →
+`…/ohos-sdk-native/<ver>/`，或 `-print-resource-dir` 上溯），所以通常不用手填环境变量 ✓。
 
 #### 4.1.2 手工构建（调试/离线时）
 
