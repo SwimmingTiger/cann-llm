@@ -41,13 +41,9 @@ class _Env(unittest.TestCase):
         self._saved = {k: os.environ.get(k) for k in _ENV_KEYS}
         for k in _ENV_KEYS:
             os.environ.pop(k, None)
-        # 测试要可复现：屏蔽"从本机 PATH/常见位置自动发现 SDK"
-        self._sdk_probes = (eb._sdk_from_clang, eb._sdk_from_common_places)
-        eb._sdk_from_clang = lambda: None
-        eb._sdk_from_common_places = lambda: None
+
 
     def tearDown(self) -> None:
-        eb._sdk_from_clang, eb._sdk_from_common_places = self._sdk_probes
         for k, v in self._saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -104,13 +100,16 @@ class TestResolve(_Env):
             os.symlink(src, os.path.join(model, "src", "cann-local-lm"))
             self.assertEqual(os.path.realpath(eb.resolve_src(model)), os.path.realpath(src))
 
-    def test_resolve_sdk_requires_sysroot_and_clang(self):
+    def test_resolve_sdk_only_accepts_explicit(self):
+        """★不猜★：没给 ⇒ None；给了但不可用 ⇒ 明确报错 ✓"""
         with _RepoDir() as d:
             _src, sdk = _fake_tree(d)
+            self.assertIsNone(eb.resolve_sdk())          # 没指定 ⇒ None（不扫 PATH ✗）
             os.environ[eb.ENV_SDK] = sdk
             self.assertEqual(eb.resolve_sdk(), sdk)
             os.remove(os.path.join(sdk, "llvm", "bin", "clang"))
-            self.assertIsNone(eb.resolve_sdk())
+            with self.assertRaises(eb.BuildError):
+                eb.resolve_sdk()
 
     def test_explicit_sdk_missing_is_actionable(self):
         """显式要 sdk 但找不到 ⇒ 报错并给三条出路（含"改用 clang"）✓"""
@@ -123,8 +122,8 @@ class TestResolve(_Env):
             self.assertIn(eb.ENV_SDK, msg)
             self.assertIn("--toolchain clang", msg)
 
-    def test_auto_without_sdk_falls_back_to_clang(self):
-        """★没有 SDK 也能编★：auto 自动落到 PATH 上的 clang ✓"""
+    def test_default_toolchain_is_clang(self):
+        """★默认就是普通 clang★（没给 SDK 就不走 SDK，且不猜 ✗）"""
         with _RepoDir() as d:
             src, _sdk = _fake_tree(d)
             os.environ[eb.ENV_SRC] = src
@@ -414,6 +413,25 @@ class TestBuildAndInstall(_Env):
             with open(lib, "rb") as fh:
                 self.assertTrue(fh.read(4) == b"\x7fELF")
 
+    def test_sdk_failure_reports_log_tail(self):
+        """显式选 sdk 且构建失败 ⇒ 如实报错（不偷偷换工具链 ✗），并打出日志末尾 ✓"""
+        with _RepoDir() as d:
+            src, sdk = _fake_tree(d)
+            _write(os.path.join(src, eb.BUILD_SCRIPT), "#!/bin/bash\nexit 1\n", mode=0o755)
+            model = os.path.join(d, "model")
+            os.makedirs(model)
+            os.environ[eb.ENV_SRC] = src
+            os.environ[eb.ENV_SDK] = sdk
+            os.environ[eb.ENV_TOOLCHAIN] = "sdk"
+            os.environ[eb.ENV_LIB_DIR] = os.path.join(d, "lib")
+            os.environ[eb.ENV_BUILD_DIR] = os.path.join(d, "scratch")
+            os.environ[eb.ENV_SIGN] = "skip"
+            with self.assertRaises(eb.BuildError) as cm:
+                eb.ensure_engine_lib(model, log=lambda _m: None)
+            msg = str(cm.exception)
+            self.assertIn("日志末尾", msg)
+            self.assertIn("build-engine.log", msg)
+
     def test_missing_signer_is_actionable(self):
         with _RepoDir() as d:
             src, sdk = _fake_tree(d)
@@ -436,9 +454,12 @@ class TestBuildAndInstall(_Env):
             os.makedirs(model)
             os.environ[eb.ENV_SRC] = src
             os.environ[eb.ENV_SDK] = sdk
+            os.environ[eb.ENV_TOOLCHAIN] = "sdk"      # 显式 sdk：不触发"回退 clang"
             with self.assertRaises(eb.BuildError) as cm:
                 eb.ensure_engine_lib(model, log=lambda _m: None)
-            self.assertIn("build-engine.log", str(cm.exception))
+            msg = str(cm.exception)
+            self.assertIn("build-engine.log", msg)
+            self.assertIn("日志末尾", msg)           # 直接把原因打出来 ✓
 
 
 class TestCli(_Env):
@@ -485,7 +506,9 @@ class TestCli(_Env):
         proc = subprocess.run(["sh", script, "--skip-sign"], capture_output=True,
                               text=True, env=env)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn(eb.ENV_SDK, proc.stderr + proc.stdout)
+        out = proc.stderr + proc.stdout
+        # 现在错误文案是"指定的 SDK 不可用：<path>"（不再提环境变量名）
+        self.assertIn("指定的 SDK 不可用", out)
 
 
 if __name__ == "__main__":  # pragma: no cover

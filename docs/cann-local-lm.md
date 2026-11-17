@@ -204,7 +204,8 @@ export TE_PARALLEL_COMPILER=0     # 串行更稳（并发版偶发主进程 abor
 构建临时目录（**不在 `/tmp`**），编完签名，装到 `<模型目录>/lib/`：
 
 ```bash
-export OHOS_SDK_NATIVE=<ohos-sdk>/native     # 必需（SDK 不能自动下载）
+# 默认不需要任何环境变量：用 PATH 上的 clang/clang++ + cmake/make（设备上就够）
+# 想用 SDK 交叉编译时才需要：export OHOS_SDK_NATIVE=<ohos-sdk>/native
 # 方式一：直接跑脚本（推荐，等价于"缺库时的自动构建"，也可单独用于预构建）
 scripts/build_cllm_engine.sh                  # 产物 → <cann-llm>/lib/
 scripts/build_cllm_engine.sh --force --refresh # 强制重编 + 重新 clone 源码/签名工具
@@ -227,8 +228,8 @@ python -m cann_llm.launcher chat -d <model>
 
 | 变量 | 作用 |
 |---|---|
-| `CANN_LLM_CLLM_TOOLCHAIN` | `auto`（默认）/ `sdk` / `clang`；`--clang` 等价于 `clang` |
-| `OHOS_SDK_NATIVE` | **可选**：给了就用 SDK 交叉编译；不给或 auto 找不到 ⇒ 用 PATH 上的 clang |
+| `CANN_LLM_CLLM_TOOLCHAIN` | `clang`（**默认**）/ `sdk`；`--clang` 等价于 `clang` |
+| `OHOS_SDK_NATIVE` | **可选**：只有显式给了才走 SDK 交叉编译；不给 ⇒ 普通 clang（**不猜** ✗） |
 | `CANN_LLM_CLLM_CC` / `_CXX` | 指定编译器（默认 PATH 的 `clang` / `clang++`，会退到 `CC`/`CXX`） |
 | `CANN_LLM_CLLM_REPO` | 上游地址，默认 `https://gitcode.com/cann/cann-local-lm.git` |
 | `CANN_LLM_CLLM_REF` | 要构建的分支/标签（默认默认分支） |
@@ -249,8 +250,8 @@ python -m cann_llm.launcher chat -d <model>
 | `sdk`（有 SDK 时） | OHOS SDK native（`sysroot/` + `llvm/bin/clang`） | 走上游 `build_ohos.sh --no-signed` |
 
 设备上编译目标 == 本机 ⇒ **纯 clang 完全可行**（实测 21 s 编完、签名后直接加载出字 ✓）。
-`auto` 还会从 PATH 上的 clang 反推 SDK 位置（`…/ohos-sdk/<ver>/bin/clang` →
-`…/ohos-sdk-native/<ver>/`，或 `-print-resource-dir` 上溯），所以通常不用手填环境变量 ✓。
+**默认就是普通 clang**（用 PATH 上的 `clang/clang++` + `cmake`）。只有你显式给
+`--sdk` / `OHOS_SDK_NATIVE` 时才走 SDK 交叉编译；**不会**从 PATH 或常见目录去猜 SDK ✗。
 
 #### 4.1.2 手工构建（调试/离线时）
 
