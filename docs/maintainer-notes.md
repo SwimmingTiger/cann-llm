@@ -9089,3 +9089,74 @@ def run_server(root, argv):
 · 需要延迟 import（避免循环）时 ✓：放在函数【最开头】✓（所有路径都会执行 ✓），
   或者干脆只 import 模块、用 module.attr 访问 ✓ —— 后者连作用域问题都不会有 ✓。
 · 症状识别 ✓：★"带某个参数就崩、不带就正常"✗★ 往往就是"那条分支里做了绑定" ✓（本例就是 ✓）。
+
+---
+
+## §167 cllm 后端：把 cann-local-lm（prefill/decode 双图 + 自编引擎）接进本仓库
+
+### 167.1 为什么值得单独一个后端
+
+四家后端里，只有它能跑**本仓库自己转换、自己编译、自己部署**的模型：
+
+```
+hiai / cann / nnrt  →  系统现成引擎 + 别人打包好的模型
+cllm                →  libcann_lm_engine.so（我们交叉编译 + 签名）
+                       + prefill.omc / decode.omc（我们编译）
+                       + 设备 HiAI/NNCore 只负责执行 kernel
+```
+
+命名极易混淆：系统那份是 `libcann_llm_engine.so`（`cann` 后端，C API 前缀
+`HMS_LLMEngine*`），我们的这份是 `libcann_lm_engine.so`（`cllm` 后端，前缀
+`CANN_LMEngine*`）。**只差一个字母**，写错会报"符号不存在"。
+
+### 167.2 模型是两段整图，不是按层切段
+
+```
+prefill.omc   一次喂 N 个 token（gemma4-E2B: N=64），35 层全在这一张图
+decode.omc    每步 1 个 token，同样 35 层
+```
+
+与 `nnrt` 后端的分段方案（每 2 层一段、主机循环调用）完全不同 —— 别把两者的
+"段"混为一谈。两段权重是**各自编译产物**（`delegate_graph_weight_combined`
+内容不同），不能共用。
+
+### 167.3 后端实现要点（`backends/cllm.py`）
+
+```
+· ctypes 直接绑 C API（c_api.h；ModelArtifact/EngineOptions/SamplingParams/RequestOptions/Result）
+· 路径解析 = 纯函数 resolve_artifact()：优先 testcase.json，否则固定部署布局；
+  缺文件一次列全（不要一个报一次）
+· 引擎库查找 = $CANN_LLM_CLLM_LIB → <模型>/lib/ → <模型>/py/cann_local_lm/lib/
+  → /system/lib64/libcann_lm_engine.so（都没有就给出可操作的报错 ✓）
+· 流式 = ExecutorGenerateAsync 的逐 token 回调 → queue → yield（引擎线程回调，不能直接 yield）
+· 失败清理 = RequestDestroy → ContextCancel（否则 ContextDestroy 会 INVALID_STATE）
+```
+
+### 167.4 launcher 接线：cllm 的判据必须排在 nnrt 之前
+
+cllm 部署目录里也有 `prefill/`、`decode/` —— 首字母 `pre`/`dec` **会误中 nnrt 的
+分段判据** ✗。所以 `detect_backend()` 里 cllm 的判据（`model.json` + 两段 `.omc`）
+必须写在 nnrt 之前 ✓，否则自动选择会把 cllm 模型判成 nnrt ✗。
+
+另外 `pick_engine_lib()` 加了 `model_dir` 参数：cllm 的引擎库就在模型目录里，
+不传模型目录根本找不到 ✓（`run_chat` / `run_server` 都要先算模型目录再选库）。
+
+### 167.5 转换/部署的硬约束（细节见 docs/cann-local-lm.md）
+
+```
+① kv_cache_max_len = sliding_window + prefill_len   （gemma4: 512+64=576）
+   ⇒ full 层与 sliding 层必须等宽，否则 kv_pool.ensure 逐层校验拒绝
+② model.json 必须补 sliding_window（取 HF 真值）与 sliding_window_head_dim
+③ 编译前 source CANN 的 set_env.sh（ccec + TBE 路径）；source 不能接管道
+④ 输出目录不能是 bind mount（rename EXDEV）
+⑤ .so 必须 ohos-sign-elf.py 签名（未签名 dlopen = Permission denied）
+⑥ weight/meta.json 里 hash_to_weight_file 要改成设备路径（否则 INVALID_ARGUMENT 且无日志）
+⑦ embedding_weights 四段文件，seg3/seg4 = 1.0（图内已乘 embed_scale）
+```
+
+### 167.6 测试
+
+```
+tests/test_cllm_backend.py    路径解析 / 库查找 / 状态码 / 构造与注册（不碰 .so）
+tests/test_backend_detect.py  新增 cllm 三条（含"cllm 优先于 nnrt"的顺序陷阱）
+```

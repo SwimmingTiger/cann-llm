@@ -26,13 +26,17 @@
 
 - 🗣 **交互式对话 CLI** —— 逐字流式输出、多轮上下文、采样参数热更新
 - 🔌 **OpenAI 兼容 HTTP 服务** —— `/v1/chat/completions`（含 SSE 流式）、`/v1/completions`、`/v1/models`
-- 🧩 **三个后端，同一套上层** —— 统一 `EngineBackend` 协议下目前实现了三个：
+- 🧩 **四个后端，同一套上层** —— 统一 `EngineBackend` 协议下目前实现了四个：
   **`cann`** 走华为官方 NDK 接口（`/system/lib64/ndk/libcann_llm_engine.so`），
     **`hiai`** 走系统内部引擎（`/system/lib64/libhiai_llm_engine.so`），
     **`nnrt`** 用 MindSpore Lite NDK 跑**第三方离线模型**（`.ms`）—— 它**不经过
     华为 LLM 引擎**，所以模型结构不受「逐层一对 K/V」那类约束，见
-    [docs/offline-model-nnrt.md](docs/offline-model-nnrt.md)。
-    用 `-b cann` / `-b hiai` / `-b nnrt` 切换，**CLI、HTTP 服务、对话模板都不用改**
+    [docs/offline-model-nnrt.md](docs/offline-model-nnrt.md)，
+      **`cllm`** 跑 **cann-local-lm** 的产物（`prefill.omc` + `decode.omc` + 外置权重），
+      引擎 `libcann_lm_engine.so` 是**自己交叉编译并签名**的、算子执行交给设备
+      HiAI/NNCore —— 转换/编译/部署全流程见
+      [docs/cann-local-lm.md](docs/cann-local-lm.md)。
+      用 `-b cann` / `-b hiai` / `-b nnrt` / `-b cllm` 切换，**CLI、HTTP 服务、对话模板都不用改**
 - 📦 **Python 包层面零依赖** —— HTTP 层基于标准库 `http.server`。
   不过鸿蒙 PC **不自带 Python**，需先从应用市场装「Python安装器」，
   见[依赖与构建](#依赖与构建)
