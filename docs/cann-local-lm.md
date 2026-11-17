@@ -298,13 +298,27 @@ python -m cann_llm.launcher chat -d <model> -b cllm
 * 引擎内部完成分词，cann-llm 只传文本、收文本；`tokenizer_type` 取
   `tokenizer.json` 的 `model.type`（BPE → `BPE`，Unigram → `SPM`）。
 
-实测（gemma-4-E2B-it / KirinX90，`temperature=1.0, top_k=1`）：
+实测（gemma-4-E2B-it / KirinX90，贪心解码）：
 
-| prompt | 输出 | 耗时 |
-|---|---|---|
-| `今天天气` | `怎么样？` | ≈15 s / 24 token |
-| `Hello, my name is` | ` Alex. How are you today?` | ≈20 s / 24 token |
-| gemma chat template 中文自我介绍 | `你好！我是一个大型语言模型，由 Google 训练…` | ≈66 s / 40 token |
+| 路径 | prompt | 输出 | 耗时 |
+|---|---|---|---|
+| 原生 cllm CLI | `今天天气` | `怎么样？` | ≈15 s / 24 token |
+| 原生 cllm CLI | `Hello, my name is` | ` Alex. How are you today?` | ≈20 s / 24 token |
+| **cann-llm `-b cllm`** | `你好，请用一句话介绍你自己。` | `我是一个由 Google DeepMind 开发的开放权重的大型语言模型。` | ≈49 s / 23 token |
+| **cann-llm `-b cllm`** | `用一句话介绍杭州。` | `杭州是一座充满活力…以美丽的西湖…闻名。` | ≈79 s / 40 token |
+
+≈ **0.5 token/s**（含 prefill）。同一 prompt 用原生 CLI 也要 ≈89 s/40 token，
+所以瓶颈在引擎/模型本身，不是 cann-llm 这层。
+
+### 5.1 三个使用细节（cann-llm 侧已经处理）
+
+* **gemma 模板**：`-t gemma`（`templates.py` 内置）。Gemma 没有 system 角色，
+  模板会把 system 内容前置到第一条 user；`-t gemma` 时不注入 Qwen 那句默认系统提示
+  （`ModelConfig.system_prompt` 默认已改成空，由模板的 `default_system` 决定）。
+* **stop 串裁剪**：引擎把 `<end_of_turn>` **留在文本里** ✗，流式又收不回来 ⇒
+  后端做了"保留后缀"裁剪（`split_stop()`），输出干净 ✓。
+* **prompt_tokens 未知**：引擎 C API 只回传生成侧的 token 数，所以 `[in 0 tok]`；
+  `tok/s` 用总耗时折算（`decode_ms` 由 wall time 填）。
 
 ## 6. 排错表（全部是实测撞过的）
 

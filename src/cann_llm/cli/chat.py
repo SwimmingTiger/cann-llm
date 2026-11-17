@@ -261,7 +261,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             stop=tuple(template.stop_strings()),
             # 用户显式给的 > 模型自带（api_config.json）> 兜底
             **resolve_sampler(cfg.model, engine.sampler_defaults())),
-        system_prompt=cfg.model.system_prompt,
+        # 空 = 用模板自己的默认（chatml→Qwen 那句；gemma→空，Gemma 无 system 角色）
+        system_prompt=cfg.model.system_prompt or template.default_system,
         tool_names=registry.names(),
         stream=not args.no_stream,
         model_id=cfg.model.resolved_id, backend=cfg.model.backend)

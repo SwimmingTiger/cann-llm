@@ -9160,3 +9160,22 @@ cllm 部署目录里也有 `prefill/`、`decode/` —— 首字母 `pre`/`dec` *
 tests/test_cllm_backend.py    路径解析 / 库查找 / 状态码 / 构造与注册（不碰 .so）
 tests/test_backend_detect.py  新增 cllm 三条（含"cllm 优先于 nnrt"的顺序陷阱）
 ```
+
+### 167.7 接入时暴露的三处"上层假设"
+
+```
+① 后端必须有 default_params
+   chat.py 里 `stop=backend.default_params.stop` 无条件读 ✗ ⇒ 新后端漏了它直接 AttributeError。
+   本后端在 __init__ 里 `self.default_params = default_params or GenerationParams()` ✓（与 hiai 一致）。
+
+② 默认系统提示被写死在 config
+   ModelConfig.system_prompt 原本是 "You are Qwen, created by Alibaba Cloud…" ✗，
+   于是 gemma 也被灌了 Qwen 人设 ⇒ 模型自称"阿里巴巴云计算公司创建的助手" ✗（实测 ✓）。
+   改：config 默认空 ✓，由模板 default_system 给（chatml → Qwen 那句，保持旧行为；
+   gemma → 空）。CLI 侧 `cfg.model.system_prompt or template.default_system` ✓。
+
+③ 引擎会把 stop 串留在生成文本里
+   `<end_of_turn>` 会粘在输出尾巴上 ✗（原生 CLI 也一样 ✓），流式没法收回
+   ⇒ 后端做"保留后缀"裁剪 split_stop()：命中即截断；若结尾是某个 stop 的前缀
+   就先扣住不吐 ✓（跨 token 也能拼上 ✓，单测覆盖 5 条）。
+```

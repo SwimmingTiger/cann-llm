@@ -6,6 +6,7 @@
 内置：
 * ``chatml`` —— Qwen2.5 / Qwen3 系列（``<|im_start|>role\\n…<|im_end|>``），当前默认
 * ``plain``  —— 不做任何包装，直接把消息内容拼起来（调试 / 续写用）
+* ``gemma``  —— Gemma 系列（``<start_of_turn>user…<end_of_turn>``，**没有 system 角色**）
 
 要加新模板（GLM、HunYuan 等）：实现 :class:`ChatTemplate` 并用
 :func:`register_template` 注册即可，上层零改动。
@@ -162,8 +163,63 @@ class ChatMLTemplate(ChatTemplate):
         return (IM_END,)
 
     @property
+    def default_system(self) -> str:
+        # 旧行为：chatml 的默认系统提示就是 Qwen 那句（config 里不再写死 ✓）
+        return "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+
+    @property
     def tool_call_tags(self) -> Sequence[str]:
         return (TOOL_CALL_OPEN, TOOL_CALL_CLOSE)
+
+
+class GemmaTemplate(ChatTemplate):
+    """Gemma 系列的对话模板。
+
+    Gemma **没有 system 角色**：官方模板会忽略 system；这里按社区通行做法把
+    system 内容**前置到第一条 user** 前面 ✓（不丢信息，也不引入模型不认的标签）。
+    结尾 ``<start_of_turn>model\n`` 是「轮到模型说话」的引导段。
+    """
+
+    name = "gemma"
+
+    START = "<start_of_turn>"
+    END = "<end_of_turn>"
+
+    def render(self, messages: Sequence[Message], *,
+               add_generation_prompt: bool = True,
+               tools: Optional[Sequence[Dict[str, Any]]] = None) -> str:
+        if tools:
+            raise InvalidRequestError(
+                "gemma 模板不支持工具声明（模型侧没有 function calling 协议）")
+        parts: List[str] = []
+        system_prefix = ""
+        for m in messages:
+            if m.role == "system":
+                if not system_prefix:
+                    system_prefix = m.content.strip()
+                continue
+            if m.role == "tool":
+                # 工具结果按"用户补充信息"塞进来（gemma 无 tool 角色）
+                parts.append(f"{self.START}user\n{m.content}{self.END}\n")
+                continue
+            role = "model" if m.role == "assistant" else "user"
+            content = m.content
+            if role == "user" and system_prefix:
+                content = f"{system_prefix}\n\n{content}"
+                system_prefix = ""
+            parts.append(f"{self.START}{role}\n{content}{self.END}\n")
+        if system_prefix:      # 只有 system、没有 user 的极端情况
+            parts.insert(0, f"{self.START}user\n{system_prefix}{self.END}\n")
+        if add_generation_prompt:
+            parts.append(f"{self.START}model\n")
+        return "".join(parts)
+
+    def stop_strings(self) -> Sequence[str]:
+        return (self.END,)
+
+    @property
+    def default_system(self) -> str:
+        return ""
 
 
 class PlainTemplate(ChatTemplate):
@@ -192,6 +248,7 @@ def register_template(name: str) -> Callable[[type], type]:
 # 注册内置模板
 register_template("chatml")(ChatMLTemplate)
 register_template("plain")(PlainTemplate)
+register_template("gemma")(GemmaTemplate)
 
 
 def get_template(name: str) -> ChatTemplate:

@@ -47,7 +47,9 @@ class ModelConfig:
     model_id: Optional[str] = None
     backend: str = "cann"
     chat_template: str = "chatml"
-    system_prompt: str = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+    #: 默认空 = 交给对话模板的 ``default_system`` —— chatml 给 Qwen 那句，
+    #: gemma 给空（Gemma 没有 system 角色）。写死在这里会让 gemma 也带 Qwen 人设 ✗
+    system_prompt: str = ""
     max_tokens: int = 256
     # ---- 采样参数：None = 【未指定 → 跟随模型自带的配置】----
     # ★ 这里绝不写死"推荐值"。模型目录里的 api_config.json 才是权威来源

@@ -178,5 +178,36 @@ class TestBackendLoadErrors(unittest.TestCase):
             self.assertTrue(backend.supports_streaming)
 
 
+class TestSplitStop(unittest.TestCase):
+    """流式 stop 裁剪 —— 引擎会把 stop 串留在文本里 ✗，必须在后端裁掉 ✓。"""
+
+    def test_hit_trims_and_flags(self):
+        from cann_llm.backends.cllm import split_stop
+        self.assertEqual(split_stop("你好<end_of_turn>", ["<end_of_turn>"]),
+                         ("你好", "", True))
+
+    def test_partial_prefix_is_held_back(self):
+        from cann_llm.backends.cllm import split_stop
+        self.assertEqual(split_stop("你好<end", ["<end_of_turn>"]),
+                         ("你好", "<end", False))
+
+    def test_no_stops_passthrough(self):
+        from cann_llm.backends.cllm import split_stop
+        self.assertEqual(split_stop("abc", []), ("abc", "", False))
+
+    def test_earliest_stop_wins(self):
+        from cann_llm.backends.cllm import split_stop
+        out, hold, hit = split_stop("aa<e1>bb<e2>", ["<e2>", "<e1>"])
+        self.assertEqual((out, hold, hit), ("aa", "", True))
+
+    def test_across_chunks(self):
+        """分两块到达也能正确裁掉（模拟流式两个 token）。"""
+        from cann_llm.backends.cllm import split_stop
+        out1, hold, hit1 = split_stop("你好<en", ["<end_of_turn>"])
+        self.assertEqual((out1, hold, hit1), ("你好", "<en", False))
+        out2, hold2, hit2 = split_stop(hold + "d_of_turn>", ["<end_of_turn>"])
+        self.assertEqual((out2, hold2, hit2), ("", "", True))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

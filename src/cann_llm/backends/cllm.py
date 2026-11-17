@@ -54,6 +54,7 @@ __all__ = [
     "resolve_artifact",
     "find_engine_lib",
     "status_text",
+    "split_stop",
 ]
 
 #: 显式指定引擎库的变量
@@ -304,7 +305,9 @@ class CllmBackend(EngineBackend):
 
     def __init__(self, model_dir: str = "", model_id: Optional[str] = None,
                  context_length: int = 0, lib_path: Optional[str] = None,
-                 tokenizer_type: str = "", **_: object) -> None:
+                 tokenizer_type: str = "",
+                 default_params: Optional[GenerationParams] = None,
+                 **_: object) -> None:
         self.model_dir = os.path.abspath(os.path.expanduser(model_dir)) if model_dir else ""
         self.model_id = model_id or ""
         self.context_length = int(context_length or 0)
@@ -313,6 +316,8 @@ class CllmBackend(EngineBackend):
         self._lib: Optional[_Lib] = None
         self._executor: Optional[int] = None
         self._ctx: Optional[int] = None
+        #: CLI/服务在 load() 之后会读它（没显式指定采样参数时用）
+        self.default_params = default_params or GenerationParams()
         self._info = ModelInfo(id="unknown", backend=self.name)
         self._lock = threading.Lock()
         self._closed = False
@@ -449,8 +454,11 @@ class CllmBackend(EngineBackend):
                 f"GenerateAsync 失败（{status_text(st)}）—— 检查 EngineOptions.tokenizer_path "
                 "是否指向可加载的 tokenizer.json（路径不可加载会让 tokenizer 置空）。")
 
+        stop_text = [s.decode("utf-8", "replace") for s in stop_keep]
         t0 = time.monotonic()
         index = 0
+        buf = ""
+        stopped = False
         try:
             while True:
                 drained = False
@@ -460,17 +468,23 @@ class CllmBackend(EngineBackend):
                     except queue.Empty:
                         break
                     drained = True
-                    piece = raw.decode("utf-8", "replace")
-                    if not piece:
-                        continue
-                    chunk = GenerationChunk(text=piece, index=index, token_id=tok,
-                                            finish_reason=None, stats=None)
-                    index += 1
-                    yield chunk
-                if lib.CANN_LMEngine_RequestIsDone(req):
+                    buf += raw.decode("utf-8", "replace")
+                    out, buf, stopped = split_stop(buf, stop_text)
+                    if out:
+                        yield GenerationChunk(text=out, index=index, token_id=tok,
+                                              finish_reason=None, stats=None)
+                        index += 1
+                    if stopped:
+                        break
+                if stopped or lib.CANN_LMEngine_RequestIsDone(req):
                     break
                 if not drained:
                     time.sleep(0.01)
+            if buf and not stopped:
+                out, _, _ = split_stop(buf, stop_text)
+                if out:
+                    yield GenerationChunk(text=out, index=index, finish_reason=None, stats=None)
+                    index += 1
 
             result = _Result()
             st = lib.CANN_LMEngine_RequestWait(req, ctypes.byref(result))
@@ -479,19 +493,24 @@ class CllmBackend(EngineBackend):
             try:
                 n_new = int(result.token_ids_count)
                 finish = _FINISH_MAP.get(int(result.finish_reason), FINISH_ERROR)
+                # ★只在"一个 token 都没流出来"时才用 result.text 兜底★——
+                #   GenerateAsync 的 result.text 是**全文**，流式路径下再吐一次就重复了 ✗
                 tail = ""
-                if result.text:
-                    raw = bytes(result.text)
-                    tail = raw.decode("utf-8", "replace")
-                if tail and index == 0:
-                    index += 1
+                if result.text and index == 0:
+                    tail = bytes(result.text).decode("utf-8", "replace")
+                    for stop in stop_keep:
+                        tail = tail.replace(stop.decode("utf-8", "replace"), "")
+                    if tail:
+                        index += 1
+                wall = time.monotonic() - t0
+                # 引擎不回传 prefill/decode 分项 ⇒ 用总耗时填 decode（tok/s 才不是 0 ✗）
                 stats = GenerationStats(
                     prompt_tokens=0,
                     completion_tokens=n_new,
                     prefill_ms=0.0,
-                    decode_ms=0.0,
-                    total_ms=0.0,
-                    wall_s=time.monotonic() - t0,
+                    decode_ms=wall * 1000.0,
+                    total_ms=wall * 1000.0,
+                    wall_s=wall,
                 )
                 yield GenerationChunk(text=tail, index=index, finish_reason=finish, stats=stats)
             finally:
@@ -513,6 +532,40 @@ class CllmBackend(EngineBackend):
 
     def sampler_defaults(self) -> "Dict[str, object]":
         return {"temperature": 1.0, "top_k": 1, "top_p": 1.0, "repetition_penalty": 1.0}
+
+
+def split_stop(buf: str, stops: "Sequence[str]") -> "Tuple[str, str, bool]":
+    """流式输出的 stop 串裁剪（纯函数，便于单测）。
+
+    引擎收到 stop 串后会**把它一起留在文本里**（实测：``<end_of_turn>`` 会粘在尾巴上 ✗）。
+    流式场景没法"收回"已经吐出去的字符，所以这里做**保留后缀**：
+
+    * 命中 stop ⇒ 返回 ``(stop 之前的文本, "", True)``
+    * 否则返回 ``(可安全输出的前缀, 需留到下一轮的后缀, False)`` —— 后缀是
+      "某个 stop 串的前缀"且恰好是当前缓冲的结尾（可能下一 token 就凑成 stop ✓）
+    """
+    if not stops:
+        return buf, "", False
+    hit = -1
+    for s in stops:
+        if not s:
+            continue
+        i = buf.find(s)
+        if i >= 0 and (hit < 0 or i < hit):
+            hit = i
+    if hit >= 0:
+        return buf[:hit], "", True
+    hold = 0
+    for s in stops:
+        if not s:
+            continue
+        for k in range(min(len(s) - 1, len(buf)), 0, -1):
+            if buf.endswith(s[:k]):
+                hold = max(hold, k)
+                break
+    if hold:
+        return buf[:-hold], buf[-hold:], False
+    return buf, "", False
 
 
 # ---------------------------------------------------------------- 小工具

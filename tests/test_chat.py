@@ -38,6 +38,31 @@ class TestTemplate(unittest.TestCase):
         with self.assertRaises(InvalidRequestError):
             Message("bogus", "x")
 
+    def test_gemma_template(self):
+        """gemma：<start_of_turn>role…<end_of_turn>，没有 system 角色（前置到第一条 user）"""
+        t = get_template("gemma")
+        out = t.render([Message("system", "sys"), Message("user", "你好")])
+        self.assertEqual(
+            out,
+            "<start_of_turn>user\nsys\n\n你好<end_of_turn>\n<start_of_turn>model\n")
+        self.assertEqual(tuple(t.stop_strings()), ("<end_of_turn>",))
+
+    def test_gemma_template_rejects_tools(self):
+        """gemma 没有 function calling 协议 ⇒ 带 tools 直接拒绝（别静默丢）"""
+        with self.assertRaises(InvalidRequestError):
+            get_template("gemma").render([Message("user", "x")],
+                                         tools=[{"type": "function"}])
+
+    def test_gemma_template_multi_turn(self):
+        out = get_template("gemma").render(
+            [Message("user", "a"), Message("assistant", "b"), Message("user", "c")])
+        self.assertEqual(
+            out,
+            "<start_of_turn>user\na<end_of_turn>\n"
+            "<start_of_turn>model\nb<end_of_turn>\n"
+            "<start_of_turn>user\nc<end_of_turn>\n"
+            "<start_of_turn>model\n")
+
     def test_unknown_template_rejected(self):
         with self.assertRaises(InvalidRequestError):
             get_template("nope")
