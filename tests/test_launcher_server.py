@@ -24,7 +24,8 @@ class TestRunServerBackendAndDir(unittest.TestCase):
     def setUp(self):
         self._real_pick = launcher_server.pick_engine_lib
         # 引擎库换成一定存在的文件 ⇒ 免得在无设备的机器上提前 die ✗
-        launcher_server.pick_engine_lib = lambda backend: (
+        # 签名带 model_dir：cllm 的引擎库要从模型目录里找（见 launcher.pick_engine_lib）
+        launcher_server.pick_engine_lib = lambda backend, model_dir=None: (
             "CANN_LLM_ENGINE_LIB", sys.executable, "假引擎")
         self._env = os.environ.get("LD_LIBRARY_PATH")
 

@@ -33,6 +33,10 @@ LIBS = {
     "nnrt": ("CANN_LLM_NNRT_LIB", "/system/lib64/ndk/libmindspore_lite_ndk.so",
              "nnrt 引擎 (MindSpore Lite NDK)"),
     "hiai": ("CANN_LLM_HIAI_LIB", "/system/lib64/libhiai_llm_engine.so", "hiai 引擎"),
+    # ★ cllm：cann-local-lm 的引擎（自己交叉编译 + 签名的 libcann_lm_engine.so）★
+    #   名字与系统那份 libcann_llm_engine.so 只差一个字母，别混（后者是 cann 后端）
+    #   默认路径依赖模型目录 ⇒ pick_engine_lib() 里单独解析
+    "cllm": ("CANN_LLM_CLLM_LIB", "", "cann-local-lm 引擎"),
 }
 
 #: 找到候选解释器后，用它自检"与引擎 libc 是否兼容"。
@@ -100,10 +104,33 @@ def libc_compatible(py: str) -> bool:
 
 # ---------------------------------------------------------------- 引擎库 / 模型目录
 
-def pick_engine_lib(backend: str) -> "tuple[str, str, str]":
-    """按后端选引擎库：返回 ``(环境变量名, 路径, 人读名称)``。"""
+#: cllm 引擎库在模型目录里的候选位置（与 backends/cllm.py 的 _LIB_IN_MODEL 一致）
+_CLLM_LIB_IN_MODEL = (
+    os.path.join("lib", "libcann_lm_engine.so"),
+    os.path.join("py", "cann_local_lm", "lib", "libcann_lm_engine.so"),
+    "libcann_lm_engine.so",
+)
+
+
+def pick_engine_lib(backend: str, model_dir: "Optional[str]" = None) -> "tuple[str, str, str]":
+    """按后端选引擎库：返回 ``(环境变量名, 路径, 人读名称)``。
+
+    cllm 的库不在系统路径里（是我们交叉编译出来的），所以按
+    ``$CANN_LLM_CLLM_LIB`` → ``<模型目录>/{lib,py/cann_local_lm/lib}`` 的顺序找；
+    都没有时返回空路径，由调用方给出可操作的报错。
+    """
     var, default, kind = LIBS.get(backend, LIBS["hiai"])
-    return var, os.environ.get(var) or default, kind
+    env = os.environ.get(var)
+    if env:
+        return var, env, kind
+    if backend == "cllm":
+        if model_dir:
+            for rel in _CLLM_LIB_IN_MODEL:
+                cand = os.path.join(model_dir, rel)
+                if os.path.isfile(cand):
+                    return var, cand, kind
+        return var, "", kind
+    return var, default, kind
 
 
 def detect_backend(model_dir: Optional[str]) -> Optional[str]:
@@ -132,6 +159,13 @@ def detect_backend(model_dir: Optional[str]) -> Optional[str]:
     seg_dirs = [n for n in names
                 if n.startswith(("seg", "mseg", "dec", "pre"))
                 and os.path.isdir(os.path.join(model_dir, n))]
+    # ★ cllm 必须排在 nnrt 之前 ★ —— 它的目录里也有 prefill/ 与 decode/
+    #   （名字以 pre/dec 开头 ✓），会误中 nnrt 的分段判据 ✗。
+    #   真正的判据是"两段 .omc + model.json"（cann-local-lm 的部署包形态 ✓）。
+    if "model.json" in names and any(
+            os.path.isfile(os.path.join(model_dir, stage, fname))
+            for stage, fname in (("prefill", "prefill.omc"), ("decode", "decode.omc"))):
+        return "cllm"
     if seg_dirs and "tokenizer.json" in names:                   # ★① 分段布局（本仓库导出 ✓）★
         return "nnrt"
     if seg_dirs and ("weights" in names or "graphP" in names):   # ② 老布局 ✓
@@ -244,7 +278,13 @@ def run_chat(root: str, argv: "List[str]") -> int:
     from .large_mem import BACKEND_ENV, build_large_mem_argv, strip_large_mem
     rest, want_lldb = strip_flag(rest)
     rest, want_large_mem = strip_large_mem(rest)
-    var, lib, kind = pick_engine_lib(backend)
+    d = find_model_dir(root, model_dir)
+    var, lib, kind = pick_engine_lib(backend, d)
+    if backend == "cllm" and not lib:
+        die("找不到 cann-local-lm 引擎库 libcann_lm_engine.so：\n"
+            "    - 用 CANN_LLM_CLLM_LIB=/path/libcann_lm_engine.so 指定，或\n"
+            f"    - 放到模型目录的 lib/ 下（当前模型目录: {d or '未指定'}）\n"
+            "    它不是系统库：要从 cann-local-lm 源码交叉编译并签名，见 docs/cann-local-lm.md")
 
     py = current_python()
     if not libc_compatible(py):
@@ -262,7 +302,6 @@ def run_chat(root: str, argv: "List[str]") -> int:
         die(f"找不到 {kind} {lib}\n    后端 {backend} 需要鸿蒙设备（NPU）环境。")
     ok(f"{kind}: {lib}")
 
-    d = find_model_dir(root, model_dir)
     if d is None:
         info("未指定模型目录，将交由程序提示。用 -d 指定，"
              f"或把模型放到 {root}/models/<名字>/ 下。")

@@ -372,12 +372,17 @@ def run_server(root: str, argv: "List[str]") -> int:
               f"与按 musl 编译的引擎不兼容，加载引擎时大概率段错误。", file=sys.stderr)
     ok(f"Python {sys.version.split()[0]}  ·  {py}")
 
-    var, lib, kind = pick_engine_lib(backend)
+    # ★ 模型目录要先算：cllm 的引擎库就在模型目录里（lib/ 或 py/…）★
+    d = find_model_dir(root, o["model_dir"] if isinstance(o["model_dir"], str) else None)
+    var, lib, kind = pick_engine_lib(backend, d)
+    if backend == "cllm" and not lib:
+        die("找不到 cann-local-lm 引擎库 libcann_lm_engine.so：\n"
+            "    - 用 CANN_LLM_CLLM_LIB=/path/libcann_lm_engine.so 指定，或\n"
+            f"    - 放到模型目录的 lib/ 下（当前模型目录: {d or '未指定'}）\n"
+            "    它不是系统库：要从 cann-local-lm 源码交叉编译并签名，见 docs/cann-local-lm.md")
     if not os.path.isfile(lib):
         die(f"找不到 {kind} {lib}\n     后端 {backend} 需要鸿蒙设备（NPU）环境。")
     ok(f"{kind}: {lib}")
-
-    d = find_model_dir(root, o["model_dir"] if isinstance(o["model_dir"], str) else None)
     if d is None:
         die("未指定模型目录：用 -d 指定，或把模型放到 "
             f"{root}/models/<名字>/ 下")

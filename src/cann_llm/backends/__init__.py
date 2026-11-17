@@ -32,6 +32,15 @@ except Exception as _e:  # pragma: no cover
 
     warnings.warn(f"nnrt 后端不可用: {_e}", RuntimeWarning, stacklevel=2)
 
+# --- cllm 后端：cann-local-lm 引擎（libcann_lm_engine.so，**自己编的**）+ prefill/decode 双图 omc ---
+# 与 cann 后端（系统的 libcann_llm_engine.so / HMS_LLMEngine*）不是一回事，见 backends/cllm.py 顶部对比表。
+try:  # pragma: no cover - 平台相关
+    from . import cllm  # noqa: F401
+except Exception as _e:  # pragma: no cover
+    import warnings
+
+    warnings.warn(f"cllm 后端不可用: {_e}", RuntimeWarning, stacklevel=2)
+
 # --- hiai 后端：驱动系统内部引擎（libhiai_llm_engine.so），认官方模型目录结构 ---
 try:  # pragma: no cover - 平台相关
     from . import hiai  # noqa: F401

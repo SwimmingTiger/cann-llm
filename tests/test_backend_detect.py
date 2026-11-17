@@ -49,6 +49,33 @@ class TestDetectBackend(unittest.TestCase):
             _files(d, os.path.join("seg0", "seg0.ms"))
             self.assertIsNone(detect_backend(d))
 
+    # ---- cllm：cann-local-lm 的 prefill/decode 双图 + model.json -------------
+
+    def test_cllm_layout(self):
+        """★prefill/decode 双 .omc + model.json ⇒ cllm★（不是 nnrt ✓）"""
+        with tempfile.TemporaryDirectory() as d:
+            _files(d, "model.json", "tokenizer.json")
+            _files(d, os.path.join("prefill", "prefill.omc"))
+            _files(d, os.path.join("decode", "decode.omc"))
+            self.assertEqual(detect_backend(d), "cllm")
+
+    def test_cllm_wins_over_nnrt_prefixes(self):
+        """★顺序陷阱★：cllm 目录里的 prefill/ 与 decode/ 也以 pre/dec 开头 ✓，
+        会误中 nnrt 的分段判据 ✗ —— 所以 cllm 判据必须排在 nnrt 之前 ✓。"""
+        with tempfile.TemporaryDirectory() as d:
+            _files(d, "model.json", "tokenizer.json")
+            _files(d, os.path.join("prefill", "prefill.omc"))
+            _files(d, os.path.join("decode", "decode.omc"))
+            _files(d, os.path.join("prefill", "whatever.ms"))   # 故意再放个 .ms 也不该变 nnrt
+            self.assertEqual(detect_backend(d), "cllm")
+
+    def test_prefill_dir_without_omc_stays_nnrt(self):
+        """只有 prefill/ 目录、没有 .omc ⇒ 仍按 nnrt 判 ✓（本仓库分段模型没 model.json ✓）"""
+        with tempfile.TemporaryDirectory() as d:
+            _files(d, "tokenizer.json")
+            _files(d, os.path.join("prefill", "prefill.ms"))
+            self.assertEqual(detect_backend(d), "nnrt")
+
     def test_old_layout_weights(self):
         with tempfile.TemporaryDirectory() as d:
             _dirs(d, "seg0", "weights")

@@ -1,0 +1,182 @@
+"""cllm 后端（cann-local-lm 引擎）里**纯 Python** 那部分的单测。
+
+为什么只测这些：真正执行推理要 ARM 设备上的 ``libcann_lm_engine.so`` + NPU，
+在 CI 上加载不了 ✗。但**路径解析 / 库查找 / 状态码翻译**是纯逻辑，而且是用户
+最容易配错的地方（§「文档里那 7 条」），所以逐条钉住 ✓。
+
+对应文档：``docs/cann-local-lm.md``（转换 → 编译 → 部署 → 运行）。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import unittest
+
+from cann_llm.backends import available_backends, create_backend
+from cann_llm.backends.cllm import (
+    CLLM_LIB_ENV,
+    CllmBackend,
+    find_engine_lib,
+    resolve_artifact,
+    status_text,
+)
+from cann_llm.errors import BackendUnavailableError, ModelLoadError
+
+
+def _touch(path: str, text: str = "{}") -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def _layout(root: str) -> None:
+    """标准部署包布局（与 cann-local-lm 的产出对应）。"""
+    _touch(os.path.join(root, "prefill", "prefill.omc"))
+    _touch(os.path.join(root, "decode", "decode.omc"))
+    os.makedirs(os.path.join(root, "prefill", "weight"), exist_ok=True)
+    os.makedirs(os.path.join(root, "decode", "weight"), exist_ok=True)
+    _touch(os.path.join(root, "model.json"),
+           json.dumps({"model_config": {"kv_cache_max_len": 576, "vocab_size": 262144,
+                                        "num_hidden_layers": 35,
+                                        "model_type": "gemma4"}}))
+    _touch(os.path.join(root, "tokenizer.json"),
+           json.dumps({"model": {"type": "BPE"}}))
+
+
+class TestResolveArtifact(unittest.TestCase):
+    def test_default_layout(self):
+        with tempfile.TemporaryDirectory() as d:
+            _layout(d)
+            art = resolve_artifact(d)
+            self.assertEqual(art["prefill_omc"], os.path.join(d, "prefill", "prefill.omc"))
+            self.assertEqual(art["decode_omc"], os.path.join(d, "decode", "decode.omc"))
+            self.assertEqual(art["meta_json"], os.path.join(d, "model.json"))
+            self.assertEqual(art["prefill_weight"], os.path.join(d, "prefill", "weight"))
+            self.assertEqual(art["tokenizer_path"], os.path.join(d, "tokenizer.json"))
+
+    def test_testcase_json_overrides(self):
+        """``testcase.json`` 里的相对路径按模型目录展开、绝对路径原样用。"""
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as other:
+            _layout(d)
+            _touch(os.path.join(other, "p.omc"))
+            _touch(os.path.join(d, "testcase.json"), json.dumps({
+                "model_path_prefill": "custom/p.omc",
+                "model_path_decode": os.path.join(other, "p.omc"),
+                "model_meta_config": "model.json",
+                "model_weight_dir_prefill": "prefill/weight",
+                "model_weight_dir_decode": "decode/weight",
+            }))
+            _touch(os.path.join(d, "custom", "p.omc"))
+            art = resolve_artifact(d)
+            self.assertEqual(art["prefill_omc"], os.path.join(d, "custom", "p.omc"))
+            self.assertEqual(art["decode_omc"], os.path.join(other, "p.omc"))
+
+    def test_missing_lists_all_and_hints_doc(self):
+        """缺文件一次列全（不要一个一个报），并指到文档 ✓。"""
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ModelLoadError) as cm:
+                resolve_artifact(d)
+            msg = str(cm.exception)
+            self.assertIn("prefill_omc", msg)
+            self.assertIn("decode_weight", msg)
+            self.assertIn("docs/cann-local-lm.md", msg)
+
+    def test_bad_testcase_json_is_load_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            _layout(d)
+            _touch(os.path.join(d, "testcase.json"), "{not json")
+            with self.assertRaises(ModelLoadError):
+                resolve_artifact(d)
+
+
+class TestFindEngineLib(unittest.TestCase):
+    def test_env_wins(self):
+        with tempfile.TemporaryDirectory() as d:
+            lib = os.path.join(d, "libcann_lm_engine.so")
+            _touch(lib, "x")
+            old = os.environ.get(CLLM_LIB_ENV)
+            os.environ[CLLM_LIB_ENV] = lib
+            try:
+                self.assertEqual(find_engine_lib(d), lib)
+            finally:
+                if old is None:
+                    os.environ.pop(CLLM_LIB_ENV, None)
+                else:
+                    os.environ[CLLM_LIB_ENV] = old
+
+    def test_model_dir_lib_or_py_layout(self):
+        """部署包两种放法都认：``lib/`` 与 ``py/cann_local_lm/lib/``。"""
+        for rel in (("lib",), ("py", "cann_local_lm", "lib")):
+            with tempfile.TemporaryDirectory() as d:
+                lib = os.path.join(d, *rel, "libcann_lm_engine.so")
+                _touch(lib, "x")
+                old = os.environ.pop(CLLM_LIB_ENV, None)
+                try:
+                    self.assertEqual(find_engine_lib(d), lib)
+                finally:
+                    if old is not None:
+                        os.environ[CLLM_LIB_ENV] = old
+
+    def test_missing_raises_with_paths_and_hint(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = os.environ.pop(CLLM_LIB_ENV, None)
+            try:
+                with self.assertRaises(BackendUnavailableError) as cm:
+                    find_engine_lib(d)
+            finally:
+                if old is not None:
+                    os.environ[CLLM_LIB_ENV] = old
+            msg = str(cm.exception)
+            self.assertIn(CLLM_LIB_ENV, msg)
+            self.assertIn("docs/cann-local-lm.md", msg)
+
+
+class TestStatusAndHelpers(unittest.TestCase):
+    def test_status_text(self):
+        self.assertEqual(status_text(0), "SUCCESS")
+        self.assertEqual(status_text(2), "INVALID_ARGUMENT")
+        self.assertEqual(status_text(3), "INVALID_STATE")
+        self.assertEqual(status_text(99), "status 99")
+
+    def test_default_tokenizer_type(self):
+        with tempfile.TemporaryDirectory() as d:
+            _layout(d)
+            self.assertEqual(CllmBackend(model_dir=d)._info.backend, "cllm")
+            from cann_llm.backends.cllm import _default_tokenizer_type
+            self.assertEqual(_default_tokenizer_type(d), "BPE")
+            _touch(os.path.join(d, "tokenizer.json"), json.dumps({"model": {"type": "Unigram"}}))
+            self.assertEqual(_default_tokenizer_type(d), "SPM")
+
+    def test_chat_template_is_gemma_for_gemma(self):
+        from cann_llm.backends.cllm import _chat_template
+        self.assertEqual(_chat_template({"model_type": "gemma4"}), "gemma")
+        self.assertEqual(_chat_template({"model_type": "qwen3"}), "chatml")
+
+
+class TestBackendLoadErrors(unittest.TestCase):
+    def test_incomplete_model_dir_raises_before_touching_lib(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ModelLoadError):
+                CllmBackend(model_dir=d).load()
+
+    def test_bad_lib_path_is_backend_unavailable(self):
+        with tempfile.TemporaryDirectory() as d:
+            _layout(d)
+            bogus = os.path.join(d, "libcann_lm_engine.so")
+            _touch(bogus, "not an elf")
+            with self.assertRaises(BackendUnavailableError):
+                CllmBackend(model_dir=d, lib_path=bogus).load()
+
+    def test_registered_and_constructible(self):
+        self.assertIn("cllm", available_backends())
+        with tempfile.TemporaryDirectory() as d:
+            backend = create_backend("cllm", model_dir=d, model_id="m", context_length=0)
+            self.assertIsInstance(backend, CllmBackend)
+            self.assertEqual(backend.name, "cllm")
+            self.assertTrue(backend.supports_streaming)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()
