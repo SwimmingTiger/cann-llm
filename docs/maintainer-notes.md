@@ -9380,3 +9380,23 @@ NEEDED，而进程启动后再改 LD_LIBRARY_PATH 是无效的 ✗。
   4) server 的流式循环 try/finally 里显式 gen.close()，让上述清理同步发生。
 效果：断连后服务不崩；下一条请求排队等遗留请求自然跑完（实测 19s）后再成功 ✓
 代价：断连请求会继续解码到 max_tokens（引擎没有可用的取消接口）；客户端应设合理上限。
+
+### 167.17 报错文案：不准比没有更糟（自己查 + 抓引擎日志）
+
+```
+用户原话：*"检查 EngineOptions.tokenizer_path 是否指向可加载的 tokenizer.json"*
+这句提示是【猜】的 ✗ —— tokenizer 明明能加载，真正原因是 prompt 超长
+（引擎日志里写着 promptcache.capacity: input > max_io_tokens）。
+
+改法：
+  1) 能自己验证的就自己验证：新增 check_tokenizer_file()，load() 前检查
+     tokenizer.json 是否存在/合法 JSON，不合法直接给准确错误 ✓
+  2) 引擎只回状态码时，抓【引擎自己的日志】带上：engine_log_tail() 用
+     `hilog -x -P <pid>` dump 本进程日志，再在 Python 侧筛 "CANN_LLM" + E/W/F 行
+     ⇒ GenerateAsync 失败的异常里直接出现
+        "promptcache.capacity: input <...> > max_io_tokens <...> — rejected"
+     这才是真正的错误原因 ✓
+     踩坑：hilog `-x` 不能和 `-z` 组合；`-e <regex>` 在这个版本上匹配不到引擎行
+       （实测 0 行）⇒ 只用 -x -P，过滤放 Python 侧。
+  3) 顺带修：GenerateAsync 失败时 _gen_lock 没释放 ⇒ close()/下次请求死等 ✗
+```

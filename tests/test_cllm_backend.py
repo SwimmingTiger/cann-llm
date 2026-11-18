@@ -197,6 +197,24 @@ class TestChatTemplateDetect(unittest.TestCase):
         self.assertEqual(_chat_template({"model_type": "gemma4"}, None), "gemma")
 
 
+class TestTokenizerSelfCheck(unittest.TestCase):
+    """tokenizer.json 自己查，不靠"猜"（用户明确要求：不准的错误提示更糟 ✗）。"""
+
+    def test_checks(self):
+        import json, os, tempfile
+        from cann_llm.backends.cllm import check_tokenizer_file
+        self.assertIn("不存在", check_tokenizer_file("/no/such/tokenizer.json") or "")
+        self.assertIn("未配置", check_tokenizer_file(None) or "")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "tokenizer.json")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write("{bad json")
+            self.assertIn("不是合法 JSON", check_tokenizer_file(p) or "")
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump({"model": {"vocab": {}}}, fh)
+            self.assertIsNone(check_tokenizer_file(p))
+
+
 class TestSpecialStopIds(unittest.TestCase):
     """gemma4 的 <turn|>(106) 必须进 stop_token_ids（否则一直重复它 ✗）。"""
 

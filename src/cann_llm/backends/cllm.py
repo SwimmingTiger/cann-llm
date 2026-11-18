@@ -144,6 +144,55 @@ def special_stop_ids(meta: "dict", generation_config: "Optional[dict]" = None) -
     return out
 
 
+def check_tokenizer_file(path: "Optional[str]") -> "Optional[str]":
+    """检查 tokenizer.json 是否真的可加载；返回错误描述或 None（可加载）。
+
+    ★为什么要自己查★：引擎失败只回状态码，"检查 tokenizer_path"这种**猜出来的**
+    提示没有价值（实测 tokenizer 好好的）；能自己验证的事就别让用户猜 ✓
+    """
+    if not path:
+        return "未配置 tokenizer.json 路径"
+    if not os.path.isfile(path):
+        return f"tokenizer.json 不存在：{path}"
+    try:
+        data = _read_json(path)
+    except Exception as exc:               # noqa: BLE001 —— 解析/IO 异常统一成一句话
+        return f"tokenizer.json 不是合法 JSON：{path}（{exc}）"
+    if not isinstance(data, dict) or not data:
+        return f"tokenizer.json 内容为空或格式不对：{path}"
+    return None
+
+
+def engine_log_tail(pid: "Optional[int]" = None, lines: int = 8,
+                    timeout: float = 1.5) -> str:
+    """取"本进程最近几条引擎日志"——把引擎**真实报错**带进异常。
+
+    ★为什么要它★：``GenerateAsync`` 只回状态码（如 INVALID_ARGUMENT），以前我在文案里
+    写"检查 tokenizer_path"是**猜**的 ✗（实测 tokenizer 明明可用，真正原因是 prompt
+    超过 max_io_tokens）。hilog 里其实有准确原因，抓出来即可 ✓
+    非 OHOS 环境没有 hilog ⇒ 返回空串，调用方照常工作。
+    """
+    import subprocess
+    # ★-x 不能和 -z 组合★（"Mutlti commands can't be used in combination"）；
+    #   而 ``-e`` 正则在这个 hilog 版本上匹配不到引擎行（实测 0 行 ✗）⇒
+    #   只按 pid dump，标签/级别在 Python 侧过滤 ✓
+    cmd = ["hilog", "-x", "-P", str(pid or os.getpid())]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True,
+                             timeout=timeout).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    keep = []
+    for ln in out.splitlines():
+        ln = ln.strip()
+        if not ln or "CANN_LLM" not in ln:
+            continue
+        parts = ln.split()
+        if any(p in ("E", "W", "F") for p in parts[:8]):
+            keep.append(ln)
+    return "\n".join("    " + ln for ln in keep[-lines:])
+
+
 def status_text(code: int) -> str:
     """把 C API 的状态码翻成人读形式（未收录就报数字）。"""
     return _STATUS_TEXT.get(int(code), f"status {int(code)}")
@@ -396,6 +445,9 @@ class CllmBackend(EngineBackend):
         if not self.model_dir:
             raise ModelLoadError("cllm 后端需要模型目录（-d 或 models/<名字>/）")
         art = resolve_artifact(self.model_dir)
+        tok_err = check_tokenizer_file(art.get("tokenizer_path"))
+        if tok_err:
+            raise ModelLoadError(f"模型目录不可用：{tok_err}")
         if self._lib is None:
             lib_path = self.lib_path or os.environ.get(CLLM_LIB_ENV) or ""
             if not lib_path or not os.path.isfile(lib_path):
@@ -444,11 +496,11 @@ class CllmBackend(EngineBackend):
         st = lib.lib.CANN_LMEngine_ExecutorCreate(
             ctypes.byref(artifact), ctypes.byref(options), ctypes.byref(out))
         if st != 0 or not out.value:
+            detail = engine_log_tail(lines=10)
             raise ModelLoadError(
-                f"引擎创建失败（{status_text(st)}）：模型路径存在但引擎拒绝了。\n"
-                f"  常见原因：kv_cache_max_len 与图维度不一致、embedding 配置与图工位不符、\n"
-                f"  weight/meta.json 里仍是编译机的绝对路径。排错表见 docs/cann-local-lm.md。"
-            )
+                f"引擎创建失败（{status_text(st)}）"
+                + (f"\n  引擎日志末尾：\n{detail}" if detail else "")
+                + "\n  排错表见 docs/cann-local-lm.md（kv/embedding/weight 路径）")
         self._executor = out.value
 
         ctx = ctypes.c_uint64(0)
@@ -547,9 +599,13 @@ class CllmBackend(EngineBackend):
             self._executor, prompt, ctypes.byref(sampling), ctypes.byref(options),
             ctypes.byref(req), cb, None)
         if st != 0 or not req.value:
-            raise GenerationError(
-                f"GenerateAsync 失败（{status_text(st)}）—— 检查 EngineOptions.tokenizer_path "
-                "是否指向可加载的 tokenizer.json（路径不可加载会让 tokenizer 置空）。")
+            self._gen_lock.release()      # ★失败也要放锁★（否则 close()/下次请求死等 ✗）
+            # ★不猜原因★：只报状态码 + 引擎自己的日志（hilog 里才是真相）
+            detail = engine_log_tail()
+            msg = f"GenerateAsync 失败（{status_text(st)}）"
+            if detail:
+                msg += f"\n  引擎日志末尾：\n{detail}"
+            raise GenerationError(msg)
 
         stop_text = [s.decode("utf-8", "replace") for s in stop_keep]
         t0 = time.monotonic()
@@ -587,7 +643,10 @@ class CllmBackend(EngineBackend):
             result = _Result()
             st = lib.CANN_LMEngine_RequestWait(req, ctypes.byref(result))
             if st != 0:
-                raise GenerationError(f"RequestWait 失败（{status_text(st)}）")
+                detail = engine_log_tail(lines=4)
+                raise GenerationError(
+                    f"RequestWait 失败（{status_text(st)}）"
+                    + (f"\n  引擎日志末尾：\n{detail}" if detail else ""))
             try:
                 n_new = int(result.token_ids_count)
                 finish = _FINISH_MAP.get(int(result.finish_reason), FINISH_ERROR)
