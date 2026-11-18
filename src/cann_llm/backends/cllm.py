@@ -144,6 +144,28 @@ def special_stop_ids(meta: "dict", generation_config: "Optional[dict]" = None) -
     return out
 
 
+def resolve_meta_paths(meta: "dict", model_dir: str) -> "dict":
+    """把 meta 里的**相对路径补成绝对**（返回新 dict，不改动传入对象）。
+
+    ★为什么需要它★：引擎解析 ``weight/meta.json`` 里的相对文件名没问题 ✓，但
+    ``model.json`` 的 ``embedding_config.embedding_weights`` 用相对路径会**静默降级**
+    （日志：``loader.load.embedding: table load failed, degraded to tokenId path``），
+    随后 prefill 才失败 ✗（实测）。
+    所以：磁盘上保持相对路径（可移植 ✓），运行时补成绝对再交给引擎 ✓
+    """
+    import copy
+    out = copy.deepcopy(meta or {})
+    ec = out.get("embedding_config") or {}
+    w = ec.get("embedding_weights")
+    if isinstance(w, str) and w and not os.path.isabs(w):
+        ec["embedding_weights"] = os.path.abspath(os.path.join(model_dir, w))
+    tc = out.get("tokenizer_config") or {}
+    f = tc.get("tokenizer_file")
+    if isinstance(f, str) and f and not os.path.isabs(f):
+        tc["tokenizer_file"] = os.path.abspath(os.path.join(model_dir, f))
+    return out
+
+
 def check_tokenizer_file(path: "Optional[str]") -> "Optional[str]":
     """检查 tokenizer.json 是否真的可加载；返回错误描述或 None（可加载）。
 
@@ -479,12 +501,19 @@ class CllmBackend(EngineBackend):
         self._bytes: Dict[str, bytes] = {
             k: os.fsencode(v) for k, v in art.items()
         }
+        # ★相对路径补绝对后走 buffer 传给引擎★（磁盘上保持相对 ⇒ 目录可随意迁移 ✓）
+        meta_raw = _read_json(art["meta_json"])
+        meta_fixed = resolve_meta_paths(meta_raw, self.model_dir)
+        meta_bytes = json.dumps(meta_fixed, ensure_ascii=False).encode("utf-8")
+        self._meta_buf = ctypes.create_string_buffer(meta_bytes, len(meta_bytes))
         artifact = _ModelArtifact(
             prefill_omc_path=self._bytes["prefill_omc"], prefill_omc_buf=_Buffer(),
             decode_omc_path=self._bytes["decode_omc"], decode_omc_buf=_Buffer(),
             prefill_weight=self._bytes["prefill_weight"],
             decode_weight=self._bytes["decode_weight"],
-            meta_json_path=self._bytes["meta_json"], meta_json_buf=_Buffer(),
+            meta_json_path=self._bytes["meta_json"],
+            meta_json_buf=_Buffer(ctypes.cast(self._meta_buf, ctypes.c_void_p),
+                                  len(meta_bytes)),
             isEnableSharedWeight=False,
         )
         options = _EngineOptions(

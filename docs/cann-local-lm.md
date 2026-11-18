@@ -386,6 +386,24 @@ python -m cann_local_lm.converter.cann_lm_converter --hf-path <hf>     --output-
 | **W4A8 + lm_head 浮点** | 11 GB | 1.13 tok/s | ✓ |
 | W4A8 + lm_head int8（目标） | ~9 GB | ~1.8–2.2 tok/s（预期） | 预期 ✓ |
 
+## 4.6 模型目录可移植性（对外发布）
+
+模型目录里**不要留绝对路径**（否则换个目录/发出去就跑不起来 ✗）。cann-local-lm 的实际规则：
+
+| 文件 | 相对路径 | 说明 |
+|---|---|---|
+| `prefill/weight/meta.json`、`decode/weight/meta.json` 的 `hash_to_weight_file` | ✅ 支持 | 引擎按 **meta 所在目录**解析（实测只写 `delegate_graph_weight_combined` 即可） |
+| `model.json` 的 `embedding_config.embedding_weights` | ⚠️ 引擎**不解析相对路径**（会静默降级到 tokenId 路径，随后 prefill 失败 ✗） | cann-llm 后端在 `load()` 里用 `resolve_meta_paths()` 补成绝对（经 `meta_json_buf` 传入）✓ |
+| `testcase.json` | ✅ 支持 | cllm 后端按模型目录展开 |
+
+一条命令把已导出的目录改成可移植：
+
+```bash
+python3 scripts/make_model_portable.py <模型目录> [<模型目录> ...]   # 加 --check 只检查
+```
+
+改完可以直接 `mv`/打包/改名 —— 实测改名后 `load + 生成` 正常 ✓。
+
 ## 5. ④ 用 cann-llm 跑
 
 ```bash

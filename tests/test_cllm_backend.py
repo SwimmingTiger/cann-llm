@@ -197,6 +197,31 @@ class TestChatTemplateDetect(unittest.TestCase):
         self.assertEqual(_chat_template({"model_type": "gemma4"}, None), "gemma")
 
 
+class TestResolveMetaPaths(unittest.TestCase):
+    """磁盘上保持相对路径（可移植），运行时补成绝对再交给引擎 ✓"""
+
+    def test_relative_becomes_absolute(self):
+        from cann_llm.backends.cllm import resolve_meta_paths
+        meta = {"embedding_config": {"embedding_weights": "embedding_weights.bin"},
+                "tokenizer_config": {"tokenizer_file": "tokenizer.json"}}
+        out = resolve_meta_paths(meta, "/m/x")
+        self.assertEqual(out["embedding_config"]["embedding_weights"],
+                         "/m/x/embedding_weights.bin")
+        self.assertEqual(out["tokenizer_config"]["tokenizer_file"], "/m/x/tokenizer.json")
+        # 不改动输入（深拷贝）
+        self.assertEqual(meta["embedding_config"]["embedding_weights"], "embedding_weights.bin")
+
+    def test_absolute_untouched(self):
+        from cann_llm.backends.cllm import resolve_meta_paths
+        meta = {"embedding_config": {"embedding_weights": "/abs/e.bin"}}
+        self.assertEqual(resolve_meta_paths(meta, "/m/x")["embedding_config"]["embedding_weights"],
+                         "/abs/e.bin")
+
+    def test_missing_fields(self):
+        from cann_llm.backends.cllm import resolve_meta_paths
+        self.assertEqual(resolve_meta_paths({}, "/m"), {})
+
+
 class TestTokenizerSelfCheck(unittest.TestCase):
     """tokenizer.json 自己查，不靠"猜"（用户明确要求：不准的错误提示更糟 ✗）。"""
 
