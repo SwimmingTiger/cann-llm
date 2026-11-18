@@ -9313,3 +9313,27 @@ NEEDED，而进程启动后再改 LD_LIBRARY_PATH 是无效的 ✗。
 结论：int8 lm_head 不是 converter 改几行能解决的，需要扩展编译期 op_pass（int8 ND→FRACTAL_Z）
   或等 CANN 侧提供 mobile QuantBatchMatmulV4 的 s8s8 支持路径。
   当前交付保持 C2（lm_head 浮点，11 GB，1.13 tok/s，质量正常 ✓）。
+
+### 167.14 两个"看似量化、其实是模板/停止符"的真 bug
+
+```
+背景：量化模型输出乱码/emoji/回显 prompt，我一度归因于 quantization ✗。
+查证后发现两个更基础的问题：
+
+① <turn|>(106) 是【回合结束】标记（开始是 <|turn>(105)），且模型自己的
+   generation_config.json 写着 eos_token_id=[1, 106, 50] ⇒ 把 106 当停止符
+   完全符合规范 ✓，不是为量化打的补丁。
+   我最初的实现却把【所有】special_tokens 都当停止符（把 <|turn> 开始标记也带上 ✗）；
+   已改为：模型自报 eos 列表（generation_config，存在才读）∪ meta 里仅以 "|>" 结尾的
+   结束型标记；<|turn>/<bos>/<pad>/<unk> 一律不当停止符。
+
+② 我们的 gemma 模板写的是 gemma3 的 <start_of_turn>/<end_of_turn>，而 gemma4 词表
+   根本没这两个字符串（BPE 拆成 31 个碎片！）⇒ 提示词就是错的 ✗。
+   gemma4 规范格式：<|turn>user\n…<turn|>\n<|turn>model\n（14 token）。
+   改模板后：杂散 ">"、"_response>"、回显 prompt 全部消失，1+1 也答对了 ✓
+
+修正后实测（同一条 prompt 集，gemma4 模板）：
+  fp16 ctx2048（23GB/0.6 tok/s）          3/3 正确 ✓
+  全 W4A8（8.2GB/3.4 tok/s）              2/3 ✓（"介绍自己"仍 emoji 刷屏 ✗）
+  W4A8 + lm_head 浮点（11GB/1.2 tok/s）   3/3 正确 ✓  ← 当前交付
+⇒ lm_head W4 确实有损（只剩它一个差异时仍能复现 "emoji 刷屏"），与模板问题独立。
