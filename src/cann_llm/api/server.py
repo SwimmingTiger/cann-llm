@@ -157,7 +157,11 @@ class Handler(BaseHTTPRequestHandler):
             self.extra_headers = tuple(extra_headers)
         self._emit_headers()
         self.end_headers()
-        debuglog.log(f"HTTP 响应 {status}", json.dumps(payload, ensure_ascii=False))
+        text = json.dumps(payload, ensure_ascii=False)
+        debuglog.log(f"HTTP 响应 {status}", text)
+        if status >= 400:
+            # ★错误响应必须打到控制台★：否则用户只看到 "400 -"，不知道原因 ✗
+            self.log_message("HTTP %d %s", status, text[:800])
         self.wfile.write(body)
 
     def _send_error_json(self, status: int, message: str,
@@ -576,6 +580,13 @@ class LlmHttpServer(ThreadingHTTPServer):
         self.state = state
         super().__init__(addr, Handler)
 
+    def handle_error(self, request, client_address) -> None:
+        """客户端断连（RST/EOF）是常态，不是异常 —— 不要打整页 traceback ✗。"""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
+
 
 # ------------------------------------------------------------------ 入口
 
@@ -588,7 +599,7 @@ def serve(cfg: AppConfig) -> int:
 
     base = f"http://{shown}:{port}/v1"
     print(f"cann-llm {version.__version__}  ·  {cfg.model.resolved_id}  "
-          f"({cfg.model.backend}/{cfg.model.chat_template})")
+          f"({cfg.model.backend}/{state.template.name}, ctx={state.context_length})")
     print(f"  监听      : http://{shown}:{port}")
     print(f"  base_url  : {base}      ← OpenAI 客户端的 base_url 填这个")
     print(f"  端点      : GET {base}/models · POST {base}/chat/completions"
