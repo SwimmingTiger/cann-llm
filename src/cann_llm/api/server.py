@@ -443,14 +443,21 @@ class Handler(BaseHTTPRequestHandler):
                         req_id=req_id, model=model, created=created,
                         delta={"content": body})))
 
-            for chunk in st.backend.generate(GenerationRequest(prompt=prompt, params=params)):
-                if chunk.text:
-                    _emit(think.feed(chunk.text))
-                if chunk.stats is not None:
-                    stats = chunk.stats
-                if chunk.finish_reason:
-                    finish_reason = chunk.finish_reason
+            gen = st.backend.generate(GenerationRequest(prompt=prompt, params=params))
+            try:
+                for chunk in gen:
 
+                    if chunk.text:
+                        _emit(think.feed(chunk.text))
+                    if chunk.stats is not None:
+                        stats = chunk.stats
+                    if chunk.finish_reason:
+                        finish_reason = chunk.finish_reason
+
+            finally:
+                # ★客户端断连必须同步关掉生成器★：让后端的取消/排空逻辑跑完，
+                #   否则引擎回调会进已释放的 Python 对象（实测段错误 ✗）
+                gen.close()
             _emit(think.flush())   # 缓冲里可能压着半个标记/未闭合思考段
             if flt is not None:
                 parsed = parse_tool_calls("".join(raw_parts))

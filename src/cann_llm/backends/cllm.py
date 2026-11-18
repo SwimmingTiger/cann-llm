@@ -383,6 +383,9 @@ class CllmBackend(EngineBackend):
         self._info = ModelInfo(id="unknown", backend=self.name)
         self._stop_ids: "List[int]" = []
         self._lock = threading.Lock()
+        #: ★引擎同一时刻只接受一个在飞请求★（第二个会 INVALID_STATE）。
+        #: 客户端断连后的"遗留请求"由后台线程继续抽干；这期间新请求必须排队 ✓
+        self._gen_lock = threading.Lock()
         self._closed = False
 
     # ---- 生命周期
@@ -472,6 +475,15 @@ class CllmBackend(EngineBackend):
         return self._info
 
     def close(self) -> None:
+        # ★先等在飞的（含被移交给后台抽干的）请求结束★：ContextDestroy 有在飞请求
+        #   会 INVALID_STATE，且销毁期间引擎还在回调就是段错误 ✗
+        self._gen_lock.acquire()
+        try:
+            self._close_locked()
+        finally:
+            self._gen_lock.release()
+
+    def _close_locked(self) -> None:
         with self._lock:
             lib = self._lib
             if lib is not None:
@@ -497,6 +509,8 @@ class CllmBackend(EngineBackend):
         if self._closed:
             raise GenerationError("cllm 后端已 close()")
 
+        self._gen_lock.acquire()
+        handoff = False
         params = request.params
         sampling = _SamplingParams(
             temperature=float(params.temperature),
@@ -542,6 +556,7 @@ class CllmBackend(EngineBackend):
         index = 0
         buf = ""
         stopped = False
+        done = False          # 引擎侧是否已正常完成（决定 finally 要不要取消）
         try:
             while True:
                 drained = False
@@ -595,17 +610,70 @@ class CllmBackend(EngineBackend):
                     total_ms=wall * 1000.0,
                     wall_s=wall,
                 )
+                done = True                  # RequestWait 已完成 ⇒ 引擎无在飞请求
                 yield GenerationChunk(text=tail, index=index, finish_reason=finish, stats=stats)
             finally:
                 lib.CANN_LMEngine_ResultDestroy(ctypes.byref(result))
         finally:
-            lib.CANN_LMEngine_RequestDestroy(req)
-            if not self._closed and self._executor and self._ctx:
-                # 失败时引擎可能有在飞请求 ⇒ 先取消再销毁（否则 ContextDestroy 报 INVALID_STATE）
+            if done:
+                lib.CANN_LMEngine_RequestDestroy(req)
+            else:
+                # ★提前退出（客户端断连/异常）★：不能直接 Cancel/Destroy ✗ ——
+                #   RequestCancel 在这个异步实现上会段错误（实测）；
+                #   直接 Destroy 则引擎回调打进已释放闭包 → 段错误 ✗；
+                #   不销毁就走下一个请求 ⇒ GenerateAsync INVALID_STATE ✗。
+                #   唯一安全做法：移交后台线程继续抽干到自然结束，期间持有
+                #   _gen_lock 让新请求排队（引擎只支持单在飞请求 ✓）
+                handoff = True
+                threading.Thread(target=self._abort_request_bg,
+                                 args=(req, chunks, cb), daemon=True).start()
+            if not handoff:
+                self._gen_lock.release()
+
+    def _abort_request_bg(self, req, chunks, keepalive) -> None:
+        """把"客户端已断连"的请求继续抽干到自然结束，再销毁（释放串行锁）。
+
+        实测（KirinX90 上的 libcann_lm_engine.so）：
+          · ``RequestCancel`` ⇒ 段错误 ✗
+          · 直接 ``RequestDestroy`` ⇒ 引擎回调进已释放闭包 ⇒ 段错误 ✗
+          · 不销毁就走下一个请求 ⇒ ``GenerateAsync INVALID_STATE`` ✗
+        所以只能"等它自己跑完"：引擎同一时刻只接受一个在飞请求 ✓
+        """
+        # 引擎回调指针就是它，整个后台期间必须持有强引用（否则段错误 ✗）
+        self._abort_keepalive = keepalive
+        lib = self._lib.lib if self._lib else None
+        if lib is None:
+            self._gen_lock.release()
+            return
+        try:
+            deadline = time.monotonic() + 900.0      # 抽干上限（由 max_tokens 决定）
+            while time.monotonic() < deadline:
                 try:
-                    lib.CANN_LMEngine_ContextCancel(self._executor, self._ctx)
+                    if lib.CANN_LMEngine_RequestIsDone(req):
+                        break
                 except Exception:          # noqa: BLE001
-                    pass
+                    break
+                while True:                # 回调还在往队列里塞 ⇒ 持续排空
+                    try:
+                        chunks.get_nowait()
+                    except queue.Empty:
+                        break
+                    except Exception:      # noqa: BLE001
+                        break
+                time.sleep(0.01)
+            try:                           # 先取走 Result 再销毁（与正常路径一致）
+                res = _Result()
+                if lib.CANN_LMEngine_RequestWait(req, ctypes.byref(res)) == 0:
+                    lib.CANN_LMEngine_ResultDestroy(ctypes.byref(res))
+            except Exception:              # noqa: BLE001
+                pass
+            try:
+                lib.CANN_LMEngine_RequestDestroy(req)
+            except Exception:              # noqa: BLE001
+                pass
+        finally:
+            self._abort_keepalive = None
+            self._gen_lock.release()
 
     # ---- 可选能力
 

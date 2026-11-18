@@ -9357,3 +9357,26 @@ NEEDED，而进程启动后再改 LD_LIBRARY_PATH 是无效的 ✗。
 
 实测：HTTP + tools → 返回 OpenAI 标准 tool_calls（finish_reason=tool_calls）✓
       回填 role=tool 后继续生成 → "北京现在天气晴朗，气温是15摄氏度。" ✓
+
+### 167.16 客户端断连会让引擎崩：单在飞请求 + cancel 不可用
+
+```
+现象：流式请求中途断连（Ctrl-C / head -c）后：
+  · 该请求报 GenerateAsync INVALID_STATE / INVALID_ARGUMENT
+  · 严重时进程 Fatal Python error: Segmentation fault ✗
+    崩点在后台排空线程的 sleep 处（异步崩）⇒ 引擎线程回调进了已释放的 Python 闭包。
+
+实测这个 libcann_lm_engine.so（KirinX90）三条路都不通：
+  · RequestCancel       ⇒ 段错误 ✗
+  · 直接 RequestDestroy ⇒ 回调进已释放闭包 ⇒ 段错误 ✗
+  · 不销毁就发新请求     ⇒ GenerateAsync INVALID_STATE ✗（引擎只接受单个在飞请求）
+
+最终做法（backend）：
+  1) generate() 拿 _gen_lock 串行化（引擎单在飞请求）；
+  2) 早退时把请求"移交"后台线程：继续抽干回调直到 RequestIsDone → RequestWait →
+     ResultDestroy → RequestDestroy，最后才释放锁；期间强引用回调对象
+     （self._abort_keepalive）防 GC ✗崩溃；
+  3) close() 也先拿 _gen_lock，避免 ContextDestroy 撞上在飞请求；
+  4) server 的流式循环 try/finally 里显式 gen.close()，让上述清理同步发生。
+效果：断连后服务不崩；下一条请求排队等遗留请求自然跑完（实测 19s）后再成功 ✓
+代价：断连请求会继续解码到 max_tokens（引擎没有可用的取消接口）；客户端应设合理上限。
