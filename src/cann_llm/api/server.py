@@ -70,6 +70,8 @@ class AppState:
     cfg: AppConfig
     backend: EngineBackend
     template: Any
+    #: 生效的上下文上限（配置没填时用后端自报的 kv_cache_max_len）
+    context_length: int = 0
     started_at: float = field(default_factory=time.time)
 
     def base_params(self) -> GenerationParams:
@@ -94,7 +96,11 @@ def build_state(cfg: AppConfig) -> AppState:
     if mc.backend == "cann":
         kw["lib_path"] = os.environ.get("CANN_LLM_LIB", version.CANN_NDK_LIB)
     inner = create_backend(mc.backend, **kw)
-    inner.load()
+    info = inner.load()
+    # ★配置没填就用后端自报的 kv_cache_max_len★：否则 _check_prompt_fits 会因
+    #   limit=0 直接跳过，超长 prompt 仍落到引擎的 INVALID_ARGUMENT（实测踩过 ✗）。
+    #   ModelSettings 是 frozen ⇒ 不能回写配置，放 AppState 里 ✓
+    context_length = int(mc.context_length or getattr(info, "context_length", 0) or 0)
     # ★ 采样默认值：模型自带的 api_config.json 是权威来源，用户没显式指定的项跟随它
     inner.default_params = GenerationParams(
         max_tokens=mc.max_tokens,
@@ -104,7 +110,8 @@ def build_state(cfg: AppConfig) -> AppState:
                                 timeout_s=cfg.server.queue_timeout_s)
     # 与 CLI 一致：模板跟随后端自报（显式配置过就尊重配置）
     tname = pick_template_name(mc.chat_template, inner.info.chat_template)
-    return AppState(cfg=cfg, backend=backend, template=get_template(tname))
+    return AppState(cfg=cfg, backend=backend, template=get_template(tname),
+                    context_length=context_length)
 
 
 # ------------------------------------------------------------------ 处理器
@@ -364,7 +371,7 @@ class Handler(BaseHTTPRequestHandler):
         完全看不出是上下文不够（实测：DSH 的 agent system prompt 11.6 KB + 104 个
         工具声明 ⇒ 远超 kv=2048）。
         """
-        limit = int(getattr(state.cfg.model, "context_length", 0) or 0)
+        limit = int(getattr(state, "context_length", 0) or 0)
         if limit <= 0:
             return
         # 中英混排 ≈ 2.5 字符/token（偏保守）；只用来"提前发现明显超长"
