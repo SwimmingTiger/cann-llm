@@ -465,7 +465,7 @@ class CllmBackend(EngineBackend):
             path=self.model_dir,
             context_length=self.context_length or kv_max,
             max_tokens=kv_max,
-            chat_template=_chat_template(mc),
+            chat_template=_chat_template(mc, self.model_dir),
             vocab_size=vocab,
             extra={"engine_lib": lib.path, "tokenizer_type": tok_type},
         )
@@ -680,8 +680,22 @@ def _default_tokenizer_type(model_dir: str) -> str:
     return "BPE"
 
 
-def _chat_template(model_config: dict) -> str:
+def _chat_template(model_config: dict, model_dir: "Optional[str]" = None) -> str:
+    """推断对话模板：优先 meta 的 model_type，其次看 tokenizer 里的 gemma 标记。
+
+    gemma4 的 tokenizer 里有 ``<|turn>``/``<turn|>``（gemma3 是 ``<start_of_turn>``）；
+    只看 meta 会漏判（我们的 model.json 没有 model_type 字段 ✗ ⇒ 被套上 ChatML）。
+    """
     kind = str(model_config.get("model_type") or "").lower()
     if kind.startswith("gemma"):
         return "gemma"
+    if model_dir:
+        try:
+            tok = _read_json(os.path.join(model_dir, "tokenizer.json"))
+        except (OSError, ValueError):
+            tok = {}
+        names = " ".join(str(t.get("content", "")) for t in (tok.get("added_tokens") or ()))
+        names += " " + " ".join((tok.get("model") or {}).get("vocab") or {})
+        if "<|turn>" in names or "<start_of_turn>" in names or "<turn|>" in names:
+            return "gemma"
     return "chatml"

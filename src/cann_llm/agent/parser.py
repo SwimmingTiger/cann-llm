@@ -140,6 +140,89 @@ def _to_tool_call(obj: Any, raw: str) -> Optional[ToolCall]:
                     id=call_id or "", raw=raw.strip())
 
 
+#: gemma4 的调用块：``<|tool_call>call:name{…}<tool_call|>``（闭标签可能被截断）
+_GEMMA4_CALL_RE = re.compile(
+    r"<\|tool_call>\s*call:([A-Za-z0-9_.\-]+)\s*(\{.*?\})\s*(?:<tool_call\|>|$)", re.DOTALL)
+
+_STR_OPEN = '<|"|>'
+
+
+def _g4_skip(s: str, i: int) -> int:
+    while i < len(s) and s[i] in " \t\r\n":
+        i += 1
+    return i
+
+
+def _g4_value(s: str, i: int) -> Tuple[Any, int]:
+    """解析 gemma4 结构化字面量：``<|"|>str<|"|>`` / 数字 / true|false / {…} / […] / 裸词。"""
+    i = _g4_skip(s, i)
+    if s.startswith(_STR_OPEN, i):
+        j = s.index(_STR_OPEN, i + len(_STR_OPEN))
+        return s[i + len(_STR_OPEN):j], j + len(_STR_OPEN)
+    if i < len(s) and s[i] == "{":
+        return _g4_object(s, i)
+    if i < len(s) and s[i] == "[":
+        out: List[Any] = []
+        i = _g4_skip(s, i + 1)
+        while i < len(s) and s[i] != "]":
+            v, i = _g4_value(s, i)
+            out.append(v)
+            i = _g4_skip(s, i)
+            if i < len(s) and s[i] == ",":
+                i += 1
+        return out, i + 1
+    j = i
+    while j < len(s) and s[j] not in ",}]":
+        j += 1
+    tok = s[i:j].strip()
+    if tok in ("true", "false"):
+        return tok == "true", j
+    try:
+        return int(tok), j
+    except ValueError:
+        pass
+    try:
+        return float(tok), j
+    except ValueError:
+        return tok, j
+
+
+def _g4_object(s: str, i: int) -> Tuple[Dict[str, Any], int]:
+    out: Dict[str, Any] = {}
+    i = _g4_skip(s, i + 1)
+    while i < len(s) and s[i] != "}":
+        j = s.index(":", i)
+        key = s[i:j].strip()
+        val, i = _g4_value(s, j + 1)
+        out[key] = val
+        i = _g4_skip(s, i)
+        if i < len(s) and s[i] == ",":
+            i += 1
+    return out, i + 1
+
+
+def _parse_gemma4_calls(text: str) -> ParsedOutput:
+    """只解析 gemma4 的 ``<|tool_call>`` 块（不做裸 JSON 猜测 ✗）。"""
+    calls: List[ToolCall] = []
+    consumed: List[Tuple[int, int]] = []
+    had_invalid = False
+    for idx, m in enumerate(_GEMMA4_CALL_RE.finditer(text)):
+        name, body = m.group(1), m.group(2)
+        consumed.append((m.start(), m.end()))
+        try:
+            args, _ = _g4_object(body, 0)
+        except (ValueError, IndexError):
+            had_invalid = True
+            calls.append(ToolCall(name=name, arguments={"__unparsable__": body},
+                                  id=f"call_{idx}", raw=m.group(0)))
+            continue
+        calls.append(ToolCall(name=name, arguments=args, id=f"call_{idx}", raw=m.group(0)))
+    remaining = text
+    for start, end in sorted(consumed, key=lambda x: -x[0]):
+        remaining = remaining[:start] + remaining[end:]
+    return ParsedOutput(text=remaining.strip(), tool_calls=calls, had_invalid=had_invalid)
+
+
 def parse_tool_calls(text: str) -> ParsedOutput:
     """解析模型输出，只认 ``<tool_call>…</tool_call>`` 标签里的内容。
 
@@ -160,6 +243,9 @@ def parse_tool_calls(text: str) -> ParsedOutput:
     """
     if not text:
         return ParsedOutput()
+    # gemma4 的调用块格式完全不同（call:name{…}），先走专用解析 ✓
+    if "<|tool_call>" in text:
+        return _parse_gemma4_calls(text)
 
     calls: List[ToolCall] = []
     consumed: List[Tuple[int, int]] = []

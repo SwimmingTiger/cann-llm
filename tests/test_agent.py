@@ -58,6 +58,24 @@ def final_of(events):
     return next(e for e in events if isinstance(e, Final))
 
 
+class TestGemma4ToolCalls(unittest.TestCase):
+    """gemma4 的 <|tool_call>call:name{…}<tool_call|> 解析 ✓"""
+
+    def test_parse_call(self):
+        from cann_llm.agent.parser import parse_tool_calls
+        out = parse_tool_calls('<|tool_call>call:get_weather{location:<|"|>北京<|"|>}<tool_call|>')
+        self.assertEqual(len(out.tool_calls), 1)
+        self.assertEqual(out.tool_calls[0].name, "get_weather")
+        self.assertEqual(out.tool_calls[0].arguments, {"location": "北京"})
+        self.assertEqual(out.text, "")
+
+    def test_parse_nested_and_unterminated(self):
+        from cann_llm.agent.parser import parse_tool_calls
+        out = parse_tool_calls('思考中<|tool_call>call:f{a:1,b:[2,3],c:{d:true}}')
+        self.assertEqual(out.tool_calls[0].arguments, {"a": 1, "b": [2, 3], "c": {"d": True}})
+        self.assertEqual(out.text, "思考中")
+
+
 class TestParser(unittest.TestCase):
     def test_standard(self):
         r = parse_tool_calls(CALL)

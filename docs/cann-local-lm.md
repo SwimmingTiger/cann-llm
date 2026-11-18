@@ -428,6 +428,35 @@ python -m cann_llm.launcher chat -d <model> -b cllm
 * **prompt_tokens 未知**：引擎 C API 只回传生成侧的 token 数，所以 `[in 0 tok]`；
   `tok/s` 用总耗时折算（`decode_ms` 由 wall time 填）。
 
+## 5.5 工具调用（function calling）—— gemma4 原生支持 ✓
+
+之前报 400「gemma 模板不支持工具声明」是**错的**：gemma4 有完整的 function calling
+协议（6 个专用 token），已实现：
+
+```
+<|tool>declaration:name{description:<|"|>…<|"|>,parameters:{…}}<tool|>   ← 工具声明（进 system 回合）
+<|tool_call>call:name{arg:<|"|>值<|"|>}<tool_call|>                      ← 模型请求调用
+<|tool_response>response:name{…}<tool_response|>                          ← 结果回填
+```
+
+要点：
+- 字符串一律用 ``<|"|>`` 定界（官方规定的结构化字面量）
+- ``<|tool_response>``(50) 与 ``<|turn|>``(106) 都在 ``generation_config.eos_token_id`` 里
+  ⇒ 引擎会在工具请求后自然停住（正是握手需要的行为）✓
+- 模板按 tokenizer 自动识别（``<|turn>``/``<turn|>`` ⇒ gemma），不再被套成 ChatML ✗
+
+实测（gemma-4-E2B-it-ctx2048，HTTP `/v1/chat/completions` + tools）：
+
+```json
+{"choices":[{"message":{"role":"assistant","content":null,
+  "tool_calls":[{"id":"call_0","type":"function",
+    "function":{"name":"get_weather","arguments":"{\"location\": \"北京\"}"}}]},
+  "finish_reason":"tool_calls"}]}
+```
+
+把结果按 `role=tool` 回填后，模型继续同一回合给出:
+「北京现在天气晴朗，气温是15摄氏度。」✓
+
 ## 6. 排错表（全部是实测撞过的）
 
 | 现象 | 根因 | 修法 |

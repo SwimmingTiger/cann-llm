@@ -9337,3 +9337,23 @@ NEEDED，而进程启动后再改 LD_LIBRARY_PATH 是无效的 ✗。
   全 W4A8（8.2GB/3.4 tok/s）              2/3 ✓（"介绍自己"仍 emoji 刷屏 ✗）
   W4A8 + lm_head 浮点（11GB/1.2 tok/s）   3/3 正确 ✓  ← 当前交付
 ⇒ lm_head W4 确实有损（只剩它一个差异时仍能复现 "emoji 刷屏"），与模板问题独立。
+
+### 167.15 工具调用：gemma4 原生支持（我之前的 400 是错的）
+
+```
+结论先行：gemma4 tokenizer 有 6 个 function calling 专用 token（46-52），
+  官方协议：<|tool>declaration:name{…}<tool|> / <|tool_call>call:name{…}<tool_call|> /
+  <|tool_response>response:name{…}<tool_response|>，字符串用 <|"|> 定界。
+  且 <|tool_response>(50) 与 <turn|>(106) 都在 generation_config.eos_token_id 里
+  ⇒ 工具请求后模型会自然停住（握手语义）✓
+
+改动：
+  · chat/template.py：GemmaTemplate 支持 tools（声明进 system 回合）、assistant 的
+    tool_calls、role=tool 回填；工具握手期间 model 回合保持打开（不重复 <|turn>model）
+  · agent/parser.py：新增 gemma4 <|tool_call>call:name{…} 解析（含嵌套/截断）
+  · backends/cllm.py：_chat_template 按 tokenizer 标记识别 gemma（meta 没有 model_type
+    时曾被套成 ChatML ✗ —— 实测服务端横幅是 cllm/chatml，模型看到不认识的标签）
+  · generation_config.eos_token_id 参与停止 id（106/50 都停 ✓）
+
+实测：HTTP + tools → 返回 OpenAI 标准 tool_calls（finish_reason=tool_calls）✓
+      回填 role=tool 后继续生成 → "北京现在天气晴朗，气温是15摄氏度。" ✓

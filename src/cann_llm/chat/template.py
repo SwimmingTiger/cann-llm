@@ -172,6 +172,64 @@ class ChatMLTemplate(ChatTemplate):
         return (TOOL_CALL_OPEN, TOOL_CALL_CLOSE)
 
 
+#: gemma4 结构化数据里的类型名（大写）
+_GEMMA4_TYPE_NAMES = {
+    "string": "STRING", "number": "NUMBER", "integer": "INTEGER",
+    "boolean": "BOOLEAN", "array": "ARRAY", "object": "OBJECT",
+}
+
+
+def gemma4_quote(text: str) -> str:
+    """gemma4 结构化数据里的字符串定界：``<|"|>…<|"|>``（官方规定）。"""
+    return f'<|"|>{text}<|"|>'
+
+
+def gemma4_value(value: Any) -> str:
+    """把 Python 值渲染成 gemma4 结构化字面量（字符串用 ``<|"|>`` 包）。"""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
+    if isinstance(value, str):
+        return gemma4_quote(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(gemma4_value(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ",".join(f"{k}:{gemma4_value(v)}" for k, v in value.items()) + "}"
+    return gemma4_quote(str(value))
+
+
+def gemma4_tool_declaration(tool: Dict[str, Any]) -> str:
+    """OpenAI 工具声明 → gemma4 ``<|tool>declaration:…<tool|>``。"""
+    fn = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+    name = str(fn.get("name") or "")
+    desc = str(fn.get("description") or "")
+    params = fn.get("parameters") or {}
+    props = params.get("properties") or {}
+    required = params.get("required") or []
+    inner: List[str] = []
+    for pname, psch in props.items():
+        psch = psch or {}
+        ptype = _GEMMA4_TYPE_NAMES.get(str(psch.get("type", "string")).lower(), "STRING")
+        pdesc = str(psch.get("description") or "")
+        inner.append(f"{pname}:{{description:{gemma4_quote(pdesc)},type:{gemma4_quote(ptype)}}}")
+    if required:
+        inner.append("required:" + gemma4_value([str(r) for r in required]))
+    inner.append(f"type:{gemma4_quote('OBJECT')}")
+    return (f"<|tool>declaration:{name}{{description:{gemma4_quote(desc)},"
+            f"parameters:{{{','.join(inner)}}}}}<tool|>")
+
+
+def gemma4_tool_call_block(call: ToolCall) -> str:
+    """模型请求调用的渲染：``<|tool_call>call:name{…}<tool_call|>``。"""
+    return f"<|tool_call>call:{call.name or ''}{gemma4_value(dict(call.arguments or {}))}<tool_call|>"
+
+
+def gemma4_tool_response_block(name: str, result: Any) -> str:
+    """工具执行结果回填：``<|tool_response>response:name{…}<tool_response|>``。"""
+    return f"<|tool_response>response:{name or ''}{gemma4_value(result)}<tool_response|>"
+
+
 class GemmaTemplate(ChatTemplate):
     """Gemma 系列的对话模板（**gemma4 词表**：``<|turn>`` / ``<turn|>``）。
 
@@ -195,29 +253,74 @@ class GemmaTemplate(ChatTemplate):
     def render(self, messages: Sequence[Message], *,
                add_generation_prompt: bool = True,
                tools: Optional[Sequence[Dict[str, Any]]] = None) -> str:
+        """渲染 gemma4 对话；``tools`` 非空时注入官方 function calling 协议。
+
+        协议（tokenizer.json 里 46/47/48/49/50/51 + 52 作字符串定界）：
+        工具声明进 system 回合：``<|tool>declaration:name{…}<tool|>``；
+        模型调用：``<|tool_call>call:name{…}<tool_call|>``；
+        结果回填：``<|tool_response>response:name{…}<tool_response|>``。
+        工具握手时 model 回合**保持打开**（不再补 ``<|turn>model``）✓。
+        """
+        system_parts: List[str] = []
+        decls = ""
         if tools:
-            raise InvalidRequestError(
-                "gemma 模板不支持工具声明（模型侧没有 function calling 协议）")
+            system_parts = [m.content.strip() for m in messages
+                            if m.role == "system" and (m.content or "").strip()]
+            decls = "".join(gemma4_tool_declaration(t) for t in tools)
         parts: List[str] = []
+        if system_parts or decls:
+            parts.append(f"{self.START}system\n{chr(10).join(system_parts)}{decls}{self.END}\n")
+        emitted_system = bool(system_parts or decls)
+
+        open_model = False          # model 回合是否还没闭合（工具握手期间为 True）
+        pending_names: List[str] = []
         system_prefix = ""
         for m in messages:
             if m.role == "system":
-                if not system_prefix:
-                    system_prefix = m.content.strip()
+                if emitted_system:
+                    continue        # 已并进上面的 system 回合
+                system_prefix = system_prefix or (m.content or "").strip()
+                continue
+            if m.role == "user":
+                if open_model:
+                    parts.append(f"{self.END}\n")
+                    open_model = False
+                content = m.content or ""
+                if system_prefix:
+                    content = f"{system_prefix}\n\n{content}"
+                    system_prefix = ""
+                parts.append(f"{self.START}user\n{content}{self.END}\n")
+                continue
+            if m.role == "assistant":
+                if not open_model:
+                    parts.append(f"{self.START}model\n")
+                    open_model = True
+                parts.append(m.content or "")
+                calls = list(m.tool_calls or ())
+                for tc in calls:
+                    parts.append(gemma4_tool_call_block(tc))
+                if calls:
+                    pending_names = [tc.name or "" for tc in calls]
+                else:
+                    parts.append(f"{self.END}\n")
+                    open_model = False
                 continue
             if m.role == "tool":
-                # 工具结果按"用户补充信息"塞进来（gemma 无 tool 角色）
-                parts.append(f"{self.START}user\n{m.content}{self.END}\n")
+                if not open_model:
+                    parts.append(f"{self.START}model\n")
+                    open_model = True
+                name = m.name or (pending_names.pop(0) if pending_names else "")
+                raw = m.content if isinstance(m.content, str) else json.dumps(m.content, ensure_ascii=False)
+                try:
+                    payload = json.loads(raw)
+                except Exception:      # 非 JSON 就按字符串回填 ✓
+                    payload = raw
+                parts.append(gemma4_tool_response_block(name, payload))
                 continue
-            role = "model" if m.role == "assistant" else "user"
-            content = m.content
-            if role == "user" and system_prefix:
-                content = f"{system_prefix}\n\n{content}"
-                system_prefix = ""
-            parts.append(f"{self.START}{role}\n{content}{self.END}\n")
-        if system_prefix:      # 只有 system、没有 user 的极端情况
+
+        if system_prefix and not emitted_system:
             parts.insert(0, f"{self.START}user\n{system_prefix}{self.END}\n")
-        if add_generation_prompt:
+        if add_generation_prompt and not open_model:
             parts.append(f"{self.START}model\n")
         return "".join(parts)
 

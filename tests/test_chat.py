@@ -47,11 +47,36 @@ class TestTemplate(unittest.TestCase):
             "<|turn>user\nsys\n\n你好<turn|>\n<|turn>model\n")
         self.assertEqual(tuple(t.stop_strings()), ("<turn|>",))
 
-    def test_gemma_template_rejects_tools(self):
-        """gemma 没有 function calling 协议 ⇒ 带 tools 直接拒绝（别静默丢）"""
-        with self.assertRaises(InvalidRequestError):
-            get_template("gemma").render([Message("user", "x")],
-                                         tools=[{"type": "function"}])
+    def test_gemma_template_renders_tools(self):
+        """gemma4 有官方 function calling 协议：工具声明要进 system 回合 ✓"""
+        from cann_llm.chat.template import GemmaTemplate, Message
+        tools = [{"type": "function", "function": {
+            "name": "get_weather", "description": "查天气",
+            "parameters": {"type": "object",
+                           "properties": {"location": {"type": "string", "description": "城市"}},
+                           "required": ["location"]}}}]
+        text = GemmaTemplate().render([Message(role="user", content="北京天气？")], tools=tools)
+        self.assertIn("<|turn>system", text)
+        self.assertIn("<|tool>declaration:get_weather{", text)
+        self.assertIn('<|"|>location<|"|>', text)
+        self.assertIn("}<tool|><turn|>", text)
+        self.assertIn("<|turn>model", text)
+
+    def test_gemma_template_tool_round_trip(self):
+        """assistant 的 tool_calls 与 tool 结果回填都按 gemma4 协议渲染 ✓"""
+        from cann_llm.chat.template import GemmaTemplate, Message
+        from cann_llm.types import ToolCall
+        msgs = [
+            Message(role="user", content="北京天气？"),
+            Message(role="assistant", content="",
+                    tool_calls=[ToolCall(name="get_weather", arguments={"location": "北京"})]),
+            Message(role="tool", content='{"t": 15}', name="get_weather"),
+        ]
+        text = GemmaTemplate().render(msgs, add_generation_prompt=False)
+        self.assertIn('<|tool_call>call:get_weather{location:<|"|>北京<|"|>}<tool_call|>', text)
+        self.assertIn('<|tool_response>response:get_weather{t:15}<tool_response|>', text)
+        # 工具握手期间不重复补 <|turn>model
+        self.assertEqual(text.count("<|turn>model"), 1)
 
     def test_gemma_template_multi_turn(self):
         out = get_template("gemma").render(

@@ -169,6 +169,34 @@ class TestStatusAndHelpers(unittest.TestCase):
         self.assertEqual(_chat_template({"model_type": "qwen3"}), "chatml")
 
 
+class TestChatTemplateDetect(unittest.TestCase):
+    """没有 model_type 字段时，按 tokenizer 标记认出 gemma ✓（否则会套 ChatML ✗）。"""
+
+    def _write(self, tmp, added):
+        import json, os
+        with open(os.path.join(tmp, "tokenizer.json"), "w", encoding="utf-8") as fh:
+            json.dump({"added_tokens": [{"content": t, "id": i} for i, t in enumerate(added)],
+                       "model": {"vocab": {}}}, fh)
+
+    def test_gemma_markers(self):
+        import tempfile
+        from cann_llm.backends.cllm import _chat_template
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, ["<|turn>", "<turn|>"])
+            self.assertEqual(_chat_template({}, d), "gemma")
+
+    def test_plain_is_chatml(self):
+        import tempfile
+        from cann_llm.backends.cllm import _chat_template
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, ["<|im_start|>", "<|im_end|>"])
+            self.assertEqual(_chat_template({}, d), "chatml")
+
+    def test_model_type_wins(self):
+        from cann_llm.backends.cllm import _chat_template
+        self.assertEqual(_chat_template({"model_type": "gemma4"}, None), "gemma")
+
+
 class TestSpecialStopIds(unittest.TestCase):
     """gemma4 的 <turn|>(106) 必须进 stop_token_ids（否则一直重复它 ✗）。"""
 
