@@ -357,6 +357,23 @@ class Handler(BaseHTTPRequestHandler):
         if self.ignored_fields:
             self.log_message("忽略字段: %s", ", ".join(self.ignored_fields))
 
+    def _check_prompt_fits(self, prompt: str, state) -> None:
+        """粗估 prompt token 数，超上下文就**明确报 400**（别让引擎报 INVALID_ARGUMENT ✗）。
+
+        引擎对超长 prompt 只会回 ``GenerateAsync 失败（INVALID_ARGUMENT）``，
+        完全看不出是上下文不够（实测：DSH 的 agent system prompt 11.6 KB + 104 个
+        工具声明 ⇒ 远超 kv=2048）。
+        """
+        limit = int(getattr(state.cfg.model, "context_length", 0) or 0)
+        if limit <= 0:
+            return
+        # 中英混排 ≈ 2.5 字符/token（偏保守）；只用来"提前发现明显超长"
+        est = len(prompt) / 2.5
+        if est > limit * 0.98:
+            raise InvalidRequestError(
+                f"prompt 约 {int(est)} tokens，超出模型上下文上限 {limit}；"
+                "请换更长的上下文导出（kv_cache_max_len），或精简 messages/tools。")
+
     def _handle_chat(self, body: Dict[str, Any]) -> None:
         st = self.state
         req = oa.parse_chat_request(body, default_model=st.cfg.model.resolved_id,
@@ -368,6 +385,7 @@ class Handler(BaseHTTPRequestHandler):
         # 恰好等于 dataclass 默认值时把它替换掉，属于吞掉调用方意图。
         params = req.params
         prompt = st.template.render(req.messages, tools=req.tools or None)
+        self._check_prompt_fits(prompt, st)
 
         if req.stream:
             self._stream_chat(req, prompt, params)
