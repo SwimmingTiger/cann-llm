@@ -9281,3 +9281,27 @@ NEEDED，而进程启动后再改 LD_LIBRARY_PATH 是无效的 ✗。
 混合精度的正确控制点：converter 的跳过规则（swap.py:359 swap_from_dopt）看的是
   dopt SD 里有没有 {name}.weight 与 {name}.quant_op.weight_quantizer.s；
   想保持某模块浮点 ⇒ 把它加进 DEFAULT_SKIP（改 dopt_config 不生效，实测 ✗）。
+
+### 167.13 C1 尝试：lm_head int8（W8A8）—— 导出通过，GE 编译卡在 infershape
+
+```
+动机：C2 的 lm_head 浮点占 800MB/token 带宽（3.53→1.13 tok/s ✗）；lm_head 与
+      embed_tokens tied，用 int8 per-channel 理论上误差极小、权重 400MB。
+
+改动（host 临时实验，已回滚，只留 C2 的 DEFAULT_SKIP）：
+  1) _quant_matmul_converter.py：原来 is_s8s4 = (x1 int8 and x2 int8) 一律当 int4 打包；
+     改成按 K 维判断（x1.K == x2.dim0 ⇒ genuine int8，不 Bitcast）
+  2) QuantLinear：识别 [K,N] int8 + per-channel scale
+  3) swap.py：lm_head 用【原始 fp16 权重】做 max|w|/127 的 per-channel int8
+     （group_size=K 或 0 两种口径都试过）
+
+结果：
+  converter 导出成功（weights_0.bin 1585 MB，介于全 int4 1484 与 lm_head 浮点 1967 之间 ✓）
+  但 cann_lm_compile 两个图都失败：
+    Prepare Graph infershape failed / BuildModel: ...(failed)[Generate][OnlineModel] failed
+  ⇒ 移动端 V4 的 s8s8 x2 还差布局/scale 约定（可能 x2 要 FRACTAL_Z、
+    x2_scale 走 uint64 位型约定、或 V4→V3 fusion 只支持 s8s4）✗ 不是小改。
+
+下一步（若要继续）：拉高 GE 日志级别定位具体 node，或在 CANN 侧确认 mobile
+  QuantBatchMatmulV4 对 x2=DT_INT8 的支持矩阵；也可等上游补 W8A8 路径。
+  当前交付先用 C2（lm_head 浮点，1.13 tok/s，质量正常 ✓）。
