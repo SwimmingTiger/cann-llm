@@ -645,7 +645,7 @@ class CllmBackend(EngineBackend):
             if st != 0:
                 detail = engine_log_tail(lines=4)
                 raise GenerationError(
-                    f"RequestWait 失败（{status_text(st)}）"
+                    f"RequestWait 失败（{status_text(st)}/st={st}）"
                     + (f"\n  引擎日志末尾：\n{detail}" if detail else ""))
             try:
                 n_new = int(result.token_ids_count)
