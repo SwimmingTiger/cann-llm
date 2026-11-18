@@ -355,6 +355,37 @@ PY
 }
 ```
 
+## 4.5 量化（W4A8；可在纯 CPU 上做，不需要 torch_npu）
+
+> **dopt 支持 `DEVICE=cpu|cuda|npu`**（`quant/dopt_lm/opt_funcs/eco_stage/train.py:23`），
+> QUICKSTART 里"GPTQ 需 NPU"的口径偏保守；4.6B 模型 CPU 上 256 样本约 4.8 小时 ✓。
+
+```bash
+# ① 校准 + GPTQ（一个只有 torch+transformers 的 python 即可；config.yaml: ptq_samples=256, cutoff_len=1024）
+DEVICE=cpu python dopt_wrapper.py --model-path <hf> --optimize-config config.yaml     --output-dir ./out --hf-type-save
+# ② converter 消费（不需要 NPU）
+python -m cann_local_lm.converter.cann_lm_converter --hf-path <hf>     --output-dir ./output/quant --target-soc KirinX90 --quant-path ./out
+# ③ 编译：量化图要 op_cpu/op_pass 插件（Kirin 的 set_env.sh 自动设
+#    ASCEND_CUSTOM_OPP_PATH / ASCEND_GE_PY_PASS_PATH）
+```
+
+**三个必须知道的坑**（实测）：
+
+| 坑 | 现象 | 处理 |
+|---|---|---|
+| `lm_head` 被 W4 量化 | 输出乱码 / emoji 刷屏 / 韩文；**只量化 lm_head 就崩** | **`lm_head` 保持浮点**（`swap.py` 的 `DEFAULT_SKIP` 加 `"lm_head"`），质量立恢复 ✓ |
+| `<turn|>`(106) 未当停止符 | 句末无限重复 `<turn|>` | 后端把 `tokenizer_config.special_tokens` 作为 `stop_token_ids` 下发 ✓ |
+| 校准样本太少（如 8 个） | 整段乱码 | **至少 256 样本**；`cutoff_len` 用默认 1024 |
+
+实测（gemma-4-E2B-it，KirinX90，kv=2048 / prefill=64）：
+
+| 变体 | 体积 | decode | 质量 |
+|---|---|---|---|
+| fp16 | 23 GB | 0.48 tok/s | ✓ |
+| W4A8 全量化（256 样本） | 8.2 GB | **3.53 tok/s** | ✗（lm_head 拖累） |
+| **W4A8 + lm_head 浮点** | 11 GB | 1.13 tok/s | ✓ |
+| W4A8 + lm_head int8（目标） | ~9 GB | ~1.8–2.2 tok/s（预期） | 预期 ✓ |
+
 ## 5. ④ 用 cann-llm 跑
 
 ```bash

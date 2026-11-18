@@ -9256,3 +9256,28 @@ NEEDED，而进程启动后再改 LD_LIBRARY_PATH 是无效的 ✗。
 注意：
   · embedding 文件不能用符号链接 —— 引擎 mmap identity 段会失败 ✗（实体拷贝或复用旧目录绝对路径）
   · 新导出的 model.json 里 embedding_config 是上游默认（int8 等）✗，必须按实际文件改成 fp16 全组
+
+### 167.12 量化（W4A8）实测：lm_head 是质量分水岭
+
+```
+背景：想把 decode 从 0.48 tok/s 提上去。dopt 官方口径"需 NPU"，但代码
+      SUPPORTED_DEVICE_TYPES={cpu,cuda,npu}（eco_stage/train.py:23）⇒ 纯 CPU 可跑 ✓
+      （4.6B，256 样本 × cutoff 1024，CPU 约 4.8 小时）。
+
+实测（KirinX90，kv=2048/prefill=64）：
+  fp16                      23 GB  0.48 tok/s  ✓
+  W4A8 全量化(256 样本)      8.2 GB 3.53 tok/s  ✗ 乱码/emoji/韩文
+  W4A8 + lm_head 浮点       11 GB  1.13 tok/s  ✓ 质量恢复
+  ⇒ 罪魁：lm_head（262144×1536≈4亿参数，W4 对输出分布太敏感；而且它 tied 到
+    embed_tokens，本该与量化 embedding 同源，却单独走了 W4 MatMul）。
+    fp16 lm_head 每 token 读 800MB ⇒ 3.53 掉到 1.13（带宽受限 ✗）。
+  下一步：lm_head int8 per-channel（swap.py 已有 materialize_int8_per_channel_symmetric，
+    目前只用于 embedding），预期 ~1.8–2.2 tok/s 且质量≈浮点。
+
+另外两条量化必备修正：
+  1) <turn|>(106) 必须进 stop_token_ids（否则句末无限重复；commit b0d86b2）
+  2) 8 样本校准完全不够 ⇒ 256 样本起步；cutoff_len 默认 1024
+
+混合精度的正确控制点：converter 的跳过规则（swap.py:359 swap_from_dopt）看的是
+  dopt SD 里有没有 {name}.weight 与 {name}.quant_op.weight_quantizer.s；
+  想保持某模块浮点 ⇒ 把它加进 DEFAULT_SKIP（改 dopt_config 不生效，实测 ✗）。
