@@ -9302,6 +9302,14 @@ NEEDED，而进程启动后再改 LD_LIBRARY_PATH 是无效的 ✗。
   ⇒ 移动端 V4 的 s8s8 x2 还差布局/scale 约定（可能 x2 要 FRACTAL_Z、
     x2_scale 走 uint64 位型约定、或 V4→V3 fusion 只支持 s8s4）✗ 不是小改。
 
-下一步（若要继续）：拉高 GE 日志级别定位具体 node，或在 CANN 侧确认 mobile
-  QuantBatchMatmulV4 对 x2=DT_INT8 的支持矩阵；也可等上游补 W8A8 路径。
-  当前交付先用 C2（lm_head 浮点，1.13 tok/s，质量正常 ✓）。
+后续进展（C1b/C3 两轮）：用 ASCEND_GLOBAL_LOG_LEVEL=0 抓到根因 ——
+  [InferShapeFracZ] QuantBatchMatmulV4_276 FRACTAL_Z infershape K mismatch:
+    x1 K=1536, x2 K=3072 (dim0=262144 * 64)
+  ⇒ 移动端 GE 把 x2 按 FRACTAL_Z 解析（x2 需 4D 分形布局），而 int4 路径是靠
+    input_layout_info=[0,1] 声明 ND + 编译期 op_pass/op_cpu 插件把 ND→FRACTAL_Z 转过去；
+    该插件只处理 int4。给 int8 也声明 ND 后，失败前移到 Optimize Graph（说明缺 int8 的
+    布局转换/融合支持），两种 x2 方向（[K,N] 与 [N,K]+transpose）都试过 ✗。
+
+结论：int8 lm_head 不是 converter 改几行能解决的，需要扩展编译期 op_pass（int8 ND→FRACTAL_Z）
+  或等 CANN 侧提供 mobile QuantBatchMatmulV4 的 s8s8 支持路径。
+  当前交付保持 C2（lm_head 浮点，11 GB，1.13 tok/s，质量正常 ✓）。

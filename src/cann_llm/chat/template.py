@@ -173,17 +173,24 @@ class ChatMLTemplate(ChatTemplate):
 
 
 class GemmaTemplate(ChatTemplate):
-    """Gemma 系列的对话模板。
+    """Gemma 系列的对话模板（**gemma4 词表**：``<|turn>`` / ``<turn|>``）。
 
-    Gemma **没有 system 角色**：官方模板会忽略 system；这里按社区通行做法把
-    system 内容**前置到第一条 user** 前面 ✓（不丢信息，也不引入模型不认的标签）。
-    结尾 ``<start_of_turn>model\n`` 是「轮到模型说话」的引导段。
+    ⚠ gemma4 的 tokenizer 里**没有** ``<start_of_turn>`` / ``<end_of_turn>`` 这两个
+    字符串（那是 gemma3 的标记）—— 写成 gemma3 形式会被 BPE 拆成十几段普通文本
+    （实测 31 token → 14 token），模型行为随之变差 ✗。
+    gemma4 的规范格式（tokenizer.json 里 105/106，且 generation_config 的
+    ``eos_token_id=[1,106,50]`` 把 ``<turn|>`` 也算 EOS ✓）：
+
+        <|turn>user\n{用户内容}<turn|>\n<|turn>model\n
+
+    Gemma **没有 system 角色**：system 内容前置到第一条 user 前面 ✓（不丢信息，
+    也不引入模型不认的标签）。结尾 ``<|turn>model\n`` 是「轮到模型说话」的引导段。
     """
 
     name = "gemma"
 
-    START = "<start_of_turn>"
-    END = "<end_of_turn>"
+    START = "<|turn>"
+    END = "<turn|>"
 
     def render(self, messages: Sequence[Message], *,
                add_generation_prompt: bool = True,

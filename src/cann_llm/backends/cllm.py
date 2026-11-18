@@ -100,18 +100,41 @@ _TESTCASE_KEYS = {
 }
 
 
-def special_stop_ids(meta: "dict") -> "List[int]":
-    """从 meta 的 ``tokenizer_config.special_tokens`` 取「应当停止」的 token id。
+def _as_id_list(value) -> "List[int]":
+    """``eos_token_id`` 可能是 int 或 list；统一成 int 列表。"""
+    if isinstance(value, (list, tuple)):
+        out = []
+        for v in value:
+            try:
+                out.append(int(v))
+            except (TypeError, ValueError):
+                continue
+        return out
+    try:
+        return [int(value)]
+    except (TypeError, ValueError):
+        return []
 
-    gemma4 会在句末吐 ``<turn|>``(106)（多轮结束符）；不把它当停止符，模型会一直
-    重复这个 token ✗（实测 256 样本量化模型刷了半屏 ``<turn|>``）。
-    引擎的停止集合 = ``eos_token_id``（meta 自带）+ 这里给的 id ✓。
+
+def special_stop_ids(meta: "dict", generation_config: "Optional[dict]" = None) -> "List[int]":
+    """该模型的「结束」token id：**模型自报的 eos 列表** + meta 的结束型特殊 token。
+
+    ★为什么不是"所有 special_tokens"★：gemma4 词表里既有开始标记 ``<|turn>``(105)
+    也有结束标记 ``<turn|>``(106)；把开始标记也当停止符会提前截断 ✗。
+    正确来源是模型自己的 ``generation_config.eos_token_id = [1, 106, 50]``
+    （``<turn|>`` 本身就是 EOS ✓），meta 里的 ``special_tokens`` 只作补充，
+    且只取"以 ``|>`` 结尾"的结束型标记。
     """
+    out: "List[int]" = []
+    for i in _as_id_list((generation_config or {}).get("eos_token_id")):
+        if i not in out:
+            out.append(i)
     tc = (meta or {}).get("tokenizer_config") or {}
     special = tc.get("special_tokens") or {}
-    out: "List[int]" = []
     if isinstance(special, dict):
-        for v in special.values():
+        for name, v in special.items():
+            if not (isinstance(name, str) and name.endswith("|>")):
+                continue          # <|turn> / <pad> / <bos> 等一律不当停止符 ✗
             try:
                 i = int(v)
             except (TypeError, ValueError):
@@ -383,7 +406,14 @@ class CllmBackend(EngineBackend):
         lib = self._lib
 
         meta = _read_json(art["meta_json"])
-        self._stop_ids = special_stop_ids(meta)
+        gen_cfg = None
+        gen_path = os.path.join(self.model_dir, "generation_config.json")
+        if os.path.isfile(gen_path):
+            try:
+                gen_cfg = _read_json(gen_path)
+            except (OSError, ValueError):
+                gen_cfg = None
+        self._stop_ids = special_stop_ids(meta, gen_cfg)
         mc = meta.get("model_config") or {}
         kv_max = int(mc.get("kv_cache_max_len") or 0)
         vocab = int(mc.get("vocab_size") or 0)

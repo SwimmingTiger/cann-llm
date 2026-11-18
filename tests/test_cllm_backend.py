@@ -172,10 +172,13 @@ class TestStatusAndHelpers(unittest.TestCase):
 class TestSpecialStopIds(unittest.TestCase):
     """gemma4 的 <turn|>(106) 必须进 stop_token_ids（否则一直重复它 ✗）。"""
 
-    def test_parse_special_tokens(self):
+    def test_parse_eos_list_and_end_markers(self):
+        """停止 id：模型自报 eos 列表 + 结束型 special token；**开始标记不算** ✓"""
         from cann_llm.backends.cllm import special_stop_ids
-        meta = {"tokenizer_config": {"special_tokens": {"<turn|>": 106, "x": "7"}}}
-        self.assertEqual(special_stop_ids(meta), [106, 7])
+        meta = {"tokenizer_config": {"special_tokens": {"<turn|>": 106, "<|turn>": 105}}}
+        self.assertEqual(special_stop_ids(meta, {"eos_token_id": [1, 106, 50]}), [1, 106, 50])
+        self.assertEqual(special_stop_ids(meta), [106])          # <|turn> 不参与
+        self.assertEqual(special_stop_ids({}, {"eos_token_id": 1}), [1])
 
     def test_missing_or_bad(self):
         from cann_llm.backends.cllm import special_stop_ids
