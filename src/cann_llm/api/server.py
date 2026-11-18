@@ -97,9 +97,9 @@ def build_state(cfg: AppConfig) -> AppState:
         kw["lib_path"] = os.environ.get("CANN_LLM_LIB", version.CANN_NDK_LIB)
     inner = create_backend(mc.backend, **kw)
     info = inner.load()
-    # ★配置没填就用后端自报的 kv_cache_max_len★：否则 _check_prompt_fits 会因
-    #   limit=0 直接跳过，超长 prompt 仍落到引擎的 INVALID_ARGUMENT（实测踩过 ✗）。
-    #   ModelSettings 是 frozen ⇒ 不能回写配置，放 AppState 里 ✓
+    # 配置没填时用后端自报的 kv_cache_max_len（供 /v1/models 与错误提示展示；
+    # 不用于拒绝请求 —— 是否超长由引擎自己判断 ✓）。
+    # ModelSettings 是 frozen ⇒ 不回写配置，放 AppState 里 ✓
     context_length = int(mc.context_length or getattr(info, "context_length", 0) or 0)
     # ★ 采样默认值：模型自带的 api_config.json 是权威来源，用户没显式指定的项跟随它
     inner.default_params = GenerationParams(
@@ -368,23 +368,6 @@ class Handler(BaseHTTPRequestHandler):
         if self.ignored_fields:
             self.log_message("忽略字段: %s", ", ".join(self.ignored_fields))
 
-    def _check_prompt_fits(self, prompt: str, state) -> None:
-        """粗估 prompt token 数，超上下文就**明确报 400**（别让引擎报 INVALID_ARGUMENT ✗）。
-
-        引擎对超长 prompt 只会回 ``GenerateAsync 失败（INVALID_ARGUMENT）``，
-        完全看不出是上下文不够（实测：DSH 的 agent system prompt 11.6 KB + 104 个
-        工具声明 ⇒ 远超 kv=2048）。
-        """
-        limit = int(getattr(state, "context_length", 0) or 0)
-        if limit <= 0:
-            return
-        # 中英混排 ≈ 2.5 字符/token（偏保守）；只用来"提前发现明显超长"
-        est = len(prompt) / 2.5
-        if est > limit * 0.98:
-            raise InvalidRequestError(
-                f"prompt 约 {int(est)} tokens，超出模型上下文上限 {limit}；"
-                "请换更长的上下文导出（kv_cache_max_len），或精简 messages/tools。")
-
     def _handle_chat(self, body: Dict[str, Any]) -> None:
         st = self.state
         req = oa.parse_chat_request(body, default_model=st.cfg.model.resolved_id,
@@ -396,7 +379,9 @@ class Handler(BaseHTTPRequestHandler):
         # 恰好等于 dataclass 默认值时把它替换掉，属于吞掉调用方意图。
         params = req.params
         prompt = st.template.render(req.messages, tools=req.tools or None)
-        self._check_prompt_fits(prompt, st)
+        # ★不做"粗估 token 数就拒绝"★：字符/token 比例随语言/JSON/工具声明剧烈变化，
+        #   实测 Qwen 的估算把 2.9 万"估 token"强加给 4096 窗口的模型 ⋯ 直接 400 ✗，
+        #   而模型/引擎本来能跑。是否超长让引擎自己判断（它的报错文本才准确 ✓）
 
         if req.stream:
             self._stream_chat(req, prompt, params)
